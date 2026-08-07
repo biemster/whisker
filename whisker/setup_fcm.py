@@ -1,22 +1,3 @@
-#!/usr/bin/env python3
-"""
-Whisker FCM Credentials Setup Tool (Firebase HTTP v1 API)
-==============================================================================
-This Python script automates the complete setup of Google Cloud project, IAM, 
-Firebase provisioning, and Service Account generation using Google OAuth2 and 
-direct Google REST APIs.
-
-No external CLI tools ('gcloud' or 'firebase') are required!
-
-PREREQUISITES:
-  - Python 3.7+
-  - 'requests' package: pip install requests
-
-USAGE:
-  python3 fcm_setup.py
-==============================================================================
-"""
-
 import requests
 import time
 import base64
@@ -26,17 +7,11 @@ import webbrowser
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ==============================================================================
-# Configuration
-# ==============================================================================
 PROJECT_NAME = "Whisker FCM"
 SA_NAME = "whisker-push"
 
-# Official Google Cloud SDK Public Client & Secret
 CLIENT_ID = "32555940559.apps.googleusercontent.com"
 CLIENT_SECRET = "ZmssLNjJy2998hD4CTg2ejr2"
-
-# Removed the invalid firebase scope
 SCOPE = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email"
 PORT = 8085
 REDIRECT_URI = f"http://localhost:{PORT}"
@@ -44,21 +19,17 @@ REDIRECT_URI = f"http://localhost:{PORT}"
 auth_code = None
 
 def print_deep_error(res):
-    """Extracts and pretty-prints deep Google RPC error details if they exist."""
     try:
         err_json = res.json()
         print(json.dumps(err_json, indent=2))
     except Exception:
         print(res.text)
 
-# ==============================================================================
-# Step 1: Lightweight Local OAuth Listener
-# ==============================================================================
 class OAuthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         global auth_code
         query = urllib.parse.urlparse(self.path).query
-        params = urllib.parse.parseqs(query) if hasattr(urllib.parse, "parseqs") else urllib.parse.parse_qs(query)
+        params = urllib.parse.parse_qs(query)
         
         if "code" in params:
             auth_code = params["code"][0]
@@ -71,7 +42,7 @@ class OAuthHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, format, *args):
-        pass # Silence HTTP server logs
+        pass
 
 def get_cli_access_token():
     print("--- Step 1: Authentication ---")
@@ -111,10 +82,8 @@ def get_cli_access_token():
     return token_res["access_token"]
 
 def request_with_retry(method, url, max_retries=7, delay=8, retry_404=True, **kwargs):
-    """Retries HTTP requests if GCP returns 403/404/400/429 due to asynchronous API propagation delays."""
     for attempt in range(max_retries):
         res = requests.request(method, url, **kwargs)
-        
         text_lower = res.text.lower()
         
         is_403_retry = res.status_code == 403 and any(msg in text_lower for msg in [
@@ -140,9 +109,6 @@ def request_with_retry(method, url, max_retries=7, delay=8, retry_404=True, **kw
         return res
     return res
 
-# ==============================================================================
-# Master Provisioning Flow
-# ==============================================================================
 def main():
     token = get_cli_access_token()
     headers = {
@@ -282,7 +248,6 @@ def main():
     bindings = policy.get("bindings", [])
     sa_member = f"serviceAccount:{SA_EMAIL}"
     
-    # Nuclear Fallback: We grant Editor along with the FCM Admin roles to guarantee beyond a shadow of a doubt it has permissions.
     roles_to_grant = [
         "roles/firebasecloudmessaging.admin", 
         "roles/firebase.admin",
@@ -306,7 +271,6 @@ def main():
         return
     
     print("Waiting 45 seconds for Google's global IAM servers to propagate the permissions...")
-    print("(If you test sending a push message before this finishes, you will get a 403 Permission Denied!)")
     for i in range(45, 0, -5):
         print(f"  ... {i}s remaining")
         time.sleep(5)
@@ -360,7 +324,6 @@ def main():
     except Exception as e:
         print("Warning during Firebase Android app provisioning:", e)
 
-    # Fallbacks for API Key...
     if not api_key:
         try:
             keys_res = request_with_retry("GET", f"https://apikeys.googleapis.com/v2/projects/{PROJECT_ID}/locations/global/keys", headers=headers)
@@ -411,7 +374,6 @@ def main():
         if project_number: print(f"Project Number (Sender ID): {project_number}")
         if api_key: print(f"Firebase API Key: {api_key[:6]}...{api_key[-4:] if len(api_key)>10 else ''}")
         if app_id: print(f"Firebase App ID: {app_id}")
-            
     else:
         print("\n* Failed to generate key:", key_data)
 

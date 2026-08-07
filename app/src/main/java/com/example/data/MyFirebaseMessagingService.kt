@@ -61,7 +61,11 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 // Always contact home server to fetch actual events
                 networkManager.fetchPendingEventsFromServerSuspended(fallbackTickle = dataPayload)
             } catch (e: Exception) {
-                Log.e("FCMService", "Error pulling tasks from Home Server after push", e)
+                if (e is java.io.IOException) {
+                    Log.w("FCMService", "Home Server unreachable after push: ${e.message}")
+                } else {
+                    Log.e("FCMService", "Error pulling tasks from Home Server after push", e)
+                }
             } finally {
                 try {
                     if (wakeLock.isHeld) {

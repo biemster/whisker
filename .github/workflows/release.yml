@@ -41,13 +41,13 @@ jobs:
         run: |
           mkdir -p release-artifacts
           if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            cp app/build/outputs/apk/release/app-release.apk release-artifacts/whisker-gateway-release.apk
-          elif [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
-            cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/whisker-gateway-debug.apk
+            cp app/build/outputs/apk/release/app-release.apk release-artifacts/whisker-release.apk
           fi
-          cp companion-server.js release-artifacts/
-          cp fcm_setup.py release-artifacts/
-          cp whisker.py release-artifacts/
+          if [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
+            cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/whisker-debug.apk
+          fi
+          cp -r whisker release-artifacts/
+          cp pyproject.toml setup.py release-artifacts/
           cp README.md release-artifacts/
 
       - name: Create GitHub Release

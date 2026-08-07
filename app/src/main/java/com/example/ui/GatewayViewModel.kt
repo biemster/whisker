@@ -199,6 +199,12 @@ class GatewayViewModel(
         networkManager.registerFcmToken(forceRefresh = true)
     }
 
+    fun refreshConnectionAndEvents() {
+        viewModelScope.launch {
+            networkManager.fetchPendingEventsFromServerSuspended()
+        }
+    }
+
     fun saveFcmConfig(senderId: String, projectId: String, appId: String, apiKey: String) {
         networkManager.saveFcmConfig(senderId, projectId, appId, apiKey)
     }

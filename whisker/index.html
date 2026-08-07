@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Get In Touch</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #0b0f19;
+            color: #f3f4f6;
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        .glow-cyan {
+            box-shadow: 0 0 15px rgba(6, 182, 212, 0.4);
+        }
+        .glow-ring {
+            animation: pulse-glow 2s infinite;
+        }
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 10px rgba(6, 182, 212, 0.2); }
+            50% { box-shadow: 0 0 25px rgba(6, 182, 212, 0.6); }
+        }
+    </style>
+    <script>
+        window.HOME_SERVER_URL = "";
+    </script>
+</head>
+<body class="flex flex-col min-h-screen p-4 md:p-8">
+
+    <header class="max-w-4xl mx-auto w-full mb-6 flex justify-between items-center bg-gray-900 border border-gray-800 p-4 rounded-2xl">
+        <div class="flex items-center space-x-3">
+            <div class="w-10 h-10 rounded-xl bg-cyan-500 flex items-center justify-center font-bold text-black text-xl">
+                🐱
+            </div>
+            <div>
+                <h1 class="text-lg font-bold text-white leading-none">Whisker</h1>
+            </div>
+        </div>
+        <div id="connectionStatus" class="flex items-center space-x-2 bg-gray-800 px-3 py-1.5 rounded-full text-xs">
+            <span class="w-2.5 h-2.5 rounded-full bg-yellow-500" id="statusDot"></span>
+            <span id="statusText" class="text-gray-300">Checking connection</span>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-center">
+
+        <!-- STEP 1: CHOOSE NAME & REASON FLUID WINDOW -->
+        <div id="unprovisionedView" class="hidden bg-gray-900 border border-gray-800 p-6 md:p-8 rounded-3xl glow-cyan max-w-md mx-auto w-full transition duration-300">
+            <h2 class="text-2xl font-black text-cyan-400 mb-2">Get in Touch</h2>
+            <p class="text-sm text-gray-400 mb-4 leading-relaxed">
+                Please introduce yourself to start a voice call or send direct text messages.
+            </p>
+            <div class="mb-6 p-3 rounded-xl bg-gray-950 border border-gray-850 text-xs text-gray-400 space-y-1">
+                <p>💡 <span class="font-bold text-gray-300">Direct Connection Active:</span> Your messages and calls connect directly to the phone via low-latency secure event streams, keeping your history stored safely on your private server.</p>
+            </div>
+
+            <form id="requestForm" class="space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Your Name</label>
+                    <input type="text" id="clientNameInput" required placeholder="e.g. Liam" 
+                           class="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:ring-1 focus:ring-cyan-500 focus:border-cyan-500">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Reason for Contact</label>
+                    <textarea id="clientIntentInput" required rows="3" placeholder="e.g. Liam calling regarding our meeting." 
+                               class="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:ring-1 focus:ring-cyan-500 focus:border-cyan-500"></textarea>
+                </div>
+                <button type="submit" 
+                        class="w-full bg-cyan-500 hover:bg-cyan-400 text-black font-bold py-3 px-6 rounded-xl transition duration-200 shadow-lg shadow-cyan-500/20 active:scale-95">
+                    Connect Now
+                </button>
+            </form>
+        </div>
+
+        <!-- STEP 2: PENDING APPROVAL -->
+        <div id="pendingView" class="hidden bg-gray-900 border border-gray-800 p-8 rounded-3xl glow-ring max-w-md mx-auto w-full text-center space-y-6">
+            <div class="w-16 h-16 rounded-full bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center mx-auto animate-pulse">
+                <span class="text-2xl">⏳</span>
+            </div>
+            <div>
+                <h2 class="text-xl font-bold text-white mb-2">Connecting to Phone</h2>
+                <p class="text-sm text-gray-400">Request submitted. Awaiting approval on host app.</p>
+            </div>
+            <div class="p-3 bg-gray-950 border border-gray-850 rounded-xl font-mono text-xs text-gray-500 select-all" id="uuidDisplay">
+                Guest ID: Pending
+            </div>
+        </div>
+
+        <!-- STEP 3: PROVISIONED DASHBOARD -->
+        <div id="provisionedView" class="hidden grid grid-cols-1 md:grid-cols-3 gap-6">
+            
+            <!-- LEFT PANEL: MEDIA CONTROL & E2E STATUS -->
+            <div class="space-y-6">
+                <!-- E2E REACHABILITY DISPLAY -->
+                <div id="e2eStatusCard" class="bg-gray-900 border border-gray-800 p-5 rounded-3xl space-y-3">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-bold text-gray-400 uppercase tracking-wider">End-to-End Link</span>
+                        <span id="e2eBadge" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">Checking...</span>
+                    </div>
+                    <div class="space-y-1.5 text-xs text-gray-300">
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Direct Socket Stream:</span>
+                            <span id="e2eDirectStatus" class="font-mono text-gray-400">Inactive</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Push Notifications:</span>
+                            <span id="e2ePushStatus" class="font-mono text-gray-400">Checking...</span>
+                        </div>
+                    </div>
+                    <p id="e2eDetailText" class="text-[11px] text-gray-400 border-t border-gray-800 pt-2">
+                        Evaluating link parameters...
+                    </p>
+                </div>
+
+                <!-- CALL PANEL -->
+                <div class="bg-gray-900 border border-gray-800 p-6 rounded-3xl space-y-4">
+                    <div class="flex justify-between items-center">
+                        <h3 class="font-bold text-white">Direct Audio/Video</h3>
+                        <span id="approvedName" class="text-xs bg-cyan-950 text-cyan-400 border border-cyan-800 px-2 py-0.5 rounded-full font-mono">Guest</span>
+                    </div>
+
+                    <!-- VIDEO CONTAINER STUB -->
+                    <div class="relative bg-gray-950 border border-gray-850 rounded-2xl h-44 overflow-hidden flex items-center justify-center">
+                        <video id="localVideo" autoplay muted class="w-full h-full object-cover hidden"></video>
+                        <div id="videoPlaceholder" class="text-center space-y-2">
+                            <span class="text-3xl">🎙️</span>
+                            <p class="text-xs text-gray-400">Ready to initiate call</p>
+                        </div>
+                        <video id="remoteMini" autoplay class="absolute bottom-2 right-2 w-20 h-16 bg-black rounded-lg border border-cyan-500 hidden object-cover"></video>
+                    </div>
+
+                    <!-- CONTROLS -->
+                    <div class="grid grid-cols-3 gap-2">
+                        <button id="audioCallBtn" onclick="toggleCall(false)" 
+                                class="bg-gray-800 hover:bg-gray-700 text-cyan-400 p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700">
+                            <span>📞</span>
+                            <span>Audio Call</span>
+                        </button>
+                        <button id="videoCallBtn" onclick="toggleCall(true)" 
+                                class="bg-gray-800 hover:bg-gray-700 text-cyan-400 p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700">
+                            <span>📹</span>
+                            <span>Video Call</span>
+                        </button>
+                        <button id="hangUpBtn" onclick="hangUpCall()" disabled 
+                                class="bg-red-950 hover:bg-red-900 text-red-400 p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-red-800 opacity-50 cursor-not-allowed">
+                            <span>🛑</span>
+                            <span>End Call</span>
+                        </button>
+                    </div>
+                    <div id="callDuration" class="text-center font-mono text-xs text-cyan-400">
+                        CALL IDLE
+                    </div>
+                </div>
+
+                <!-- SESSION DISCONNECT -->
+                <button onclick="resetCredentials()" class="w-full text-xs text-gray-400 hover:text-red-400 py-2 transition text-center">
+                    Disconnect Session & Clear Storage
+                </button>
+            </div>
+
+            <!-- RIGHT PANEL: CHAT & ATTACHMENTS -->
+            <div class="md:col-span-2 bg-gray-900 border border-gray-800 rounded-3xl flex flex-col h-[520px]">
+                
+                <!-- CHAT HEADER -->
+                <div class="p-4 border-b border-gray-800 flex justify-between items-center">
+                    <h3 class="font-bold text-white text-sm">Realtime Thread</h3>
+                    <div class="flex items-center space-x-2">
+                        <button onclick="clearChatHistory()" class="text-xs text-gray-400 hover:text-gray-200 transition">Clear Local Chat</button>
+                    </div>
+                </div>
+
+                <!-- CHAT MESSAGES LOG -->
+                <div id="chatBox" class="flex-1 p-4 overflow-y-auto space-y-3 flex flex-col">
+                    <div class="text-center my-auto space-y-2">
+                        <span class="text-2xl">💬</span>
+                        <p class="text-xs text-gray-400">No messages yet. Send a message to get started!</p>
+                    </div>
+                </div>
+
+                <!-- CHAT INPUT & ATTACHMENTS FORM -->
+                <div class="p-3 border-t border-gray-800 bg-gray-950/50 rounded-b-3xl space-y-2">
+                    <div id="fileUploadProgress" class="hidden text-xs text-cyan-400 flex items-center justify-between px-2">
+                        <span>Uploading attachment: <b id="fileNameDisplay"></b></span>
+                        <span class="animate-pulse">Processing...</span>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <label class="cursor-pointer bg-gray-800 hover:bg-gray-700 text-gray-300 p-2.5 rounded-xl border border-gray-700 transition" title="Attach file">
+                            <span>📎</span>
+                            <input type="file" id="fileInput" class="hidden" onchange="sendFile(event)">
+                        </label>
+                        <input type="text" id="chatInput" placeholder="Type a message..." 
+                               onkeydown="if(event.key==='Enter') submitMessage()"
+                               class="flex-1 bg-gray-900 border border-gray-800 rounded-xl px-4 py-2.5 text-white text-sm focus:outline-none focus:border-cyan-500">
+                        <button onclick="submitMessage()" class="bg-cyan-500 hover:bg-cyan-400 text-black font-bold p-2.5 rounded-xl transition">
+                            <span>➔</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <footer class="max-w-4xl mx-auto w-full mt-6 text-center text-xs text-gray-400">
+        Whisker Home Server Client • Direct Connection
+    </footer>
+
+    <script>
+        const HOME_SERVER_URL = window.HOME_SERVER_URL || '';
+        let clientUuid = localStorage.getItem('dc_uuid') || '';
+        let clientName = localStorage.getItem('dc_name') || '';
+        let clientToken = localStorage.getItem('dc_token') || '';
+        let chatLogs = JSON.parse(localStorage.getItem('dc_chat_history') || '[]');
+        let isCallActive = false;
+        let callTimer = null;
+        let callSeconds = 0;
+        let sseConnection = null;
+        let e2eStatusInterval = null;
+
+        if (window.WHISKER_INVITE_CODE && !clientToken) {
+            console.log("Auto-claiming invite code:", window.WHISKER_INVITE_CODE);
+            fetch(HOME_SERVER_URL + "/api/claim_invite", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: window.WHISKER_INVITE_CODE })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success && data.uuid && data.token) {
+                    clientUuid = data.uuid;
+                    clientToken = data.token;
+                    clientName = data.name || "Invited Guest";
+                    localStorage.setItem('dc_uuid', clientUuid);
+                    localStorage.setItem('dc_token', clientToken);
+                    localStorage.setItem('dc_name', clientName);
+                    initSession();
+                }
+            })
+            .catch(err => console.error("Error auto-claiming invite:", err));
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            initSession();
+        });
+
+        function startE2eStatusPolling() {
+            checkE2eStatus();
+            if (e2eStatusInterval) clearInterval(e2eStatusInterval);
+            e2eStatusInterval = setInterval(checkE2eStatus, 10000);
+        }
+
+        function checkE2eStatus() {
+            fetch(HOME_SERVER_URL + "/api/info")
+                .then(res => res.json())
+                .then(data => {
+                    const badge = document.getElementById('e2eBadge');
+                    const directStatus = document.getElementById('e2eDirectStatus');
+                    const pushStatus = document.getElementById('e2ePushStatus');
+                    const detail = document.getElementById('e2eDetailText');
+
+                    if (!data) return;
+
+                    directStatus.innerText = data.host_connected ? "Active" : "Inactive";
+                    directStatus.className = "font-mono " + (data.host_connected ? "text-green-400 font-bold" : "text-gray-400");
+
+                    pushStatus.innerText = data.push_configured ? "Configured" : "Not Set";
+                    pushStatus.className = "font-mono " + (data.push_configured ? "text-green-400 font-bold" : "text-yellow-400");
+
+                    if (data.host_reachable) {
+                        badge.innerText = "Reachable";
+                        badge.className = "px-2 py-0.5 rounded-full text-[10px] font-bold bg-green-500/10 text-green-400 border border-green-500/20";
+                        if (data.host_connected) {
+                            detail.innerText = "Mobile App is connected via direct streaming channel.";
+                        } else {
+                            detail.innerText = "Mobile App is sleeping. Push notification tickles will wake it up instantly.";
+                        }
+                    } else {
+                        badge.innerText = "Unreachable";
+                        badge.className = "px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/10 text-red-400 border border-red-500/20";
+                        detail.innerText = "Mobile app is offline and FCM push is not configured on Home Server.";
+                    }
+                })
+                .catch(err => {
+                    console.error("Error checking E2E status:", err);
+                });
+        }
+
+        function initSession() {
+            if (clientToken) {
+                document.getElementById('statusDot').className = "w-2.5 h-2.5 rounded-full bg-green-500";
+                document.getElementById('statusText').innerText = "Connected";
+                showView('provisionedView');
+                document.getElementById('approvedName').innerText = clientName;
+                
+                fetchHistoryFromServer();
+                startClientSse();
+                startE2eStatusPolling();
+            } else if (clientUuid) {
+                document.getElementById('statusDot').className = "w-2.5 h-2.5 rounded-full bg-yellow-500";
+                document.getElementById('statusText').innerText = "Awaiting response";
+                document.getElementById('uuidDisplay').innerText = "Guest ID: " + clientUuid;
+                showView('pendingView');
+                startClientSse();
+            } else {
+                if (e2eStatusInterval) {
+                    clearInterval(e2eStatusInterval);
+                    e2eStatusInterval = null;
+                }
+                document.getElementById('statusDot').className = "w-2.5 h-2.5 rounded-full bg-red-500";
+                document.getElementById('statusText').innerText = "Currently Offline";
+                showView('unprovisionedView');
+                if (sseConnection) {
+                    sseConnection.close();
+                    sseConnection = null;
+                }
+            }
+        }
+
+        function showView(viewId) {
+            document.getElementById('unprovisionedView').classList.add('hidden');
+            document.getElementById('pendingView').classList.add('hidden');
+            document.getElementById('provisionedView').classList.add('hidden');
+            document.getElementById(viewId).classList.remove('hidden');
+        }
+
+        function fetchHistoryFromServer() {
+            if (!clientUuid || !clientToken) return;
+            const historyUrl = HOME_SERVER_URL + "/api/messages?uuid=" + clientUuid + "&token=" + clientToken;
+            fetch(historyUrl)
+                .then(res => {
+                    if (!res.ok) throw new Error("Unauthorized message history call");
+                    return res.json();
+                })
+                .then(history => {
+                    chatLogs = history.map(item => ({
+                        id: item.id || item.created_at || Date.now(),
+                        text: item.text,
+                        timestamp: item.created_at,
+                        isIncoming: item.sender === 'phone',
+                        filePath: item.file_path || null
+                    }));
+                    localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                    renderChat();
+                })
+                .catch(err => {
+                    console.error("Error loading chat history:", err);
+                    renderChat();
+                });
+        }
+
+        function startClientSse() {
+            if (!clientUuid) return;
+            if (sseConnection) return;
+
+            const sseUrl = HOME_SERVER_URL + "/api/events?uuid=" + clientUuid + "&token=" + (clientToken || '');
+            console.log("Subscribing to response stream:", sseUrl);
+            sseConnection = new EventSource(sseUrl);
+            
+            sseConnection.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleIncomingPayload(data);
+                } catch (e) {
+                    console.error("Error parsing SSE incoming message:", e);
+                }
+            };
+
+            sseConnection.onerror = (e) => {
+                console.error("SSE connection closed or lost. Stream automatically reconnects.");
+            };
+        }
+
+        function handleIncomingPayload(payload) {
+            console.log("Received payload:", payload);
+            if (payload.type === "registration_response" || payload.event === "approved") {
+                const token = payload.token;
+                if (token) {
+                    clientToken = token;
+                    localStorage.setItem('dc_token', clientToken);
+                    initSession();
+                }
+            } else if (payload.type === "chat_message" || payload.event === "message") {
+                if (payload.sender === "phone") {
+                    const newMsg = {
+                        id: payload.timestamp || Date.now(),
+                        text: payload.text,
+                        timestamp: payload.timestamp || Date.now(),
+                        isIncoming: true,
+                        filePath: payload.filePath || null
+                    };
+                    chatLogs.push(newMsg);
+                    localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                    renderChat();
+                }
+            } else if (payload.type === "webrtc_call_initiate") {
+                document.getElementById('callDuration').innerText = "INCOMING CALL...";
+                isCallActive = true;
+                document.getElementById('audioCallBtn').disabled = true;
+                document.getElementById('videoCallBtn').disabled = true;
+                document.getElementById('hangUpBtn').disabled = false;
+                
+                setTimeout(() => {
+                    document.getElementById('callDuration').innerText = "CALL ACTIVE";
+                    startCallTimer();
+                }, 1500);
+            } else if (payload.type === "webrtc_call_answer" || payload.event === "call_answered") {
+                document.getElementById('callDuration').innerText = "CALL ACTIVE";
+                isCallActive = true;
+                if (window.pc && payload.sdp) {
+                    window.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }))
+                        .catch(err => console.error("Error setting remote answer SDP", err));
+                }
+            } else if (payload.type === "webrtc_call_hangup" || payload.event === "call_ended") {
+                hangUpCall(true);
+            }
+        }
+
+        const requestForm = document.getElementById('requestForm');
+        requestForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const name = document.getElementById('clientNameInput').value.trim();
+            const intent = document.getElementById('clientIntentInput').value.trim();
+            if (!name || !intent) return;
+
+            clientUuid = 'cli_' + Math.random().toString(36).substr(2, 9);
+            clientName = name;
+            localStorage.setItem('dc_uuid', clientUuid);
+            localStorage.setItem('dc_name', clientName);
+
+            console.log("Posting registration request...", {clientUuid, clientName, intent});
+            
+            const payload = {
+                event: "visitor",
+                uuid: clientUuid,
+                name: clientName,
+                reason: intent
+            };
+
+            fetch(HOME_SERVER_URL + "/api/register", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(() => {
+                console.log("Registration request launched.");
+                initSession();
+            }).catch(err => {
+                console.error("Error submitting registration", err);
+                initSession();
+            });
+        });
+
+        function renderChat() {
+            const chatBox = document.getElementById('chatBox');
+            const banner = chatBox.firstElementChild;
+            chatBox.innerHTML = '';
+            if (banner) chatBox.appendChild(banner);
+
+            chatLogs.forEach(msg => {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'flex flex-col max-w-[80%] ' + (msg.isIncoming ? 'self-start' : 'self-end');
+                
+                const timeStr = new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                
+                let textBody = '';
+                if (msg.filePath) {
+                    textBody = '<div class="bg-cyan-950 border border-cyan-800 p-2.5 rounded-xl flex items-center space-x-2 text-cyan-300">' +
+                                   '<span class="text-lg">📎</span>' +
+                                   '<div>' +
+                                       '<p class="font-bold underline cursor-pointer hover:text-white" onclick="downloadAttachment(' + JSON.stringify(msg.text) + ', ' + JSON.stringify(msg.filePath) + ')">' + msg.text + '</p>' +
+                                   '</div>' +
+                               '</div>';
+                } else {
+                    textBody = '<div class="p-2.5 rounded-xl ' + (msg.isIncoming ? 'bg-gray-900 text-gray-200 border border-gray-800' : 'bg-cyan-500 text-black font-medium') + '">' +
+                                   msg.text +
+                               '</div>';
+                }
+
+                messageDiv.innerHTML = 
+                    '<span class="text-[9px] text-gray-500 mb-0.5 px-1 ' + (msg.isIncoming ? 'text-left' : 'text-right') + '">' + (msg.isIncoming ? 'Phone' : 'You') + ' • ' + timeStr + '</span>' +
+                    textBody;
+                chatBox.appendChild(messageDiv);
+            });
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        function downloadAttachment(name, path) {
+            const link = document.createElement('a');
+            link.href = path;
+            link.download = name;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        function submitMessage() {
+            const chatInput = document.getElementById('chatInput');
+            const text = chatInput.value.trim();
+            if (!text) return;
+
+            const newMsg = {
+                id: Date.now(),
+                text: text,
+                timestamp: Date.now(),
+                isIncoming: false,
+                filePath: null
+            };
+            chatLogs.push(newMsg);
+            localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+            renderChat();
+            chatInput.value = '';
+
+            console.log("Transmitting message to Home Server...", text);
+
+            const payload = {
+                event: "message",
+                uuid: clientUuid,
+                token: clientToken,
+                name: clientName,
+                text: text,
+                file: null
+            };
+
+            fetch(HOME_SERVER_URL + "/api/message", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(() => {
+                console.log("Message delivered.");
+            }).catch(e => {
+                console.error("Delivery failed", e);
+            });
+        }
+
+        function sendFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const progress = document.getElementById('fileUploadProgress');
+            const fileNameDisplay = document.getElementById('fileNameDisplay');
+            progress.classList.remove('hidden');
+            fileNameDisplay.innerText = file.name;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const base64Data = e.target.result;
+                const fileMsg = {
+                    id: Date.now(),
+                    text: file.name,
+                    timestamp: Date.now(),
+                    isIncoming: false,
+                    filePath: base64Data
+                };
+                
+                chatLogs.push(fileMsg);
+                localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                renderChat();
+
+                const payload = {
+                    event: "message",
+                    uuid: clientUuid,
+                    token: clientToken,
+                    name: clientName,
+                    text: file.name,
+                    file: base64Data
+                };
+
+                fetch(HOME_SERVER_URL + "/api/message", {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                }).then(() => {
+                    progress.classList.add('hidden');
+                    console.log("File uploaded successfully.");
+                }).catch(err => {
+                    progress.classList.add('hidden');
+                    console.error("File upload failed", err);
+                });
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function clearChatHistory() {
+            chatLogs = [];
+            localStorage.setItem('dc_chat_history', '[]');
+            renderChat();
+        }
+
+        async function toggleCall(isVideo) {
+            isCallActive = true;
+            document.getElementById('audioCallBtn').disabled = true;
+            document.getElementById('videoCallBtn').disabled = true;
+            document.getElementById('hangUpBtn').disabled = false;
+            
+            document.getElementById('localVideo').classList.remove('hidden');
+            document.getElementById('videoPlaceholder').classList.add('hidden');
+            document.getElementById('callDuration').innerText = "ROUTING CALL SIGNAL...";
+            
+            let localStream = null;
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true });
+                const localVid = document.getElementById('localVideo');
+                localVid.srcObject = localStream;
+            } catch (err) {
+                console.error("Media devices capture error", err);
+            }
+
+            const pc = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+            window.pc = pc;
+
+            if (localStream) {
+                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+            }
+
+            pc.ontrack = (event) => {
+                const remoteVid = document.getElementById('remoteMini');
+                remoteVid.classList.remove('hidden');
+            };
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            const payload = {
+                event: "call",
+                uuid: clientUuid,
+                token: clientToken,
+                name: clientName,
+                video: isVideo,
+                sdp: offer.sdp
+            };
+
+            fetch(HOME_SERVER_URL + "/api/call", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(() => {
+                console.log("Call handshaking.");
+            }).catch(e => {
+                console.error("Dial signal failure", e);
+            });
+
+            callSeconds = 0;
+            if (callTimer) clearInterval(callTimer);
+            callTimer = setInterval(() => {
+                callSeconds++;
+                const mins = Math.floor(callSeconds / 60).toString().padStart(2, '0');
+                const secs = (callSeconds % 60).toString().padStart(2, '0');
+                document.getElementById('callDuration').innerText = "CALL ALIVE • " + mins + ":" + secs;
+            }, 1000);
+        }
+
+        function hangUpCall(receivedFromPhone = false) {
+            isCallActive = false;
+            if (callTimer) clearInterval(callTimer);
+            document.getElementById('audioCallBtn').disabled = false;
+            document.getElementById('videoCallBtn').disabled = false;
+            document.getElementById('hangUpBtn').disabled = true;
+            
+            document.getElementById('localVideo').classList.add('hidden');
+            const localVid = document.getElementById('localVideo');
+            if (localVid.srcObject) {
+                localVid.srcObject.getTracks().forEach(track => track.stop());
+                localVid.srcObject = null;
+            }
+            if (window.pc) {
+                window.pc.close();
+                window.pc = null;
+            }
+            document.getElementById('videoPlaceholder').classList.remove('hidden');
+            document.getElementById('callDuration').innerText = "CALL ENDED";
+
+            if (!receivedFromPhone) {
+                const payload = {
+                    event: "hangup",
+                    uuid: clientUuid,
+                    token: clientToken
+                };
+                fetch(HOME_SERVER_URL + "/api/hangup", {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                }).catch(e => console.error("Hangup signal error", e));
+            }
+        }
+
+        function resetCredentials() {
+            if (confirm("Disconnect session? History will clean.")) {
+                if (sseConnection) {
+                    sseConnection.close();
+                    sseConnection = null;
+                }
+                localStorage.clear();
+                clientUuid = '';
+                clientName = '';
+                clientToken = '';
+                chatLogs = [];
+                initSession();
+            }
+        }
+    </script>
+</body>
+</html>

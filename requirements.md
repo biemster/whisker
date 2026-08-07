@@ -4,10 +4,9 @@
 
 **Whisker** is a secure, privacy-focused WebRTC communication gateway system supporting peer-to-peer audio/video calls, real-time messaging, guest request approval flows, and local tunnel connectivity.
 
-The system consists of three primary components:
+The system consists of two primary components:
 1. **Android Mobile Gateway App**: Primary host interface, WebRTC signaling endpoint, notification receiver, and call management hub.
-2. **Home Server (`companion-server.js`)**: Standalone Node.js server backed by SQLite (with in-memory fallback) acting as an event queue, FCM push tickle hub, and WebRTC signaling bridge.
-3. **Python CLI (`whisker.py`)**: Lightweight command-line guest client for headless messaging, calling, and real-time event listening.
+2. **Whisker Home Server & CLI (`whisker`)**: Unified PyPI-compatible Python package acting as an event queue, FCM push tickle hub, WebRTC signaling bridge, and scriptable CLI client engine.
 
 ---
 
@@ -42,10 +41,10 @@ The system consists of three primary components:
 
 ---
 
-## 3. Whisker Home Server (`companion-server.js`) Requirements
+## 3. Whisker Home Server (`whisker server`) Requirements
 
 ### 3.1 Architecture & Storage
-- **Runtime**: Node.js standalone HTTP server with minimal dependencies.
+- **Runtime**: Python 3.7+ standalone HTTP server with minimum dependencies (`sqlite3`, `requests`).
 - **Data Persistence**:
   - Primary: SQLite database engine (`sqlite3` / `better-sqlite3`).
   - Fallback: Graceful in-memory data store if SQLite native drivers are unavailable.
@@ -81,27 +80,27 @@ The system consists of three primary components:
 
 ---
 
-## 4. Whisker Python CLI (`whisker.py`) Requirements
+## 4. Whisker Python CLI (`whisker`) Requirements
 
 ### 4.1 Local Persistence & Client CLI Engine
 - **Storage**: Manages client configuration in a local SQLite database (`whisker.db`).
 - **Config Keys**: `server_url`, `uuid`, `token`, `name`.
 
 ### 4.2 Commands & Workflows
-1. `whisker.py init <invite_url>`:
+1. `whisker init <invite_url>`:
    - Parses the Home Server URL and single-use invite code from the invite URL.
    - Calls `POST /api/claim_invite` on the Home Server to retrieve client credentials (`uuid`, `token`, `name`).
    - Persists config into `whisker.db`.
-2. `whisker.py send <message>`:
+2. `whisker send <message>`:
    - Validates client initialization.
    - Sends a text message to the host via `POST /api/message`.
-3. `whisker.py call`:
+3. `whisker call`:
    - Validates client initialization.
    - Initiates a WebRTC call offer to the host via `POST /api/call`.
-4. `whisker.py listen`:
+4. `whisker listen`:
    - Connects to the SSE endpoint `GET /api/events?uuid=<uuid>&token=<token>`.
    - Listens continuously for real-time events: `chat_message`, `call_accepted`, `call_rejected`, `webrtc_call_initiate`, `hangup`.
-5. `whisker.py info`:
+5. `whisker info`:
    - Displays local client configuration (`Name`, `UUID`, `Home Server`).
    - Queries `GET /api/info` on the Home Server to check mobile app reachability and push status.
 
@@ -118,5 +117,5 @@ The system consists of three primary components:
    - Guest requests require valid `uuid` and `token` pairs verified against approved database records.
 3. **Pure FCM Push Tickle Architecture & Battery Preservation**:
    - When a guest posts a call, message, or invite claim event, the Home Server enqueues the event and triggers an FCM HTTP v1 "tickle" payload via Google's OAuth2 service account credentials (`whisker-push-sa.json`) to wake up or notify the Whisker Mobile Gateway App.
-   - FCM HTTP v1 authentication uses Google OAuth2 JWT tokens dynamically generated from `whisker-push-sa.json` (created via `python fcm_setup.py`). Legacy FCM server keys are deprecated and removed.
+   - FCM HTTP v1 authentication uses Google OAuth2 JWT tokens dynamically generated from `whisker-push-sa.json` (created via `whisker setup-fcm`). Legacy FCM server keys are deprecated and removed.
    - The Mobile App relies strictly on FCM push notifications to trigger fetching pending events from `/api/host/events` on-demand. Continuous background SSE streams and periodic polling loops are explicitly prohibited to conserve mobile device battery.

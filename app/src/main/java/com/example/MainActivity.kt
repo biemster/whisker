@@ -22,7 +22,7 @@ class MainActivity : ComponentActivity() {
     // Simple Constructor Injection/Initialization as mandated by architecture guidelines
     private val database by lazy { AppDatabase.getDatabase(this) }
     private val repository by lazy { LinkRepository(database) }
-    private val networkManager by lazy { GatewayNetworkManager(this, repository) }
+    private val networkManager by lazy { com.example.data.CompanionRegistry.getOrInitializeManager(this) }
 
     private val viewModel: GatewayViewModel by viewModels {
         GatewayViewModel.Factory(repository, networkManager)

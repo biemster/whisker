@@ -173,7 +173,10 @@ fun GatewayDashboard(
                             modifier = Modifier
                                 .padding(end = 12.dp)
                                 .clip(RoundedCornerShape(100.dp))
-                                .clickable { showDozeInfoDialog = true }
+                                .clickable {
+                                    viewModel.refreshConnectionAndEvents()
+                                    showDozeInfoDialog = true
+                                }
                                 .background(Color(0xFF1F2937).copy(alpha = 0.6f), RoundedCornerShape(100.dp))
                                 .border(1.dp, statusColor.copy(alpha = 0.4f), RoundedCornerShape(100.dp))
                                 .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -775,12 +778,22 @@ fun GatewayDashboard(
                     }
                 },
                 confirmButton = {
-                    Button(
-                        onClick = { showDozeInfoDialog = false },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("OK", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.refreshConnectionAndEvents()
+                            },
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Refresh", color = Color.White, fontSize = 12.sp)
+                        }
+                        Button(
+                            onClick = { showDozeInfoDialog = false },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("OK", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
                     }
                 },
                 containerColor = Color(0xFF151926),

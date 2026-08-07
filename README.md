@@ -17,7 +17,7 @@ Whether you want a hassle-free personal communication system for external visito
 - **AI Harness & Business Automation Ready**: Includes `whisker.py`, a scriptable CLI client engineered for AI agents, headless services, and automated workflow integrations.
 - **Ultra Battery-Friendly**: Eliminates battery-draining background connections or constant polling loops on your mobile phone. Your phone wakes up on-demand strictly when an FCM push alert arrives.
 - **Instant Invite Links & Visitor Approval**: Share single-use invite links or approve visitor access requests with a single tap.
-- **Lightweight & Zero-Config**: Runs on a lightweight Node.js server backed by SQLite with minimal setup effort.
+- **Lightweight & Zero-Config**: Runs on a lightweight Python Home Server backed by SQLite with minimal setup effort.
 
 ---
 
@@ -41,8 +41,7 @@ Whether you want a hassle-free personal communication system for external visito
 Whisker consists of three primary components:
 
 1. **Android Mobile App**: The primary mobile interface, WebRTC calling endpoint, and notification center for the host.
-2. **Home Server (`companion-server.js`)**: A standalone Node.js server powered by SQLite that queues events, relays WebRTC signaling, and triggers FCM push notifications.
-3. **Python CLI (`whisker.py`)**: A client engine designed for command-line users, business automation scripts, and AI harnesses.
+2. **Home Server & CLI (`whisker`)**: A unified Python package that runs the Home Server (backed by SQLite, event queue, WebRTC signaling, FCM push tickles) and CLI client engine.
 
 > For the full protocol spec, API schema, and security details, see [requirements.md](requirements.md).
 
@@ -50,15 +49,24 @@ Whisker consists of three primary components:
 
 ## Quick Start Guide
 
-### 1. Launch the Home Server
+### 1. Install & Launch the Home Server
 
-Ensure Node.js (v18+) is installed, then run the companion server:
+Before launching, complete the [FCM Push Setup](#fcm-push-setup-whisker-setup-fcm) at the bottom of this document to enable push notifications.
+
+Install the package via `pip` or run directly with Python 3:
 
 ```bash
-node companion-server.js
+pip install .
+whisker server
 ```
 
-The server listens on `http://localhost:8085` (or your configured port) and initializes the SQLite database (`whisker.db`).
+Or run directly without installation:
+
+```bash
+python3 -m whisker server
+```
+
+The server listens on `http://localhost:3000` (or your configured port via `--port`) and initializes the SQLite database (`whisker_server.db`).
 
 ### 2. Connect the Android Mobile App
 
@@ -68,42 +76,43 @@ The server listens on `http://localhost:8085` (or your configured port) and init
 
 ---
 
-## AI Agent & CLI Integration (`whisker.py`)
+## AI Agent & CLI Integration (`whisker`)
 
-The `whisker.py` CLI enables AI harnesses (such as OpenClaw, AutoGPT, or LangChain agents) and automated scripts to send messages, initiate calls, or listen for events.
+The `whisker` CLI enables AI harnesses (such as OpenClaw, AutoGPT, or LangChain agents) and automated scripts to send messages, initiate calls, or listen for events.
 
 ### CLI Workflows:
 
 - **Claim an Invite Code**:
   ```bash
-  python3 whisker.py init "http://<server-ip>:8085?code=INVITE123"
+  whisker init "http://<server-ip>:3000/invite/INVITE123"
+  # Or: python3 -m whisker init "http://<server-ip>:3000/invite/INVITE123"
   ```
 - **Send a Message (AI / Script Output)**:
   ```bash
-  python3 whisker.py send "Hello from OpenClaw AI agent! Event processing complete."
+  whisker send "Hello from OpenClaw AI agent! Event processing complete."
   ```
 - **Initiate a Call**:
   ```bash
-  python3 whisker.py call
+  whisker call
   ```
 - **Stream Events (SSE Listener)**:
   ```bash
-  python3 whisker.py listen
+  whisker listen
   ```
 - **Check Connectivity & System Info**:
   ```bash
-  python3 whisker.py info
+  whisker info
   ```
 
 ---
 
-## FCM Push Setup (`fcm_setup.py`)
+## FCM Push Setup (`whisker setup-fcm`)
 
 To enable instant push notifications without draining your mobile battery, Whisker uses Google Cloud Platform (GCP) and Firebase Cloud Messaging (FCM) v1.
 
 ### Prerequisites (One-Time Setup)
 
-Before running the FCM setup script, complete these two one-time steps in your Google account:
+Before running the FCM setup command, complete these two one-time steps in your Google account:
 
 1. **Accept Google Cloud Terms of Service**:
    - Log into [console.cloud.google.com](https://console.cloud.google.com) and accept the Terms of Service if prompted.
@@ -113,13 +122,14 @@ Before running the FCM setup script, complete these two one-time steps in your G
 
 ### Automated Setup
 
-Run the automated provisioning script:
+Run the automated provisioning tool:
 
 ```bash
-python3 fcm_setup.py
+whisker setup-fcm
+# Or: python3 -m whisker setup-fcm
 ```
 
-#### What `fcm_setup.py` Does Automatically:
+#### What `whisker setup-fcm` Does Automatically:
 
 - **Browser OAuth2 Authentication**: Authenticates with your Google account.
 - **Smart Project Management**: Reuses an existing `"Whisker FCM"` project (`whisker-push-sa-XXXXXX`) or creates a new one if none exists.

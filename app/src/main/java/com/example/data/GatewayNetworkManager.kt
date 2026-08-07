@@ -96,7 +96,6 @@ class GatewayNetworkManager(private val context: Context, private val repository
     private var lastRegisteredApiKey: String? = null
 
     private val fetchMutex = Mutex()
-    private val processedEventIds = Collections.synchronizedSet(LinkedHashSet<String>())
 
     init {
         val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
@@ -126,7 +125,38 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
         createNotificationChannel()
         registerFcmToken()
+        
+        scope.launch(Dispatchers.IO) {
+            if (storedServerUrl.isNotEmpty() && storedServerUrl.startsWith("http")) {
+                fetchFcmConfigFromServer(storedServerUrl, storedApiKey)
+                registerPushTokenOnServer(storedServerUrl, storedApiKey, pushToken.value)
+            }
+        }
+
         fetchPendingEventsFromServer()
+        startForegroundPollingLoop()
+    }
+
+    private fun startForegroundPollingLoop() {
+        synchronized(GatewayNetworkManager::class.java) {
+            if (isPollingLoopRunning) return
+            isPollingLoopRunning = true
+        }
+        scope.launch(Dispatchers.IO) {
+            while (true) {
+                try {
+                    if (CompanionRegistry.isAppInForeground) {
+                        val serverUrlVal = serverUrl.value.removeSuffix("/")
+                        if (serverUrlVal.isNotEmpty() && serverUrlVal.startsWith("http")) {
+                            fetchPendingEventsFromServerSuspended()
+                        }
+                    }
+                } catch (e: Exception) {
+                    // ignore transient polling exceptions
+                }
+                delay(3000)
+            }
+        }
     }
 
     fun fetchPendingEventsFromServer() {
@@ -140,19 +170,17 @@ class GatewayNetworkManager(private val context: Context, private val repository
         val pinVal = apiKey.value
         val pushTokenVal = pushToken.value
 
-        if (serverUrlVal.isEmpty() || !serverUrlVal.startsWith("http")) return
+        if (serverUrlVal.isEmpty() || !serverUrlVal.startsWith("http")) {
+            serverReachable.value = false
+            _connectionStatus.value = "Disconnected"
+            return
+        }
 
         var fetchSuccess = false
         val fetchedEventIds = mutableSetOf<String>()
 
         fetchMutex.withLock {
             try {
-                // Fetch FCM config from home server if present (e.g. from whisker-push-sa.json)
-                fetchFcmConfigFromServer(serverUrlVal, pinVal)
-
-                // Ensure the home server settings database contains our active push token
-                registerPushTokenOnServer(serverUrlVal, pinVal, pushToken.value)
-                
                 // Sync client presences first
                 val presenceReq = Request.Builder()
                     .url("$serverUrlVal/api/host/clients")
@@ -162,6 +190,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     
                 okHttpClient.newCall(presenceReq).execute().use { response ->
                     if (response.isSuccessful) {
+                        serverReachable.value = true
+                        _connectionStatus.value = "Connected"
                         val body = response.body?.string() ?: "[]"
                         val clientsArray = JSONArray(body)
                         
@@ -223,6 +253,9 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 repository.insertRequest(newRequest)
                             }
                         }
+                    } else {
+                        serverReachable.value = false
+                        _connectionStatus.value = "Connecting..."
                     }
                 }
 
@@ -236,6 +269,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     if (response.isSuccessful) {
                         fetchSuccess = true
                         serverReachable.value = true
+                        _connectionStatus.value = "Connected"
                         val body = response.body?.string() ?: ""
                         val eventsArray = JSONArray(body)
                         for (i in 0 until eventsArray.length()) {
@@ -274,16 +308,18 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         }
                     } else {
                         serverReachable.value = false
+                        _connectionStatus.value = "Connecting..."
                         Log.e("GatewayNetworkManager", "Failed to fetch events from server: ${response.code}")
                     }
                 }
             } catch (e: Exception) {
                 serverReachable.value = false
-                Log.e("GatewayNetworkManager", "Error pulling tasks from Home Server", e)
-            }
-
-            if (fetchSuccess) {
-                _onInviteClaimed.tryEmit(Unit)
+                _connectionStatus.value = "Connecting..."
+                if (e is java.io.IOException) {
+                    Log.w("GatewayNetworkManager", "Home Server unreachable ($serverUrlVal): ${e.localizedMessage ?: e.message}")
+                } else {
+                    Log.e("GatewayNetworkManager", "Error pulling tasks from Home Server", e)
+                }
             }
 
             // Process fallback tickle if provided and the event was not successfully fetched
@@ -378,7 +414,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 }
             }
         } catch (e: Exception) {
-            Log.e("FCMInit", "Failed to fetch FCM config from Home Server: ${e.message}")
+            if (e is java.io.IOException) {
+                Log.w("FCMInit", "Home Server not reachable at $serverUrlVal: ${e.message}")
+            } else {
+                Log.e("FCMInit", "Failed to fetch FCM config from Home Server: ${e.message}")
+            }
         }
     }
 
@@ -411,11 +451,15 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     lastRegisteredToken = activeToken
                     Log.d("GatewayNetworkManager", "Successfully registered FCM push token on server: $activeToken")
                 } else {
-                    Log.e("GatewayNetworkManager", "Server reject push-binding: ${response.code}")
+                    Log.w("GatewayNetworkManager", "Server reject push-binding: ${response.code}")
                 }
             }
         } catch (e: Exception) {
-            Log.e("GatewayNetworkManager", "Failed to save push settings on server", e)
+            if (e is java.io.IOException) {
+                Log.w("GatewayNetworkManager", "Home Server not reachable to save push settings: ${e.message}")
+            } else {
+                Log.e("GatewayNetworkManager", "Failed to save push settings on server", e)
+            }
         }
     }
 
@@ -433,11 +477,15 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 .build()
             okHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    Log.e("GatewayNetworkManager", "Ack error on server: ${response.code}")
+                    Log.w("GatewayNetworkManager", "Ack error on server: ${response.code}")
                 }
             }
         } catch (e: Exception) {
-            Log.e("GatewayNetworkManager", "Failed to clear task on server", e)
+            if (e is java.io.IOException) {
+                Log.w("GatewayNetworkManager", "Home Server not reachable to clear task: ${e.message}")
+            } else {
+                Log.e("GatewayNetworkManager", "Failed to clear task on server", e)
+            }
         }
     }
 
@@ -491,7 +539,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
                     scope.launch {
                         val request = repository.getRequestByUuid(uuid)
-                        if (request != null && request.status == "APPROVED" && request.token == token) {
+                        if (request != null && request.status == "APPROVED" && (token.isEmpty() || request.token == token)) {
                             repository.insertMessage(
                                 Message(
                                     clientUuid = uuid,
@@ -518,7 +566,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
                     scope.launch {
                         val request = repository.getRequestByUuid(uuid)
-                        if (request != null && request.status == "APPROVED" && request.token == token) {
+                        if (request != null && request.status == "APPROVED" && (token.isEmpty() || request.token == token)) {
                             if (_activeCall.value is CallState.Idle) {
                                 _activeCall.value = CallState.Incoming(uuid, name, isVideo)
                                 showNotification(
@@ -534,7 +582,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val token = json.optString("token", "")
                     scope.launch {
                         val request = repository.getRequestByUuid(uuid)
-                        if (request != null && request.status == "APPROVED" && request.token == token) {
+                        if (request != null && request.status == "APPROVED" && (token.isEmpty() || request.token == token)) {
                             if (_activeCall.value !is CallState.Idle) {
                                 _activeCall.value = CallState.Idle
                             }
@@ -599,11 +647,15 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
                 okHttpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
-                        Log.e("GatewayNetworkManager", "Server reject reply routing: ${response.code}")
+                        Log.w("GatewayNetworkManager", "Server reject reply routing: ${response.code}")
                     }
                 }
             } catch (e: Exception) {
-                Log.e("GatewayNetworkManager", "Error publishing to client", e)
+                if (e is java.io.IOException) {
+                    Log.w("GatewayNetworkManager", "Home Server not reachable to publish to client: ${e.message}")
+                } else {
+                    Log.e("GatewayNetworkManager", "Error publishing to client", e)
+                }
             }
         }
     }
@@ -880,7 +932,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     }
                 }
             } catch (e: Exception) {
-                Log.e("GatewayNetworkManager", "fetchInvites error", e)
+                if (e is java.io.IOException) {
+                    Log.w("GatewayNetworkManager", "Home Server not reachable for invites at $serverUrlVal: ${e.message}")
+                } else {
+                    Log.e("GatewayNetworkManager", "fetchInvites error", e)
+                }
             }
             return@withContext emptyList()
         }
@@ -905,7 +961,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     Log.d("GatewayNetworkManager", "createInvite response: ${response.code}")
                 }
             } catch (e: Exception) {
-                Log.e("GatewayNetworkManager", "createInvite error", e)
+                if (e is java.io.IOException) {
+                    Log.w("GatewayNetworkManager", "Home Server not reachable to create invite: ${e.message}")
+                } else {
+                    Log.e("GatewayNetworkManager", "createInvite error", e)
+                }
             }
         }
     }
@@ -928,12 +988,19 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     Log.d("GatewayNetworkManager", "deleteInvite response: ${response.code}")
                 }
             } catch (e: Exception) {
-                Log.e("GatewayNetworkManager", "deleteInvite error", e)
+                if (e is java.io.IOException) {
+                    Log.w("GatewayNetworkManager", "Home Server not reachable to delete invite: ${e.message}")
+                } else {
+                    Log.e("GatewayNetworkManager", "deleteInvite error", e)
+                }
             }
         }
     }
 
     companion object {
+        private val processedEventIds = Collections.synchronizedSet(LinkedHashSet<String>())
+        @Volatile private var isPollingLoopRunning = false
+
         fun getInstance(context: Context): GatewayNetworkManager {
             return CompanionRegistry.getOrInitializeManager(context)
         }
