@@ -37,9 +37,14 @@ class DatabaseManager:
                     sender TEXT,
                     text TEXT,
                     file_path TEXT,
-                    created_at INTEGER
+                    created_at INTEGER,
+                    previous_message_id INTEGER DEFAULT NULL
                 )
                 """)
+                try:
+                    cursor.execute("ALTER TABLE messages ADD COLUMN previous_message_id INTEGER DEFAULT NULL")
+                except sqlite3.OperationalError:
+                    pass
                 cursor.execute("""
                 CREATE TABLE IF NOT EXISTS host_events (
                     id TEXT PRIMARY KEY,
@@ -153,12 +158,19 @@ class DatabaseManager:
             try:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT INTO messages (client_uuid, sender, text, file_path, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (client_uuid, sender, text, file_path, now)
+                    "SELECT id FROM messages WHERE client_uuid = ? ORDER BY id DESC LIMIT 1",
+                    (client_uuid,)
+                )
+                prev_row = cursor.fetchone()
+                prev_id = prev_row['id'] if prev_row else None
+
+                cursor.execute(
+                    "INSERT INTO messages (client_uuid, sender, text, file_path, created_at, previous_message_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    (client_uuid, sender, text, file_path, now, prev_id)
                 )
                 msg_id = cursor.lastrowid
                 conn.commit()
-                return msg_id
+                return msg_id, prev_id
             finally:
                 conn.close()
 
@@ -168,11 +180,25 @@ class DatabaseManager:
             try:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT id, sender, text, file_path, created_at FROM messages WHERE client_uuid = ? ORDER BY created_at ASC",
+                    "SELECT id, client_uuid, sender, text, file_path, created_at, previous_message_id FROM messages WHERE client_uuid = ? ORDER BY created_at ASC",
                     (client_uuid,)
                 )
                 rows = cursor.fetchall()
                 return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+    def get_message_by_id(self, msg_id):
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, client_uuid, sender, text, file_path, created_at, previous_message_id FROM messages WHERE id = ?",
+                    (msg_id,)
+                )
+                row = cursor.fetchone()
+                return dict(row) if row else None
             finally:
                 conn.close()
 

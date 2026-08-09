@@ -41,6 +41,12 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE clientUuid = :clientUuid ORDER BY timestamp ASC")
     fun getMessagesForClient(clientUuid: String): Flow<List<Message>>
 
+    @Query("SELECT * FROM messages WHERE clientUuid = :clientUuid ORDER BY timestamp ASC")
+    suspend fun getMessagesForClientSync(clientUuid: String): List<Message>
+
+    @Query("SELECT * FROM messages WHERE serverId = :serverId LIMIT 1")
+    suspend fun getMessageByServerId(serverId: Long): Message?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessage(message: Message)
 

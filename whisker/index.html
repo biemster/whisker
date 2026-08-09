@@ -28,7 +28,7 @@
 </head>
 <body class="flex flex-col min-h-screen p-4 md:p-8">
 
-    <header class="max-w-4xl mx-auto w-full mb-6 flex justify-between items-center bg-gray-900 border border-gray-800 p-4 rounded-2xl">
+    <header class="max-w-4xl mx-auto w-full mb-2 md:mb-3 flex justify-between items-center bg-gray-900 border border-gray-800 p-3.5 md:p-4 rounded-2xl">
         <div class="flex items-center space-x-3">
             <div class="w-10 h-10 rounded-xl bg-cyan-500 flex items-center justify-center font-bold text-black text-xl">
                 🐱
@@ -37,11 +37,59 @@
                 <h1 class="text-lg font-bold text-white leading-none">Whisker</h1>
             </div>
         </div>
-        <div id="connectionStatus" class="flex items-center space-x-2 bg-gray-800 px-3 py-1.5 rounded-full text-xs">
+        <div id="connectionStatus" onclick="openConnectivityModal()" class="flex items-center space-x-2 bg-gray-800 hover:bg-gray-750 border border-gray-700 px-3 py-1.5 rounded-full text-xs cursor-pointer transition select-none">
             <span class="w-2.5 h-2.5 rounded-full bg-yellow-500" id="statusDot"></span>
-            <span id="statusText" class="text-gray-300">Checking connection</span>
+            <span id="statusText" class="text-gray-300 font-medium">Checking connection</span>
+            <span class="text-[10px] text-gray-500">ℹ️</span>
         </div>
     </header>
+
+    <!-- CONNECTIVITY DETAIL MODAL -->
+    <div id="connectivityModal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4" onclick="if(event.target===this) closeConnectivityModal()">
+        <div class="bg-gray-900 border border-gray-800 p-6 rounded-3xl max-w-md w-full space-y-4 shadow-2xl relative">
+            <div class="flex justify-between items-center border-b border-gray-800 pb-3">
+                <h3 class="font-bold text-white text-base flex items-center space-x-2">
+                    <span>⚡</span>
+                    <span>System Connectivity</span>
+                </h3>
+                <button onclick="closeConnectivityModal()" class="text-gray-400 hover:text-white p-1 rounded-lg">✕</button>
+            </div>
+            <div class="space-y-2.5 text-xs text-gray-300">
+                <div class="flex items-center justify-between p-3 rounded-xl bg-gray-950 border border-gray-850">
+                    <span class="text-gray-400 font-semibold">Home Server:</span>
+                    <span id="modalServerStatus" class="font-mono font-bold text-yellow-400">Checking...</span>
+                </div>
+                <div class="flex items-center justify-between p-3 rounded-xl bg-gray-950 border border-gray-850">
+                    <span class="text-gray-400 font-semibold">Mobile App (Phone):</span>
+                    <span id="modalHostStatus" class="font-mono text-gray-400">Checking...</span>
+                </div>
+                <div class="flex items-center justify-between p-3 rounded-xl bg-gray-950 border border-gray-850">
+                    <span class="text-gray-400 font-semibold">Direct Socket Stream:</span>
+                    <span id="modalDirectStatus" class="font-mono text-gray-400">Inactive</span>
+                </div>
+                <div class="flex items-center justify-between p-3 rounded-xl bg-gray-950 border border-gray-850">
+                    <span class="text-gray-400 font-semibold">Push Notifications:</span>
+                    <span id="modalPushStatus" class="font-mono text-gray-400">Checking...</span>
+                </div>
+                <div class="p-3 rounded-xl bg-gray-950 border border-gray-850 space-y-1 font-mono text-[11px]">
+                    <div class="flex justify-between text-gray-400">
+                        <span>Guest Name:</span>
+                        <span id="modalGuestName" class="text-cyan-400 font-bold">-</span>
+                    </div>
+                    <div class="flex justify-between text-gray-400">
+                        <span>Guest UUID:</span>
+                        <span id="modalGuestUuid" class="text-gray-300 select-all">-</span>
+                    </div>
+                </div>
+            </div>
+            <p id="modalDetailText" class="text-[11px] text-gray-400 pt-1">
+                Evaluating link parameters...
+            </p>
+            <button onclick="closeConnectivityModal()" class="w-full bg-gray-800 hover:bg-gray-700 text-white font-bold py-2.5 rounded-xl transition text-xs">
+                Close
+            </button>
+        </div>
+    </div>
 
     <main class="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-center">
 
@@ -88,83 +136,57 @@
         </div>
 
         <!-- STEP 3: PROVISIONED DASHBOARD -->
-        <div id="provisionedView" class="hidden grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div id="provisionedView" class="hidden grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 transition-all duration-300">
             
-            <!-- LEFT PANEL: MEDIA CONTROL & E2E STATUS -->
-            <div class="space-y-6">
-                <!-- E2E REACHABILITY DISPLAY -->
-                <div id="e2eStatusCard" class="bg-gray-900 border border-gray-800 p-5 rounded-3xl space-y-3">
-                    <div class="flex items-center justify-between">
-                        <span class="text-xs font-bold text-gray-400 uppercase tracking-wider">End-to-End Link</span>
-                        <span id="e2eBadge" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">Checking...</span>
-                    </div>
-                    <div class="space-y-1.5 text-xs text-gray-300">
-                        <div class="flex justify-between">
-                            <span class="text-gray-400">Direct Socket Stream:</span>
-                            <span id="e2eDirectStatus" class="font-mono text-gray-400">Inactive</span>
-                        </div>
-                        <div class="flex justify-between">
-                            <span class="text-gray-400">Push Notifications:</span>
-                            <span id="e2ePushStatus" class="font-mono text-gray-400">Checking...</span>
-                        </div>
-                    </div>
-                    <p id="e2eDetailText" class="text-[11px] text-gray-400 border-t border-gray-800 pt-2">
-                        Evaluating link parameters...
-                    </p>
+            <!-- CALL PANEL -->
+            <div id="callCard" class="bg-gray-900 border border-gray-800 p-4 md:p-5 rounded-3xl space-y-3 transition-all duration-300 flex flex-col justify-between">
+                <div class="flex justify-between items-center px-1">
+                    <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider">Session Active</span>
+                    <span id="approvedName" class="text-xs bg-cyan-950 text-cyan-400 border border-cyan-800 px-2 py-0.5 rounded-full font-mono">Guest</span>
                 </div>
 
-                <!-- CALL PANEL -->
-                <div class="bg-gray-900 border border-gray-800 p-6 rounded-3xl space-y-4">
-                    <div class="flex justify-between items-center">
-                        <h3 class="font-bold text-white">Direct Audio/Video</h3>
-                        <span id="approvedName" class="text-xs bg-cyan-950 text-cyan-400 border border-cyan-800 px-2 py-0.5 rounded-full font-mono">Guest</span>
-                    </div>
-
-                    <!-- VIDEO CONTAINER STUB -->
-                    <div class="relative bg-gray-950 border border-gray-850 rounded-2xl h-44 overflow-hidden flex items-center justify-center">
-                        <video id="localVideo" autoplay muted class="w-full h-full object-cover hidden"></video>
-                        <div id="videoPlaceholder" class="text-center space-y-2">
-                            <span class="text-3xl">🎙️</span>
-                            <p class="text-xs text-gray-400">Ready to initiate call</p>
-                        </div>
-                        <video id="remoteMini" autoplay class="absolute bottom-2 right-2 w-20 h-16 bg-black rounded-lg border border-cyan-500 hidden object-cover"></video>
-                    </div>
-
-                    <!-- CONTROLS -->
-                    <div class="grid grid-cols-3 gap-2">
-                        <button id="audioCallBtn" onclick="toggleCall(false)" 
-                                class="bg-gray-800 hover:bg-gray-700 text-cyan-400 p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700">
-                            <span>📞</span>
-                            <span>Audio Call</span>
-                        </button>
-                        <button id="videoCallBtn" onclick="toggleCall(true)" 
-                                class="bg-gray-800 hover:bg-gray-700 text-cyan-400 p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700">
-                            <span>📹</span>
-                            <span>Video Call</span>
-                        </button>
-                        <button id="hangUpBtn" onclick="hangUpCall()" disabled 
-                                class="bg-red-950 hover:bg-red-900 text-red-400 p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-red-800 opacity-50 cursor-not-allowed">
-                            <span>🛑</span>
-                            <span>End Call</span>
-                        </button>
-                    </div>
-                    <div id="callDuration" class="text-center font-mono text-xs text-cyan-400">
-                        CALL IDLE
+                <!-- VIDEO CONTAINER -->
+                <div id="videoBoxContainer" class="relative bg-gray-950 border border-gray-850 rounded-2xl h-36 md:h-44 transition-all duration-300 overflow-hidden flex items-center justify-center">
+                    <video id="remoteVideo" autoplay playsinline class="w-full h-full object-cover hidden"></video>
+                    <video id="localVideo" autoplay playsinline muted class="absolute bottom-2 right-2 w-20 h-16 bg-black rounded-lg border border-cyan-500 hidden object-cover z-10"></video>
+                    <div id="videoPlaceholder" class="text-center space-y-1.5 p-4">
+                        <span class="text-3xl">🎙️</span>
+                        <p class="text-xs text-gray-400">Ready to initiate call</p>
                     </div>
                 </div>
 
-                <!-- SESSION DISCONNECT -->
-                <button onclick="resetCredentials()" class="w-full text-xs text-gray-400 hover:text-red-400 py-2 transition text-center">
-                    Disconnect Session & Clear Storage
-                </button>
+                <!-- CONTROLS -->
+                <div class="grid grid-cols-3 gap-2">
+                    <button id="audioCallBtn" onclick="toggleCall(false)" 
+                            class="bg-gray-800 hover:bg-gray-700 text-cyan-400 p-2.5 md:p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700">
+                        <span>📞</span>
+                        <span>Audio Call</span>
+                    </button>
+                    <button id="videoCallBtn" onclick="toggleCall(true)" 
+                            class="bg-gray-800 hover:bg-gray-700 text-cyan-400 p-2.5 md:p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700">
+                        <span>📹</span>
+                        <span>Video Call</span>
+                    </button>
+                    <button id="hangUpBtn" onclick="hangUpCall()" disabled 
+                            class="bg-red-950 hover:bg-red-900 text-red-400 p-2.5 md:p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-red-800 opacity-50 cursor-not-allowed">
+                        <span>🛑</span>
+                        <span>End Call</span>
+                    </button>
+                </div>
+                <div class="flex justify-between items-center text-xs px-1 pt-1 border-t border-gray-850">
+                    <span id="callDuration" class="font-mono text-[11px] text-cyan-400">CALL IDLE</span>
+                    <button onclick="resetCredentials()" class="text-[11px] text-gray-500 hover:text-red-400 transition">
+                        Disconnect
+                    </button>
+                </div>
             </div>
 
-            <!-- RIGHT PANEL: CHAT & ATTACHMENTS -->
-            <div class="md:col-span-2 bg-gray-900 border border-gray-800 rounded-3xl flex flex-col h-[520px]">
+            <!-- CHAT & ATTACHMENTS PANEL -->
+            <div id="chatCard" class="md:col-span-2 bg-gray-900 border border-gray-800 rounded-3xl flex flex-col h-[460px] md:h-[500px] transition-all duration-300">
                 
                 <!-- CHAT HEADER -->
-                <div class="p-4 border-b border-gray-800 flex justify-between items-center">
-                    <h3 class="font-bold text-white text-sm">Realtime Thread</h3>
+                <div class="p-3.5 px-4 border-b border-gray-800 flex justify-between items-center">
+                    <h3 class="font-bold text-white text-sm">Instant messages:</h3>
                     <div class="flex items-center space-x-2">
                         <button onclick="clearChatHistory()" class="text-xs text-gray-400 hover:text-gray-200 transition">Clear Local Chat</button>
                     </div>
@@ -251,40 +273,105 @@
             e2eStatusInterval = setInterval(checkE2eStatus, 10000);
         }
 
+        function openConnectivityModal() {
+            document.getElementById('connectivityModal').classList.remove('hidden');
+            checkE2eStatus();
+        }
+
+        function closeConnectivityModal() {
+            document.getElementById('connectivityModal').classList.add('hidden');
+        }
+
         function checkE2eStatus() {
             fetch(HOME_SERVER_URL + "/api/info")
                 .then(res => res.json())
                 .then(data => {
-                    const badge = document.getElementById('e2eBadge');
-                    const directStatus = document.getElementById('e2eDirectStatus');
-                    const pushStatus = document.getElementById('e2ePushStatus');
-                    const detail = document.getElementById('e2eDetailText');
+                    const statusDot = document.getElementById('statusDot');
+                    const statusText = document.getElementById('statusText');
+                    
+                    const mServer = document.getElementById('modalServerStatus');
+                    const mHost = document.getElementById('modalHostStatus');
+                    const mDirect = document.getElementById('modalDirectStatus');
+                    const mPush = document.getElementById('modalPushStatus');
+                    const mName = document.getElementById('modalGuestName');
+                    const mUuid = document.getElementById('modalGuestUuid');
+                    const mDetail = document.getElementById('modalDetailText');
+
+                    if (mName) mName.innerText = clientName || "Guest";
+                    if (mUuid) mUuid.innerText = clientUuid || "None";
 
                     if (!data) return;
 
-                    directStatus.innerText = data.host_connected ? "Active" : "Inactive";
-                    directStatus.className = "font-mono " + (data.host_connected ? "text-green-400 font-bold" : "text-gray-400");
+                    mServer.innerText = "Online";
+                    mServer.className = "font-mono font-bold text-green-400";
 
-                    pushStatus.innerText = data.push_configured ? "Configured" : "Not Set";
-                    pushStatus.className = "font-mono " + (data.push_configured ? "text-green-400 font-bold" : "text-yellow-400");
+                    mDirect.innerText = data.host_connected ? "Active" : "Inactive";
+                    mDirect.className = "font-mono " + (data.host_connected ? "text-green-400 font-bold" : "text-gray-400");
 
-                    if (data.host_reachable) {
-                        badge.innerText = "Reachable";
-                        badge.className = "px-2 py-0.5 rounded-full text-[10px] font-bold bg-green-500/10 text-green-400 border border-green-500/20";
-                        if (data.host_connected) {
-                            detail.innerText = "Mobile App is connected via direct streaming channel.";
-                        } else {
-                            detail.innerText = "Mobile App is sleeping. Push notification tickles will wake it up instantly.";
-                        }
+                    mPush.innerText = data.push_configured ? "Configured" : "Not Set";
+                    mPush.className = "font-mono " + (data.push_configured ? "text-green-400 font-bold" : "text-yellow-400");
+
+                    if (data.host_connected) {
+                        statusDot.className = "w-2.5 h-2.5 rounded-full bg-green-500";
+                        statusText.innerText = "Connected";
+                        mHost.innerText = "Connected (Streaming)";
+                        mHost.className = "font-mono text-green-400 font-bold";
+                        if (mDetail) mDetail.innerText = "Home Server and Mobile App are both online and directly streaming events.";
+                    } else if (data.host_reachable) {
+                        statusDot.className = "w-2.5 h-2.5 rounded-full bg-green-400";
+                        statusText.innerText = "Server Online • Phone Sleeping";
+                        mHost.innerText = "Sleeping (Push Tickle Ready)";
+                        mHost.className = "font-mono text-yellow-400 font-bold";
+                        if (mDetail) mDetail.innerText = "Home Server is online. Mobile App is sleeping; FCM push notifications will wake it up when a call or message is sent.";
                     } else {
-                        badge.innerText = "Unreachable";
-                        badge.className = "px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/10 text-red-400 border border-red-500/20";
-                        detail.innerText = "Mobile app is offline and FCM push is not configured on Home Server.";
+                        statusDot.className = "w-2.5 h-2.5 rounded-full bg-yellow-500";
+                        statusText.innerText = "Server Online • Phone Offline";
+                        mHost.innerText = "Offline";
+                        mHost.className = "font-mono text-red-400 font-bold";
+                        if (mDetail) mDetail.innerText = "Home Server is online, but the Mobile App is currently offline.";
                     }
                 })
                 .catch(err => {
                     console.error("Error checking E2E status:", err);
+                    const statusDot = document.getElementById('statusDot');
+                    const statusText = document.getElementById('statusText');
+                    const mServer = document.getElementById('modalServerStatus');
+                    const mHost = document.getElementById('modalHostStatus');
+                    const mDetail = document.getElementById('modalDetailText');
+
+                    statusDot.className = "w-2.5 h-2.5 rounded-full bg-red-500";
+                    statusText.innerText = "Server Offline";
+                    if (mServer) {
+                        mServer.innerText = "Offline";
+                        mServer.className = "font-mono font-bold text-red-400";
+                    }
+                    if (mHost) {
+                        mHost.innerText = "Unreachable";
+                        mHost.className = "font-mono text-gray-500";
+                    }
+                    if (mDetail) mDetail.innerText = "Cannot reach Whisker Home Server. Check network connection.";
                 });
+        }
+
+        function setCallLayoutActive(active) {
+            const provView = document.getElementById('provisionedView');
+            const callCard = document.getElementById('callCard');
+            const videoBox = document.getElementById('videoBoxContainer');
+            const chatCard = document.getElementById('chatCard');
+
+            if (!provView || !callCard || !videoBox || !chatCard) return;
+
+            if (active) {
+                provView.className = "flex flex-col space-y-3 md:space-y-4 transition-all duration-300";
+                callCard.className = "w-full bg-gray-900 border border-gray-800 p-4 md:p-6 rounded-3xl space-y-3 transition-all duration-300";
+                videoBox.className = "relative bg-gray-950 border border-gray-850 rounded-2xl h-64 md:h-[420px] max-h-[60vh] md:max-h-[66vh] transition-all duration-300 overflow-hidden flex items-center justify-center w-full";
+                chatCard.className = "w-full bg-gray-900 border border-gray-800 rounded-3xl flex flex-col h-[360px] md:h-[420px] transition-all duration-300";
+            } else {
+                provView.className = "grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 transition-all duration-300";
+                callCard.className = "bg-gray-900 border border-gray-800 p-4 md:p-5 rounded-3xl space-y-3 transition-all duration-300 flex flex-col justify-between";
+                videoBox.className = "relative bg-gray-950 border border-gray-850 rounded-2xl h-36 md:h-44 transition-all duration-300 overflow-hidden flex items-center justify-center";
+                chatCard.className = "md:col-span-2 bg-gray-900 border border-gray-800 rounded-3xl flex flex-col h-[460px] md:h-[500px] transition-all duration-300";
+            }
         }
 
         function initSession() {
@@ -382,35 +469,47 @@
                     initSession();
                 }
             } else if (payload.type === "chat_message" || payload.event === "message") {
-                if (payload.sender === "phone") {
-                    const newMsg = {
-                        id: payload.timestamp || Date.now(),
-                        text: payload.text,
-                        timestamp: payload.timestamp || Date.now(),
-                        isIncoming: true,
-                        filePath: payload.filePath || null
-                    };
-                    chatLogs.push(newMsg);
-                    localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
-                    renderChat();
+                const msgId = payload.messageId || payload.id || null;
+                const fileVal = payload.filePath || payload.file || null;
+                const isPhone = payload.sender === "phone";
+                
+                if (isPhone || payload.uuid === clientUuid) {
+                    const isDup = chatLogs.some(m => 
+                        (msgId && m.id === msgId) ||
+                        (m.text === payload.text && m.filePath === fileVal && Math.abs((m.timestamp || 0) - (payload.timestamp || Date.now())) < 5000)
+                    );
+                    if (!isDup) {
+                        const newMsg = {
+                            id: msgId || Date.now(),
+                            text: payload.text,
+                            timestamp: payload.timestamp || Date.now(),
+                            isIncoming: isPhone,
+                            filePath: fileVal
+                        };
+                        chatLogs.push(newMsg);
+                        localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                        renderChat();
+                    }
                 }
             } else if (payload.type === "webrtc_call_initiate") {
-                document.getElementById('callDuration').innerText = "INCOMING CALL...";
-                isCallActive = true;
-                document.getElementById('audioCallBtn').disabled = true;
-                document.getElementById('videoCallBtn').disabled = true;
-                document.getElementById('hangUpBtn').disabled = false;
-                
-                setTimeout(() => {
-                    document.getElementById('callDuration').innerText = "CALL ACTIVE";
-                    startCallTimer();
-                }, 1500);
+                handleIncomingCallOffer(payload);
             } else if (payload.type === "webrtc_call_answer" || payload.event === "call_answered") {
                 document.getElementById('callDuration').innerText = "CALL ACTIVE";
                 isCallActive = true;
+                setCallLayoutActive(true);
                 if (window.pc && payload.sdp) {
                     window.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }))
                         .catch(err => console.error("Error setting remote answer SDP", err));
+                }
+            } else if (payload.type === "webrtc_ice_candidate" || payload.event === "ice_candidate") {
+                if (window.pc && payload.candidate) {
+                    try {
+                        const cand = typeof payload.candidate === 'string' ? JSON.parse(payload.candidate) : payload.candidate;
+                        window.pc.addIceCandidate(new RTCIceCandidate(cand))
+                            .catch(err => console.error("Error adding remote ICE candidate", err));
+                    } catch (e) {
+                        console.error("Error parsing ICE candidate", e);
+                    }
                 }
             } else if (payload.type === "webrtc_call_hangup" || payload.event === "call_ended") {
                 hangUpCall(true);
@@ -587,8 +686,69 @@
             renderChat();
         }
 
+        async function acquireLocalMediaStream(isVideo, label = "Web Client") {
+            let stream = null;
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true });
+                } catch (e1) {
+                    console.warn("Full video/audio getUserMedia failed, trying audio-only...", e1);
+                    try {
+                        stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+                    } catch (e2) {
+                        console.warn("Audio-only getUserMedia failed.", e2);
+                    }
+                }
+            }
+            if (!stream || stream.getTracks().length === 0) {
+                console.log("Using synthetic media stream fallback for WebRTC...");
+                stream = createSyntheticMediaStream(label);
+            }
+            return stream;
+        }
+
+        function createSyntheticMediaStream(label) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 640;
+            canvas.height = 480;
+            const ctx = canvas.getContext('2d');
+            let angle = 0;
+            setInterval(() => {
+                angle = (angle + 0.08) % (Math.PI * 2);
+                ctx.fillStyle = '#0F172A';
+                ctx.fillRect(0, 0, 640, 480);
+                ctx.fillStyle = '#0284C7';
+                ctx.beginPath();
+                ctx.arc(320, 200 + Math.sin(angle) * 15, 65, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#E0F2FE';
+                ctx.font = 'bold 24px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(label || 'VIRTUAL STREAM', 320, 320);
+                ctx.fillStyle = '#38BDF8';
+                ctx.font = '16px monospace';
+                ctx.fillText("LIVE P2P WEBRTC SIGNAL", 320, 355);
+            }, 50);
+
+            const stream = canvas.captureStream(30);
+            try {
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = audioCtx.createOscillator();
+                const dest = audioCtx.createMediaStreamDestination();
+                osc.frequency.value = 440;
+                osc.connect(dest);
+                osc.start();
+                const audioTrack = dest.stream.getAudioTracks()[0];
+                if (audioTrack) stream.addTrack(audioTrack);
+            } catch(e) {
+                console.warn("AudioContext fallback skipped", e);
+            }
+            return stream;
+        }
+
         async function toggleCall(isVideo) {
             isCallActive = true;
+            setCallLayoutActive(true);
             document.getElementById('audioCallBtn').disabled = true;
             document.getElementById('videoCallBtn').disabled = true;
             document.getElementById('hangUpBtn').disabled = false;
@@ -597,27 +757,51 @@
             document.getElementById('videoPlaceholder').classList.add('hidden');
             document.getElementById('callDuration').innerText = "ROUTING CALL SIGNAL...";
             
-            let localStream = null;
-            try {
-                localStream = await navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true });
-                const localVid = document.getElementById('localVideo');
-                localVid.srcObject = localStream;
-            } catch (err) {
-                console.error("Media devices capture error", err);
-            }
+            let localStream = await acquireLocalMediaStream(isVideo, clientName || "Web Client");
+            const localVid = document.getElementById('localVideo');
+            if (localVid) localVid.srcObject = localStream;
 
-            const pc = new RTCPeerConnection({
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-            });
+            // WebRTC RTCConfiguration with direct P2P STUN and TURN server scaffolding
+            const rtcConfig = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            };
+
+            const pc = new RTCPeerConnection(rtcConfig);
             window.pc = pc;
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    fetch(HOME_SERVER_URL + "/api/signal", {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            event: "signal",
+                            type: "webrtc_ice_candidate",
+                            uuid: clientUuid,
+                            token: clientToken,
+                            candidate: event.candidate.toJSON()
+                        })
+                    }).catch(e => console.error("Error sending ICE candidate", e));
+                }
+            };
 
             if (localStream) {
                 localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
             }
 
             pc.ontrack = (event) => {
-                const remoteVid = document.getElementById('remoteMini');
-                remoteVid.classList.remove('hidden');
+                const remoteVid = document.getElementById('remoteVideo');
+                if (remoteVid) {
+                    if (event.streams && event.streams[0]) {
+                        remoteVid.srcObject = event.streams[0];
+                    }
+                    remoteVid.classList.remove('hidden');
+                }
+                const placeholder = document.getElementById('videoPlaceholder');
+                if (placeholder) placeholder.classList.add('hidden');
             };
 
             const offer = await pc.createOffer();
@@ -652,8 +836,88 @@
             }, 1000);
         }
 
+        async function handleIncomingCallOffer(payload) {
+            if (isCallActive && window.pc) return;
+            isCallActive = true;
+            setCallLayoutActive(true);
+            document.getElementById('audioCallBtn').disabled = true;
+            document.getElementById('videoCallBtn').disabled = true;
+            document.getElementById('hangUpBtn').disabled = false;
+            document.getElementById('callDuration').innerText = "INCOMING CALL...";
+            document.getElementById('localVideo').classList.remove('hidden');
+            document.getElementById('videoPlaceholder').classList.add('hidden');
+
+            let isVideo = payload.video !== false;
+            let localStream = await acquireLocalMediaStream(isVideo, clientName || "Web Client");
+            const localVid = document.getElementById('localVideo');
+            if (localVid) localVid.srcObject = localStream;
+
+            const pc = new RTCPeerConnection(rtcConfig);
+            window.pc = pc;
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    fetch(HOME_SERVER_URL + "/api/signal", {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            event: "signal",
+                            type: "webrtc_ice_candidate",
+                            uuid: clientUuid,
+                            token: clientToken,
+                            candidate: event.candidate.toJSON()
+                        })
+                    }).catch(e => console.error("Error sending ICE candidate", e));
+                }
+            };
+
+            if (localStream) {
+                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+            }
+
+            pc.ontrack = (event) => {
+                const remoteVid = document.getElementById('remoteVideo');
+                if (remoteVid) {
+                    if (event.streams && event.streams[0]) {
+                        remoteVid.srcObject = event.streams[0];
+                    }
+                    remoteVid.classList.remove('hidden');
+                }
+                const placeholder = document.getElementById('videoPlaceholder');
+                if (placeholder) placeholder.classList.add('hidden');
+            };
+
+            if (payload.sdp) {
+                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: payload.sdp }));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+
+                fetch(HOME_SERVER_URL + "/api/signal", {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        event: "signal",
+                        type: "webrtc_call_answer",
+                        uuid: clientUuid,
+                        token: clientToken,
+                        sdp: answer.sdp
+                    })
+                }).catch(e => console.error("Error sending call answer SDP", e));
+            }
+
+            callSeconds = 0;
+            if (callTimer) clearInterval(callTimer);
+            callTimer = setInterval(() => {
+                callSeconds++;
+                const mins = Math.floor(callSeconds / 60).toString().padStart(2, '0');
+                const secs = (callSeconds % 60).toString().padStart(2, '0');
+                document.getElementById('callDuration').innerText = "CALL ALIVE • " + mins + ":" + secs;
+            }, 1000);
+        }
+
         function hangUpCall(receivedFromPhone = false) {
             isCallActive = false;
+            setCallLayoutActive(false);
             if (callTimer) clearInterval(callTimer);
             document.getElementById('audioCallBtn').disabled = false;
             document.getElementById('videoCallBtn').disabled = false;

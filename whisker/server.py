@@ -208,7 +208,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
+        clean_parts = [p for p in parsed.path.split('/') if p]
+        path = '/' + '/'.join(clean_parts)
         qs = urllib.parse.parse_qs(parsed.query)
 
         # GET /api/init-status
@@ -284,7 +285,47 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 c['is_online'] = 1 if u in active_uuids else 0
             return self._send_json(clients)
 
+        if path == '/api/host/message':
+            if not self._authorize_host():
+                return
+            msg_id_str = qs.get('id', [''])[0]
+            if not msg_id_str or not msg_id_str.isdigit():
+                return self._send_json({"error": "Invalid or missing message id"}, 400)
+            msg = self.db.get_message_by_id(int(msg_id_str))
+            if not msg:
+                return self._send_json({"error": "Message not found"}, 404)
+            return self._send_json({
+                "id": msg['id'],
+                "clientUuid": msg['client_uuid'],
+                "sender": msg['sender'],
+                "text": msg['text'],
+                "filePath": msg['file_path'],
+                "createdAt": msg['created_at'],
+                "previousMessageId": msg['previous_message_id']
+            })
+
         # Guest endpoints
+        if path == '/api/message':
+            msg_id_str = qs.get('id', [''])[0]
+            uuid = qs.get('uuid', [''])[0]
+            token = qs.get('token', [''])[0]
+            if not self._authorize_guest(uuid, token):
+                return
+            if not msg_id_str or not msg_id_str.isdigit():
+                return self._send_json({"error": "Invalid or missing message id"}, 400)
+            msg = self.db.get_message_by_id(int(msg_id_str))
+            if not msg or msg['client_uuid'] != uuid:
+                return self._send_json({"error": "Message not found or unauthorized"}, 404)
+            return self._send_json({
+                "id": msg['id'],
+                "clientUuid": msg['client_uuid'],
+                "sender": msg['sender'],
+                "text": msg['text'],
+                "filePath": msg['file_path'],
+                "createdAt": msg['created_at'],
+                "previousMessageId": msg['previous_message_id']
+            })
+
         if path == '/api/messages':
             uuid = qs.get('uuid', [''])[0]
             token = qs.get('token', [''])[0]
@@ -320,7 +361,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
+        clean_parts = [p for p in parsed.path.split('/') if p]
+        path = '/' + '/'.join(clean_parts)
         body = self._read_json_body()
 
         # Host endpoints
@@ -390,7 +432,25 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 text = body.get('text', '')
                 file_path = body.get('filePath')
                 if client_uuid and text:
-                    self.db.add_message(client_uuid, 'phone', text, file_path)
+                    msg_id, prev_id = self.db.add_message(client_uuid, 'phone', text, file_path)
+                    body['messageId'] = msg_id
+                    body['id'] = msg_id
+                    body['previousMessageId'] = prev_id
+
+            if resp_type in ['webrtc_call_answer', 'webrtc_call_initiate', 'webrtc_ice_candidate'] or resp_event in ['call_answered', 'call_initiate', 'ice_candidate']:
+                sdp_str = body.get('sdp', '')
+                sdp_len = len(sdp_str)
+                has_audio = "m=audio" in sdp_str
+                has_video = "m=video" in sdp_str
+                cand_obj = body.get('candidate')
+                cand_type = ""
+                if isinstance(cand_obj, dict):
+                    cand_type = f" | Candidate: {cand_obj.get('candidate', '')[:40]}..."
+                elif cand_obj:
+                    cand_type = f" | Candidate: {str(cand_obj)[:40]}..."
+                
+                track_info = f"Audio: {has_audio}, Video: {has_video}" if sdp_len > 0 else "No SDP"
+                print(f"📱 [WebRTC Host Reply] Host -> Guest '{client_uuid}' | Type: {resp_type or resp_event} | SDP Len: {sdp_len} ({track_info}){cand_type}")
 
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
             self.db.add_guest_event(event_id, client_uuid, resp_type or resp_event or 'response', body)
@@ -409,7 +469,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
 
             self.db.add_request(uuid, name, reason)
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
-            payload = {"event": "visitor", "uuid": uuid, "name": name, "reason": reason}
+            payload = {"event": "visitor", "eventId": event_id, "uuid": uuid, "name": name, "reason": reason}
             self.db.add_host_event(event_id, "visitor", payload)
 
             self._notify_host_streams("visitor", payload)
@@ -435,7 +495,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             self.db.approve_request(client_uuid, client_token)
 
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
-            payload = {"event": "invite_claimed", "uuid": client_uuid, "name": client_name, "code": code, "token": client_token}
+            payload = {"event": "invite_claimed", "eventId": event_id, "uuid": client_uuid, "name": client_name, "code": code, "token": client_token}
             self.db.add_host_event(event_id, "invite_claimed", payload)
 
             self._notify_host_streams("invite_claimed", payload)
@@ -461,16 +521,20 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             if not text:
                 return self._send_json({"error": "Missing message text"}, 400)
 
-            msg_id = self.db.add_message(uuid, 'guest', text, file_data)
+            msg_id, prev_id = self.db.add_message(uuid, 'guest', text, file_data)
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
             payload = {
                 "event": "message",
+                "eventId": event_id,
+                "messageId": msg_id,
+                "previousMessageId": prev_id,
                 "uuid": uuid,
                 "token": token,
                 "text": text,
                 "file": file_data,
+                "filePath": file_data,
                 "name": body.get('name', 'Guest'),
-                "messageId": msg_id
+                "timestamp": int(time.time() * 1000)
             }
             self.db.add_host_event(event_id, "message", payload)
 
@@ -478,7 +542,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             push_token = self.db.get_setting('push_token')
             self.fcm.send_tickle_notification(push_token, event_id, "message")
 
-            return self._send_json({"status": "delivered", "id": msg_id})
+            return self._send_json({"status": "delivered", "id": msg_id, "messageId": msg_id, "previousMessageId": prev_id, "eventId": event_id})
 
         if path == '/api/call':
             uuid = body.get('uuid')
@@ -487,13 +551,21 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 return
 
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
+            sdp_str = body.get('sdp', '')
+            is_vid = body.get('video', False)
+            sdp_len = len(sdp_str)
+            has_audio = "m=audio" in sdp_str
+            has_video = "m=video" in sdp_str
+            print(f"📞 [WebRTC Call] Guest '{uuid}' ({body.get('name')}) initiated call | Video: {is_vid} | SDP Len: {sdp_len} (Audio: {has_audio}, Video: {has_video})")
+
             payload = {
                 "event": "call",
+                "eventId": event_id,
                 "uuid": uuid,
                 "token": token,
                 "name": body.get('name', 'Guest'),
-                "video": body.get('video', False),
-                "sdp": body.get('sdp', '')
+                "video": is_vid,
+                "sdp": sdp_str
             }
             self.db.add_host_event(event_id, "call", payload)
 
@@ -501,7 +573,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             push_token = self.db.get_setting('push_token')
             self.fcm.send_tickle_notification(push_token, event_id, "call")
 
-            return self._send_json({"status": "dialing"})
+            return self._send_json({"status": "dialing", "eventId": event_id})
 
         if path == '/api/hangup':
             uuid = body.get('uuid')
@@ -509,9 +581,11 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             if not self._authorize_guest(uuid, token):
                 return
 
+            print(f"🛑 [WebRTC Hangup] Guest '{uuid}' requested call hangup")
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
             payload = {
                 "event": "hangup",
+                "eventId": event_id,
                 "uuid": uuid,
                 "token": token
             }
@@ -522,6 +596,31 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             self.fcm.send_tickle_notification(push_token, event_id, "hangup")
 
             return self._send_json({"status": "hungup"})
+
+        if path == '/api/signal':
+            uuid = body.get('uuid')
+            token = body.get('token')
+            if not self._authorize_guest(uuid, token):
+                return
+
+            sig_type = body.get('type', 'webrtc_ice_candidate')
+            has_cand = bool(body.get('candidate'))
+            has_sdp = bool(body.get('sdp'))
+            print(f"📡 [WebRTC Signal] Guest '{uuid}' sent signal '{sig_type}' | Candidate: {has_cand} | SDP: {has_sdp}")
+
+            event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
+            payload = {
+                "event": "signal",
+                "eventId": event_id,
+                "uuid": uuid,
+                "token": token,
+                "type": sig_type,
+                "candidate": body.get('candidate'),
+                "sdp": body.get('sdp')
+            }
+            self.db.add_host_event(event_id, "signal", payload)
+            self._notify_host_streams("signal", payload)
+            return self._send_json({"status": "signaled", "eventId": event_id})
 
         return self._send_json({"error": "Endpoint not found"}, 404)
 

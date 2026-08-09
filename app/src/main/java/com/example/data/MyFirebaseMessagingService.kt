@@ -51,9 +51,16 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         // 2. Fetch data from the home server in the background
         val networkManager = CompanionRegistry.getOrInitializeManager(applicationContext)
         
-        // 3. Extract payload if any
-        val dataPayload = remoteMessage.data.toString()
-        Log.d("FCMService", "Message data payload: $dataPayload")
+        // 3. Extract payload as JSON if available
+        val dataMap = remoteMessage.data
+        val dataPayload = if (dataMap.isNotEmpty()) {
+            try {
+                org.json.JSONObject(dataMap as Map<*, *>).toString()
+            } catch (e: Exception) {
+                null
+            }
+        } else null
+        Log.d("FCMService", "Message data payload JSON: $dataPayload")
 
         // 4. Force fetch pending events from the home server to get the latest messages, calls, or visitor requests
         CoroutineScope(Dispatchers.IO).launch {

@@ -31,13 +31,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Request Notification Permission for Android 13+ (API 33+)
+        // Request Notification, Camera, and Microphone Permissions
+        val permissionsToRequest = mutableListOf<String>()
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            requestPermissions(
-                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
-                101
-            )
+            permissionsToRequest.add(android.Manifest.permission.POST_NOTIFICATIONS)
         }
+        permissionsToRequest.add(android.Manifest.permission.CAMERA)
+        permissionsToRequest.add(android.Manifest.permission.RECORD_AUDIO)
+        requestPermissions(permissionsToRequest.toTypedArray(), 101)
         
         // Supports full-bleed edge-to-edge drawing, safe areas automatically handled inside Compose
         enableEdgeToEdge()

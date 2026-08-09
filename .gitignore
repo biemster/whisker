@@ -27,6 +27,11 @@ whisker-push-sa.json
 *.jks
 *.keystore
 
+# Python & Whisker Runtime Files
+whisker/__pycache__/
+__pycache__/
+*.pyc
+
 # Node.js & Database Runtime Files (companion-server)
 node_modules/
 whisker.db

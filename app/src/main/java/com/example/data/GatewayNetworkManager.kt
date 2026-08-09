@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,11 +41,18 @@ import java.io.InputStreamReader
 import java.net.InetAddress
 import java.util.UUID
 
+data class WebRtcSignal(
+    val clientUuid: String,
+    val type: String,
+    val candidateJson: String = "",
+    val sdp: String = ""
+)
+
 sealed class CallState {
     object Idle : CallState()
-    data class Incoming(val clientUuid: String, val clientName: String, val isVideo: Boolean) : CallState()
-    data class Outgoing(val clientUuid: String, val clientName: String) : CallState()
-    data class Active(val clientUuid: String, val clientName: String, var durationSeconds: Int = 0) : CallState()
+    data class Incoming(val clientUuid: String, val clientName: String, val isVideo: Boolean, val sdp: String = "") : CallState()
+    data class Outgoing(val clientUuid: String, val clientName: String, val isVideo: Boolean = false) : CallState()
+    data class Active(val clientUuid: String, val clientName: String, val isVideo: Boolean = false, var durationSeconds: Int = 0, val sdp: String = "") : CallState()
 }
 
 class GatewayNetworkManager(private val context: Context, private val repository: LinkRepository) {
@@ -91,11 +99,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
     private val _onInviteClaimed = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val onInviteClaimed = _onInviteClaimed.asSharedFlow()
 
+    private val _incomingSignal = MutableSharedFlow<WebRtcSignal>(replay = 16, extraBufferCapacity = 64, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
+    val incomingSignal: SharedFlow<WebRtcSignal> = _incomingSignal.asSharedFlow()
+
     private var lastRegisteredToken: String? = null
     private var lastRegisteredServerUrl: String? = null
     private var lastRegisteredApiKey: String? = null
 
     private val fetchMutex = Mutex()
+
+    fun getCleanServerUrl(): String = serverUrl.value.trim().removeSuffix("/")
 
     init {
         val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
@@ -134,7 +147,63 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
 
         fetchPendingEventsFromServer()
+        startRealtimeSseStream()
         startForegroundPollingLoop()
+    }
+
+    @Volatile private var isSseRunning = false
+
+    fun startRealtimeSseStream() {
+        synchronized(GatewayNetworkManager::class.java) {
+            if (isSseRunning) return
+            isSseRunning = true
+        }
+        scope.launch(Dispatchers.IO) {
+            while (isActive) {
+                val cleanUrl = getCleanServerUrl()
+                val pinVal = apiKey.value
+                if (cleanUrl.isNotEmpty() && cleanUrl.startsWith("http")) {
+                    try {
+                        val sseClient = okHttpClient.newBuilder()
+                            .readTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS)
+                            .build()
+
+                        val request = Request.Builder()
+                            .url("$cleanUrl/api/host/stream")
+                            .header("Authorization", "Bearer $pinVal")
+                            .header("Accept", "text/event-stream")
+                            .get()
+                            .build()
+
+                        sseClient.newCall(request).execute().use { response ->
+                            if (response.isSuccessful) {
+                                serverReachable.value = true
+                                _connectionStatus.value = "Connected"
+                                val source = response.body?.source()
+                                if (source != null) {
+                                    val reader = BufferedReader(InputStreamReader(source.inputStream(), Charsets.UTF_8))
+                                    var line: String? = reader.readLine()
+                                    while (isActive && line != null) {
+                                        if (line.startsWith("data: ")) {
+                                            val dataStr = line.substring(6).trim()
+                                            if (dataStr.isNotEmpty() && dataStr != "keep-alive") {
+                                                serverReachable.value = true
+                                                _connectionStatus.value = "Connected"
+                                                processIncomingPayload(dataStr)
+                                            }
+                                        }
+                                        line = reader.readLine()
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w("GatewayNetworkManager", "SSE stream disconnect: ${e.message}")
+                    }
+                }
+                delay(3000)
+            }
+        }
     }
 
     private fun startForegroundPollingLoop() {
@@ -438,15 +507,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 put("fcmToken", activeToken)
             }
             val requestBody = RequestBody.create(mediaType, body.toString())
+            val cleanUrl = getCleanServerUrl()
             val request = Request.Builder()
-                .url("$serverUrlVal/api/host/register_push")
+                .url("$cleanUrl/api/host/register_push")
                 .header("Authorization", "Bearer $pinVal")
                 .header("X-Push-Token", activeToken)
                 .post(requestBody)
                 .build()
             okHttpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
-                    lastRegisteredServerUrl = serverUrlVal
+                    lastRegisteredServerUrl = cleanUrl
                     lastRegisteredApiKey = pinVal
                     lastRegisteredToken = activeToken
                     Log.d("GatewayNetworkManager", "Successfully registered FCM push token on server: $activeToken")
@@ -470,8 +540,9 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 put("eventId", eventId)
             }
             val requestBody = RequestBody.create(mediaType, body.toString())
+            val cleanUrl = getCleanServerUrl()
             val request = Request.Builder()
-                .url("$serverUrlVal/api/host/ack")
+                .url("$cleanUrl/api/host/ack")
                 .header("Authorization", "Bearer $pinVal")
                 .post(requestBody)
                 .build()
@@ -492,8 +563,44 @@ class GatewayNetworkManager(private val context: Context, private val repository
     fun processIncomingPayload(payloadStr: String) {
         try {
             val json = JSONObject(payloadStr)
-            val eventType = json.optString("event", "")
-            val uuid = json.optString("uuid", "")
+            val eventType = json.optString("event", json.optString("type", ""))
+            val uuid = json.optString("uuid", json.optString("clientUuid", ""))
+            val eventId = json.optString("eventId", json.optString("id", ""))
+            val messageId = json.optString("messageId", "")
+
+            if (eventId.isNotEmpty()) {
+                val isDup = synchronized(processedEventIds) {
+                    if (processedEventIds.contains(eventId)) {
+                        true
+                    } else {
+                        processedEventIds.add(eventId)
+                        if (processedEventIds.size > 300) {
+                            val iter = processedEventIds.iterator()
+                            if (iter.hasNext()) { iter.next(); iter.remove() }
+                        }
+                        val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
+                        prefs.edit().putStringSet("processed_event_ids", processedEventIds.toSet()).apply()
+                        false
+                    }
+                }
+                if (isDup) return
+            }
+
+            if (messageId.isNotEmpty()) {
+                val isMsgDup = synchronized(processedMessageIds) {
+                    if (processedMessageIds.contains(messageId)) {
+                        true
+                    } else {
+                        processedMessageIds.add(messageId)
+                        if (processedMessageIds.size > 300) {
+                            val iter = processedMessageIds.iterator()
+                            if (iter.hasNext()) { iter.next(); iter.remove() }
+                        }
+                        false
+                    }
+                }
+                if (isMsgDup) return
+            }
 
             when (eventType) {
                 "visitor" -> {
@@ -533,29 +640,43 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 }
                 "message" -> {
                     val token = json.optString("token", "")
-                    val name = json.optString("name", "Approved Caller")
-                    val text = json.optString("text", "")
-                    val file = if (json.isNull("file")) null else json.optString("file").takeIf { it.isNotEmpty() && it != "null" }
+                    val msgIdLong = json.optLong("messageId", json.optLong("id", 0L))
+                    val cleanUrl = getCleanServerUrl()
+                    val pinVal = apiKey.value
 
-                    scope.launch {
+                    scope.launch(Dispatchers.IO) {
                         val request = repository.getRequestByUuid(uuid)
                         if (request != null && request.status == "APPROVED" && (token.isEmpty() || request.token == token)) {
-                            repository.insertMessage(
-                                Message(
-                                    clientUuid = uuid,
-                                    clientName = name,
-                                    messageText = text,
-                                    filePath = file,
-                                    isIncoming = true
-                                )
-                            )
-                            val cleanMsg = if (file != null) "🔗 File: [$text]" else text
-                            showNotification(
-                                "Message from $name",
-                                cleanMsg,
-                                1003,
-                                uuid
-                            )
+                            if (msgIdLong > 0 && cleanUrl.isNotEmpty()) {
+                                fetchAndSyncMessageChain(cleanUrl, pinVal, uuid, msgIdLong)
+                            } else {
+                                val name = json.optString("name", "Approved Caller")
+                                val text = json.optString("text", "")
+                                val file = if (json.isNull("file")) null else json.optString("file").takeIf { it.isNotEmpty() && it != "null" }
+                                val existingMsgs = repository.getMessagesForClientSync(uuid)
+                                val isDuplicate = existingMsgs.any { m ->
+                                    (messageId.isNotEmpty() && m.id.toString() == messageId) ||
+                                    (m.messageText == text && m.filePath == file && kotlin.math.abs(m.timestamp - System.currentTimeMillis()) < 10000)
+                                }
+                                if (!isDuplicate) {
+                                    repository.insertMessage(
+                                        Message(
+                                            clientUuid = uuid,
+                                            clientName = name,
+                                            messageText = text,
+                                            filePath = file,
+                                            isIncoming = true
+                                        )
+                                    )
+                                    val cleanMsg = if (file != null) "🔗 File: [$text]" else text
+                                    showNotification(
+                                        "Message from $name",
+                                        cleanMsg,
+                                        1003,
+                                        uuid
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -563,12 +684,13 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val token = json.optString("token", "")
                     val name = json.optString("name", "Approved Caller")
                     val isVideo = json.optBoolean("video", false)
+                    val sdp = json.optString("sdp", "")
 
                     scope.launch {
                         val request = repository.getRequestByUuid(uuid)
                         if (request != null && request.status == "APPROVED" && (token.isEmpty() || request.token == token)) {
                             if (_activeCall.value is CallState.Idle) {
-                                _activeCall.value = CallState.Incoming(uuid, name, isVideo)
+                                _activeCall.value = CallState.Incoming(uuid, name, isVideo, sdp)
                                 showNotification(
                                     "Incoming Call",
                                     "Incoming call from approved contact '$name'. Tap to answer.",
@@ -577,6 +699,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
                             }
                         }
                     }
+                }
+                "signal" -> {
+                    val signalType = json.optString("type", "webrtc_ice_candidate")
+                    val candidate = json.opt("candidate")?.toString() ?: ""
+                    val sdp = json.optString("sdp", "")
+                    _incomingSignal.tryEmit(WebRtcSignal(uuid, signalType, candidate, sdp))
                 }
                 "hangup" -> {
                     val token = json.optString("token", "")
@@ -623,8 +751,85 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     }
                 }
             }
+
+            if (eventId.isNotEmpty()) {
+                val cleanUrl = getCleanServerUrl()
+                val pinVal = apiKey.value
+                if (cleanUrl.isNotEmpty()) {
+                    scope.launch(Dispatchers.IO) {
+                        ackEventOnServer(cleanUrl, pinVal, eventId)
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.e("GatewayNetworkManager", "Error parsing inner payload: $payloadStr", e)
+        }
+    }
+
+    private suspend fun fetchAndSyncMessageChain(cleanUrl: String, pinVal: String, uuid: String, startMsgId: Long) {
+        var currentId: Long? = startMsgId
+        val visited = mutableSetOf<Long>()
+        while (currentId != null && currentId > 0 && !visited.contains(currentId)) {
+            visited.add(currentId)
+            val existing = repository.getMessageByServerId(currentId)
+            if (existing != null) {
+                // Local DB already has this message and all its predecessors
+                break
+            }
+
+            val request = Request.Builder()
+                .url("$cleanUrl/api/host/message?id=$currentId")
+                .header("Authorization", "Bearer $pinVal")
+                .get()
+                .build()
+
+            var msgObj: JSONObject? = null
+            try {
+                okHttpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val bodyStr = response.body?.string()
+                        if (!bodyStr.isNullOrEmpty()) {
+                            msgObj = JSONObject(bodyStr)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("GatewayNetworkManager", "Failed to fetch message $currentId from server", e)
+                break
+            }
+
+            if (msgObj == null) break
+
+            val msgUuid = msgObj!!.optString("clientUuid", uuid)
+            val sender = msgObj!!.optString("sender", "guest")
+            val text = msgObj!!.optString("text", "")
+            val filePath = if (msgObj!!.has("filePath") && !msgObj!!.isNull("filePath")) msgObj!!.optString("filePath").takeIf { it.isNotEmpty() && it != "null" } else null
+            val createdAt = msgObj!!.optLong("createdAt", System.currentTimeMillis())
+            val prevId = if (msgObj!!.has("previousMessageId") && !msgObj!!.isNull("previousMessageId")) msgObj!!.optLong("previousMessageId") else null
+
+            val req = repository.getRequestByUuid(msgUuid)
+            val clientName = req?.name ?: "Guest"
+            val isIncoming = (sender != "phone")
+
+            repository.insertMessage(
+                Message(
+                    serverId = currentId,
+                    clientUuid = msgUuid,
+                    clientName = clientName,
+                    messageText = text,
+                    timestamp = createdAt,
+                    filePath = filePath,
+                    isIncoming = isIncoming,
+                    previousMessageId = prevId
+                )
+            )
+
+            if (isIncoming) {
+                val cleanMsg = if (filePath != null) "🔗 File: [$text]" else text
+                showNotification("Message from $clientName", cleanMsg, 1003, msgUuid)
+            }
+
+            currentId = if (prevId != null && prevId > 0) prevId else null
         }
     }
 
@@ -635,12 +840,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
                 val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
                 val requestBody = RequestBody.create(mediaType, payload.toString())
-                val serverUrlVal = serverUrl.value
+                val cleanUrl = getCleanServerUrl()
                 val pinVal = apiKey.value
 
-                Log.d("GatewayNetworkManager", "Posting host reply signal to server: $serverUrlVal/api/host/response")
+                Log.d("GatewayNetworkManager", "Posting host reply signal to server: $cleanUrl/api/host/response")
                 val request = Request.Builder()
-                    .url("$serverUrlVal/api/host/response")
+                    .url("$cleanUrl/api/host/response")
                     .header("Authorization", "Bearer $pinVal")
                     .post(requestBody)
                     .build()
@@ -999,6 +1204,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
     companion object {
         private val processedEventIds = Collections.synchronizedSet(LinkedHashSet<String>())
+        private val processedMessageIds = Collections.synchronizedSet(LinkedHashSet<String>())
         @Volatile private var isPollingLoopRunning = false
 
         fun getInstance(context: Context): GatewayNetworkManager {
@@ -1007,7 +1213,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
     }
 
     fun acceptCall(clientUuid: String, clientName: String) {
-        _activeCall.value = CallState.Active(clientUuid, clientName)
+        val currentIncoming = _activeCall.value as? CallState.Incoming
+        val sdpOffer = currentIncoming?.sdp ?: ""
+        val isVideo = currentIncoming?.isVideo ?: true
+
+        _activeCall.value = CallState.Active(clientUuid, clientName, isVideo, 0, sdpOffer)
         scope.launch {
             repository.insertCallLog(
                 CallLog(
@@ -1017,12 +1227,42 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     isIncoming = true
                 )
             )
-            // Publish accept/handshake to client
+        }
+    }
+
+    fun publishSdpAnswer(clientUuid: String, answerSdp: String) {
+        scope.launch {
             val payload = JSONObject().apply {
                 put("type", "webrtc_call_answer")
                 put("event", "call_answered")
                 put("clientUuid", clientUuid)
-                put("sdp", "v=0\\no=- 9214734892 2 IN IP4 127.0.0.1\\ns=-\\nt=0 0\\na=group:BUNDLE 0\\na=msid-semantic: WMS\\nm=audio 9 UDP/TLS/RTP/SAVPF 111\\nc=IN IP4 0.0.0.0... [Direct P2P Link Established]")
+                put("sdp", answerSdp)
+            }
+            publishToClient(clientUuid, payload)
+        }
+    }
+
+    fun publishOutgoingSdpOffer(clientUuid: String, offerSdp: String) {
+        scope.launch {
+            val payload = JSONObject().apply {
+                put("type", "webrtc_call_initiate")
+                put("event", "call")
+                put("clientUuid", clientUuid)
+                put("name", "Phone Portal")
+                put("video", true)
+                put("sdp", offerSdp)
+            }
+            publishToClient(clientUuid, payload)
+        }
+    }
+
+    fun publishIceCandidate(clientUuid: String, candidateJson: String) {
+        scope.launch {
+            val payload = JSONObject().apply {
+                put("type", "webrtc_ice_candidate")
+                put("event", "ice_candidate")
+                put("clientUuid", clientUuid)
+                put("candidate", candidateJson)
             }
             publishToClient(clientUuid, payload)
         }
@@ -1069,31 +1309,17 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    fun startOutgoingCall(clientUuid: String, clientName: String) {
-        _activeCall.value = CallState.Outgoing(clientUuid, clientName)
+    fun startOutgoingCall(clientUuid: String, clientName: String, isVideo: Boolean = true) {
+        _activeCall.value = CallState.Outgoing(clientUuid, clientName, isVideo)
         scope.launch {
-            // Push outgoing call start event to companion server
-            val payload = JSONObject().apply {
-                put("type", "webrtc_call_initiate")
-                put("event", "call")
-                put("clientUuid", clientUuid)
-                put("name", "Phone Portal")
-                put("video", false)
-            }
-            publishToClient(clientUuid, payload)
-
-            delay(3000)
-            if (_activeCall.value is CallState.Outgoing) {
-                _activeCall.value = CallState.Active(clientUuid, clientName)
-                repository.insertCallLog(
-                    CallLog(
-                        clientUuid = clientUuid,
-                        clientName = clientName,
-                        status = "OUTGOING",
-                        isIncoming = false
-                    )
+            repository.insertCallLog(
+                CallLog(
+                    clientUuid = clientUuid,
+                    clientName = clientName,
+                    status = "OUTGOING",
+                    isIncoming = false
                 )
-            }
+            )
         }
     }
 

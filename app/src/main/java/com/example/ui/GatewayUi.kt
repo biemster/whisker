@@ -1,11 +1,20 @@
 package com.example.ui
 
 import com.example.R
-import androidx.compose.foundation.Image
-import androidx.compose.ui.res.painterResource
+import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Environment
+import android.view.ViewGroup
+import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
+import android.webkit.WebView
 import android.widget.Toast
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.flow.collect
+import org.json.JSONObject
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
@@ -351,6 +360,7 @@ fun GatewayDashboard(
         ) {
             CallScreenOverlay(
                 callState = currentCallState,
+                networkManager = viewModel.networkManager,
                 onHangup = { viewModel.declineOrEndCall() },
                 onAnswer = { clientUuid, clientName -> viewModel.acceptCall(clientUuid, clientName) }
             )
@@ -1713,6 +1723,7 @@ fun CallLogsTab(
 @Composable
 fun CallScreenOverlay(
     callState: CallState,
+    networkManager: GatewayNetworkManager,
     onHangup: () -> Unit,
     onAnswer: (String, String) -> Unit
 ) {
@@ -1721,7 +1732,6 @@ fun CallScreenOverlay(
             .fillMaxSize()
             .background(Color(0xFF0F172A))
     ) {
-        // Decorative glowing call signal rings
         val infiniteTransition = rememberInfiniteTransition()
         val pulseScale by infiniteTransition.animateFloat(
             initialValue = 0.9f,
@@ -1768,7 +1778,6 @@ fun CallScreenOverlay(
                         )
                     }
 
-                    // Pulsing Profile Box
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier.size(160.dp)
@@ -1810,12 +1819,10 @@ fun CallScreenOverlay(
                         )
                     }
 
-                    // Acceptance controls
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(32.dp),
                         modifier = Modifier.padding(bottom = 64.dp)
                     ) {
-                        // Decline
                         IconButton(
                             onClick = onHangup,
                             modifier = Modifier
@@ -1825,7 +1832,6 @@ fun CallScreenOverlay(
                             Icon(Icons.Default.Close, contentDescription = "Decline call", tint = Color.White, modifier = Modifier.size(28.dp))
                         }
 
-                        // Accept
                         IconButton(
                             onClick = { onAnswer(callState.clientUuid, callState.clientName) },
                             modifier = Modifier
@@ -1859,7 +1865,6 @@ fun CallScreenOverlay(
                         )
                     }
 
-                    // Dialing animations
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier.size(160.dp)
@@ -1913,53 +1918,27 @@ fun CallScreenOverlay(
             }
 
             is CallState.Active -> {
-                // Interactive split screen layout representing actual live connection
-                Column(modifier = Modifier.fillMaxSize()) {
-                    
-                    // TOP GRID: Live peer remote visual stream (Simulated WebRTC canvas)
-                    Box(
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // LIVE WEBRTC CAMERA & PEER VIDEO STREAM ENGINE
+                    WebRtcCallContainer(
+                        callState = callState,
+                        networkManager = networkManager,
+                        modifier = Modifier.fillMaxSize()
+                    )
+
+                    // TOP OVERLAY: Peer info & Timer Duration
+                    Row(
                         modifier = Modifier
-                            .weight(1.2f)
                             .fillMaxWidth()
-                            .background(Color.Black)
-                            .border(1.dp, Color.Gray.copy(alpha = 0.2f))
+                            .padding(top = 40.dp, start = 16.dp, end = 16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Drawing an active voice spectrum on canvas inside the layout to represent active call streaming
-                        val wavePhase = rememberInfiniteTransition()
-                        val waveOffset by wavePhase.animateFloat(
-                            initialValue = 0f,
-                            targetValue = 360f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(1800, easing = LinearEasing),
-                                repeatMode = RepeatMode.Restart
-                            )
-                        )
-
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val centerY = size.height / 2
-                            val points = 60
-                            val spacing = size.width / points
-                            val strokeBrush = Brush.linearGradient(
-                                colors = listOf(Color(0xFF06B6D4), Color(0xFF8B5CF6))
-                            )
-                            for (i in 0 until points) {
-                                val amplitude = (centerY * 0.4f) * kotlin.math.sin(Math.toRadians((i * 12 + waveOffset).toDouble())).toFloat()
-                                drawLine(
-                                    brush = strokeBrush,
-                                    start = androidx.compose.ui.geometry.Offset(i * spacing, centerY - amplitude),
-                                    end = androidx.compose.ui.geometry.Offset(i * spacing, centerY + amplitude),
-                                    strokeWidth = 4.dp.value
-                                )
-                            }
-                        }
-
-                        // Peer details cardoverlay
                         Box(
                             modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(16.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-                                .padding(8.dp)
+                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(12.dp))
+                                .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
                             Column {
                                 Text(
@@ -1976,15 +1955,12 @@ fun CallScreenOverlay(
                             }
                         }
 
-                        // Timer Duration overlay
                         val minutes = callState.durationSeconds / 60
                         val seconds = callState.durationSeconds % 60
                         Box(
                             modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(16.dp)
-                                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp))
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
                             Text(
                                 text = String.format("%02d:%02d", minutes, seconds),
@@ -1995,70 +1971,12 @@ fun CallScreenOverlay(
                         }
                     }
 
-                    // BOTTOM GRID: Camera feed feedback (local view)
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .background(Color(0xFF1E293B)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        // Local audio visualizer
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Text("🎤", fontSize = 36.sp)
-                            Text(
-                                text = "Audio Call Active",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
-                            )
-                            Text(
-                                text = "Secure connection established",
-                                fontSize = 11.sp,
-                                color = Color.Gray
-                            )
-                        }
-
-                        // PiP Mini window previewing remote node status
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(16.dp)
-                                .size(110.dp, 160.dp)
-                                .background(Color.Black, RoundedCornerShape(12.dp))
-                                .border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
-                                modifier = Modifier.padding(8.dp)
-                            ) {
-                                Text("🌐", fontSize = 18.sp)
-                                Text(
-                                    text = "Peer Router",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White
-                                )
-                                Text(
-                                    text = "TUNNEL STABLE",
-                                    fontSize = 8.sp,
-                                    color = Color.Green,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        }
-                    }
-
-                    // Call controls bar
+                    // BOTTOM OVERLAY: Call Controls Bar
                     Row(
                         modifier = Modifier
+                            .align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .background(Color.Black)
+                            .background(Color.Black.copy(alpha = 0.85f))
                             .padding(vertical = 20.dp, horizontal = 24.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
@@ -2068,7 +1986,7 @@ fun CallScreenOverlay(
                             onClick = { isMuted = !isMuted },
                             modifier = Modifier
                                 .size(48.dp)
-                                .background(if (isMuted) Color.Red else Color.Gray.copy(alpha = 0.2f), CircleShape)
+                                .background(if (isMuted) Color.Red else Color.Gray.copy(alpha = 0.3f), CircleShape)
                         ) {
                             Text(
                                 text = if (isMuted) "MUTED" else "MIC ON",
@@ -2097,7 +2015,7 @@ fun CallScreenOverlay(
                             onClick = { camEnabled = !camEnabled },
                             modifier = Modifier
                                 .size(48.dp)
-                                .background(if (!camEnabled) Color.Red else Color.Gray.copy(alpha = 0.2f), CircleShape)
+                                .background(if (!camEnabled) Color.Red else Color.Gray.copy(alpha = 0.3f), CircleShape)
                         ) {
                             Text(
                                 text = if (camEnabled) "CAM ON" else "CAM OFF",
@@ -2113,6 +2031,299 @@ fun CallScreenOverlay(
         }
     }
 }
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+fun WebRtcCallContainer(
+    callState: CallState,
+    networkManager: GatewayNetworkManager,
+    modifier: Modifier = Modifier
+) {
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var isWebViewReady by remember { mutableStateOf(false) }
+    val pendingSignals = remember { mutableListOf<WebRtcSignal>() }
+
+    fun processSignal(wv: WebView, signal: WebRtcSignal) {
+        if (signal.type == "webrtc_call_answer" && signal.sdp.isNotEmpty()) {
+            wv.evaluateJavascript("setRemoteAnswer(${JSONObject.quote(signal.sdp)});", null)
+        } else if (signal.type == "webrtc_ice_candidate" && signal.candidateJson.isNotEmpty()) {
+            wv.evaluateJavascript("addRemoteIceCandidate(${JSONObject.quote(signal.candidateJson)});", null)
+        }
+    }
+
+    fun triggerInit(wv: WebView?) {
+        if (wv == null || !isWebViewReady) return
+        when (callState) {
+            is CallState.Active -> {
+                val offerSdp = callState.sdp
+                val isVideo = callState.isVideo
+                val js = "initWebRtc($isVideo, ${if (offerSdp.isNotEmpty()) JSONObject.quote(offerSdp) else "null"});"
+                wv.evaluateJavascript(js, null)
+            }
+            is CallState.Outgoing -> {
+                val js = "initWebRtc(true, null);"
+                wv.evaluateJavascript(js, null)
+            }
+            else -> {}
+        }
+        val copy = ArrayList(pendingSignals)
+        pendingSignals.clear()
+        copy.forEach { signal ->
+            processSignal(wv, signal)
+        }
+    }
+
+    LaunchedEffect(callState) {
+        networkManager.incomingSignal.collect { signal ->
+            val active = callState as? CallState.Active
+            val outgoing = callState as? CallState.Outgoing
+            val currentUuid = active?.clientUuid ?: outgoing?.clientUuid
+            if (currentUuid != null && signal.clientUuid == currentUuid) {
+                val wv = webViewRef
+                if (wv != null && isWebViewReady) {
+                    processSignal(wv, signal)
+                } else {
+                    pendingSignals.add(signal)
+                }
+            }
+        }
+    }
+
+    AndroidView(
+        factory = { ctx ->
+            WebView(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.mediaPlaybackRequiresUserGesture = false
+                settings.allowFileAccess = true
+                settings.allowContentAccess = true
+
+                webChromeClient = object : WebChromeClient() {
+                    override fun onPermissionRequest(request: PermissionRequest) {
+                        request.grant(request.resources)
+                    }
+                }
+
+                addJavascriptInterface(object {
+                    @JavascriptInterface
+                    fun onWebViewReady() {
+                        post {
+                            isWebViewReady = true
+                            triggerInit(this@apply)
+                        }
+                    }
+
+                    @JavascriptInterface
+                    fun onLocalSdpGenerated(sdp: String, isOffer: Boolean) {
+                        val clientUuid = (callState as? CallState.Active)?.clientUuid
+                            ?: (callState as? CallState.Outgoing)?.clientUuid ?: ""
+                        if (clientUuid.isNotEmpty()) {
+                            if (isOffer) {
+                                networkManager.publishOutgoingSdpOffer(clientUuid, sdp)
+                            } else {
+                                networkManager.publishSdpAnswer(clientUuid, sdp)
+                            }
+                        }
+                    }
+
+                    @JavascriptInterface
+                    fun onLocalIceCandidateGenerated(candidateJson: String) {
+                        val clientUuid = (callState as? CallState.Active)?.clientUuid
+                            ?: (callState as? CallState.Outgoing)?.clientUuid ?: ""
+                        if (clientUuid.isNotEmpty()) {
+                            networkManager.publishIceCandidate(clientUuid, candidateJson)
+                        }
+                    }
+                }, "AndroidWebRTCBridge")
+
+                loadDataWithBaseURL("https://whisker.local", WEBRTC_HTML_CONTENT, "text/html", "UTF-8", null)
+                webViewRef = this
+            }
+        },
+        update = { webView ->
+            webViewRef = webView
+            if (isWebViewReady) {
+                triggerInit(webView)
+            }
+        },
+        modifier = modifier
+    )
+}
+
+private const val WEBRTC_HTML_CONTENT = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0; background-color: #0F172A; color: white; font-family: system-ui, -apple-system, sans-serif; height: 100vh; width: 100vw; overflow: hidden; }
+  .video-container { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: #020617; }
+  #remoteVideo { width: 100%; height: 100%; object-fit: cover; background: #090D16; }
+  #localVideo { position: absolute; bottom: 90px; right: 20px; width: 110px; height: 155px; object-fit: cover; border-radius: 12px; border: 2px solid #38BDF8; box-shadow: 0 8px 20px rgba(0,0,0,0.6); background: #1E293B; z-index: 10; }
+  .status-overlay { position: absolute; top: 20px; left: 20px; background: rgba(15, 23, 42, 0.75); border: 1px solid rgba(56, 189, 248, 0.3); padding: 8px 14px; border-radius: 20px; font-size: 11px; font-weight: 700; color: #38BDF8; letter-spacing: 1px; backdrop-filter: blur(8px); z-index: 5; display: flex; align-items: center; gap: 8px; }
+  .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: #10B981; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0% { opacity: 0.4; transform: scale(0.9); } 50% { opacity: 1; transform: scale(1.2); } 100% { opacity: 0.4; transform: scale(0.9); } }
+</style>
+</head>
+<body>
+<div class="video-container">
+  <div class="status-overlay" id="statusText"><div class="pulse-dot"></div> DIRECT P2P LINK</div>
+  <video id="remoteVideo" autoplay playsinline></video>
+  <video id="localVideo" autoplay playsinline muted></video>
+</div>
+
+<script>
+  let pc = null;
+  let localStream = null;
+  let initialized = false;
+
+  const rtcConfig = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]
+  };
+
+  window.onload = function() {
+    if (window.AndroidWebRTCBridge && window.AndroidWebRTCBridge.onWebViewReady) {
+      window.AndroidWebRTCBridge.onWebViewReady();
+    }
+  };
+
+  function createHostSyntheticStream() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 480;
+    const ctx = canvas.getContext('2d');
+    let angle = 0;
+    setInterval(() => {
+      angle = (angle + 0.08) % (Math.PI * 2);
+      ctx.fillStyle = '#0F172A';
+      ctx.fillRect(0, 0, 640, 480);
+      ctx.fillStyle = '#10B981';
+      ctx.beginPath();
+      ctx.arc(320, 200 + Math.sin(angle) * 15, 65, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ECFDF5';
+      ctx.font = 'bold 24px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('PHONE PORTAL STREAM', 320, 320);
+      ctx.fillStyle = '#34D399';
+      ctx.font = '16px monospace';
+      ctx.fillText("HOST P2P LINK ACTIVE", 320, 355);
+    }, 50);
+
+    const stream = canvas.captureStream(30);
+    try {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const dest = audioCtx.createMediaStreamDestination();
+      osc.frequency.value = 520;
+      osc.connect(dest);
+      osc.start();
+      const audioTrack = dest.stream.getAudioTracks()[0];
+      if (audioTrack) stream.addTrack(audioTrack);
+    } catch(e) {}
+    return stream;
+  }
+
+  async function initWebRtc(isVideo, remoteOfferSdp) {
+    if (initialized) return;
+    initialized = true;
+
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true });
+      } catch(e) {
+        console.error("Camera/Mic capture error", e);
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+        } catch(e2) {
+          console.error("Audio capture fallback error", e2);
+        }
+      }
+    }
+
+    if (!localStream || localStream.getTracks().length === 0) {
+      localStream = createHostSyntheticStream();
+    }
+
+    const localVid = document.getElementById('localVideo');
+    if (localVid) localVid.srcObject = localStream;
+
+    pc = new RTCPeerConnection(rtcConfig);
+
+    if (localStream) {
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+    }
+
+    pc.ontrack = (event) => {
+      if (event.streams && event.streams[0]) {
+        const remoteVid = document.getElementById('remoteVideo');
+        if (remoteVid) remoteVid.srcObject = event.streams[0];
+        document.getElementById('statusText').innerHTML = '<div class="pulse-dot"></div> LIVE STREAM ACTIVE';
+      }
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && window.AndroidWebRTCBridge) {
+        window.AndroidWebRTCBridge.onLocalIceCandidateGenerated(JSON.stringify(event.candidate.toJSON()));
+      }
+    };
+
+    if (remoteOfferSdp) {
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: remoteOfferSdp }));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      if (window.AndroidWebRTCBridge) {
+        window.AndroidWebRTCBridge.onLocalSdpGenerated(answer.sdp, false);
+      }
+    } else {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      if (window.AndroidWebRTCBridge) {
+        window.AndroidWebRTCBridge.onLocalSdpGenerated(offer.sdp, true);
+      }
+    }
+  }
+
+  function setRemoteAnswer(sdp) {
+    if (pc && sdp) {
+      pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: sdp }))
+        .catch(e => console.error("Error setting remote answer SDP", e));
+    }
+  }
+
+  function addRemoteIceCandidate(candidateJsonStr) {
+    if (pc && candidateJsonStr) {
+      try {
+        const cand = typeof candidateJsonStr === 'string' ? JSON.parse(candidateJsonStr) : candidateJsonStr;
+        pc.addIceCandidate(new RTCIceCandidate(cand))
+          .catch(e => console.error("Error adding remote ICE candidate", e));
+      } catch(e) {
+        console.error("Candidate parse error", e);
+      }
+    }
+  }
+
+  function closeCall() {
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+    }
+    if (pc) {
+      pc.close();
+      pc = null;
+    }
+  }
+</script>
+</body>
+</html>
+"""
 
 fun generateQrCodeBitmap(content: String, size: Int): Bitmap? {
     if (content.isEmpty()) return null
