@@ -1,4 +1,4 @@
-package com.example
+package com.whisker
 
 import android.app.KeyguardManager
 import android.content.Context
@@ -15,18 +15,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
-import com.example.data.AppDatabase
-import com.example.data.CallState
-import com.example.data.LinkRepository
-import com.example.ui.GatewayDashboard
-import com.example.ui.GatewayViewModel
-import com.example.ui.theme.MyApplicationTheme
+import com.whisker.data.AppDatabase
+import com.whisker.data.CallState
+import com.whisker.data.LinkRepository
+import com.whisker.ui.GatewayDashboard
+import com.whisker.ui.GatewayViewModel
+import com.whisker.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
     
     private val database by lazy { AppDatabase.getDatabase(this) }
     private val repository by lazy { LinkRepository(database) }
-    private val networkManager by lazy { com.example.data.CompanionRegistry.getOrInitializeManager(this) }
+    private val networkManager by lazy { com.whisker.data.CompanionRegistry.getOrInitializeManager(this) }
 
     private val viewModel: GatewayViewModel by viewModels {
         GatewayViewModel.Factory(repository, networkManager)
@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
         
         enableEdgeToEdge()
         
-        com.example.data.CompanionRegistry.networkManager = networkManager
+        com.whisker.data.CompanionRegistry.networkManager = networkManager
         networkManager.registerFcmToken()
         
         handleCallOrChatIntent(intent)
@@ -72,13 +72,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        com.example.data.CompanionRegistry.isAppInForeground = true
+        com.whisker.data.CompanionRegistry.isAppInForeground = true
         checkAndRequestAppPermissions()
     }
 
     override fun onPause() {
         super.onPause()
-        com.example.data.CompanionRegistry.isAppInForeground = false
+        com.whisker.data.CompanionRegistry.isAppInForeground = false
     }
 
     private fun checkAndRequestAppPermissions() {

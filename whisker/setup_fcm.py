@@ -292,10 +292,11 @@ def main():
         apps_res = request_with_retry("GET", f"https://firebase.googleapis.com/v1beta1/projects/{PROJECT_ID}/androidApps", headers=headers, retry_404=False)
         apps_list = apps_res.json().get("apps", []) if apps_res.status_code == 200 else []
 
-        if not apps_list:
-            print("No existing Android app found. Creating 'com.example' Android app...")
+        whisker_app = next((a for a in apps_list if a.get("packageName") == "com.whisker"), None)
+        if not whisker_app:
+            print("Creating 'com.whisker' Android app in Firebase...")
             create_res = request_with_retry("POST", f"https://firebase.googleapis.com/v1beta1/projects/{PROJECT_ID}/androidApps", 
-                                            json={"packageName": "com.example", "displayName": "Whisker Gateway"}, headers=headers, retry_404=False)
+                                            json={"packageName": "com.whisker", "displayName": "Whisker Gateway"}, headers=headers, retry_404=False)
             if create_res.status_code in [200, 202]:
                 op_name = create_res.json().get("name")
                 if op_name:
@@ -311,10 +312,12 @@ def main():
                 apps_res = request_with_retry("GET", f"https://firebase.googleapis.com/v1beta1/projects/{PROJECT_ID}/androidApps", headers=headers, retry_404=False)
                 if apps_res.status_code == 200:
                     apps_list = apps_res.json().get("apps", [])
-                    if apps_list: break
+                    whisker_app = next((a for a in apps_list if a.get("packageName") == "com.whisker"), None)
+                    if whisker_app: break
 
-        if apps_list:
-            app_id = apps_list[0].get("appId", "")
+        target_app = whisker_app or (apps_list[0] if apps_list else None)
+        if target_app:
+            app_id = target_app.get("appId", "")
             if app_id:
                 cfg_res = request_with_retry("GET", f"https://firebase.googleapis.com/v1beta1/projects/{PROJECT_ID}/androidApps/{app_id}/config", headers=headers, retry_404=False)
                 if cfg_res.status_code == 200:

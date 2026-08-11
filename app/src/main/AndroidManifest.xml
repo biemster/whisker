@@ -46,7 +46,7 @@
         </activity>
 
         <receiver
-            android:name="com.example.data.CallActionReceiver"
+            android:name="com.whisker.data.CallActionReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="ACTION_DECLINE_CALL" />
@@ -55,7 +55,7 @@
         </receiver>
 
         <service
-            android:name="com.example.data.MyFirebaseMessagingService"
+            android:name="com.whisker.data.MyFirebaseMessagingService"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />

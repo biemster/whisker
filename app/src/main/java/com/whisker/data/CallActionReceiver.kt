@@ -1,10 +1,10 @@
-package com.example.data
+package com.whisker.data
 
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import com.example.MainActivity
+import com.whisker.MainActivity
 
 class CallActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {

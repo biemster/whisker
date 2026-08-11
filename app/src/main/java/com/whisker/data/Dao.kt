@@ -1,4 +1,4 @@
-package com.example.data
+package com.whisker.data
 
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow

@@ -1,6 +1,6 @@
-package com.example.ui
+package com.whisker.ui
 
-import com.example.R
+import com.whisker.R
 import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Environment
@@ -63,7 +63,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.data.*
+import com.whisker.data.*
 import kotlinx.coroutines.delay
 import java.io.File
 import java.text.SimpleDateFormat

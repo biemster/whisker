@@ -138,7 +138,7 @@ whisker setup-fcm
 - **Browser OAuth2 Authentication**: Authenticates with your Google account.
 - **Smart Project Management**: Reuses an existing `"Whisker FCM"` project (`whisker-push-sa-XXXXXX`) or creates a new one if none exists.
 - **Batch API Enablement**: Enables `iam.googleapis.com`, `firebase.googleapis.com`, `fcm.googleapis.com`, `cloudmessaging.googleapis.com`, `apikeys.googleapis.com`, and `cloudresourcemanager.googleapis.com`.
-- **Firebase & App Provisioning**: Links Firebase to the GCP project and creates the default Android app (`com.example`).
+- **Firebase & App Provisioning**: Links Firebase to the GCP project and creates the default Android app (`com.whisker`).
 - **Service Account & IAM Binding**: Creates `whisker-push@<PROJECT_ID>.iam.gserviceaccount.com` and grants the necessary admin and usage roles.
 - **Credentials Export**: Automatically downloads and saves `whisker-push-sa.json` containing the service account key, project number (Sender ID), API key, and App ID.
 

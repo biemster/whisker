@@ -1,4 +1,4 @@
-package com.example.data
+package com.whisker.data
 
 import org.json.JSONArray
 
@@ -12,8 +12,8 @@ import android.os.Build
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.example.MainActivity
-import com.example.R
+import com.whisker.MainActivity
+import com.whisker.R
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1498,7 +1498,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
         val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
 
         val builder = NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(com.example.R.drawable.ic_launcher_foreground)
+            .setSmallIcon(com.whisker.R.drawable.ic_launcher_foreground)
             .setContentTitle("Incoming ${if (isVideo) "Video" else "Audio"} Call")
             .setContentText("$clientName is calling...")
             .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -1508,8 +1508,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
             .setAutoCancel(true)
             .setSound(soundUri)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .addAction(com.example.R.drawable.ic_launcher_foreground, "Answer", answerPendingIntent)
-            .addAction(com.example.R.drawable.ic_launcher_foreground, "Decline", declinePendingIntent)
+            .addAction(com.whisker.R.drawable.ic_launcher_foreground, "Answer", answerPendingIntent)
+            .addAction(com.whisker.R.drawable.ic_launcher_foreground, "Decline", declinePendingIntent)
 
         notificationManager.notify(1002, builder.build())
 
@@ -1584,7 +1584,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
         val uniqueNotificationId = if (isCall) notificationId else System.currentTimeMillis().toInt()
 
         val builder = NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(com.example.R.drawable.ic_launcher_foreground)
+            .setSmallIcon(com.whisker.R.drawable.ic_launcher_foreground)
             .setContentTitle(title)
             .setContentText(body)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
