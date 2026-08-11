@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.RingtoneManager
 import android.os.Build
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
@@ -427,11 +428,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                     )
                                 }
                                 "call" -> {
-                                    showNotification(
-                                        "Incoming Call",
-                                        "Incoming direct call alert. Tap to open.",
-                                        1002
-                                    )
+                                    val name = tickleJson.optString("name", "Incoming Call")
+                                    val clientUuid = tickleJson.optString("clientUuid", tickleJson.optString("uuid", ""))
+                                    if (clientUuid.isNotEmpty()) {
+                                        setIncomingCallState(clientUuid, name, isVideo = true, sdp = "")
+                                        showIncomingCallNotification(clientUuid, name, true)
+                                    }
                                 }
                                 "visitor" -> {
                                     showNotification(
@@ -655,7 +657,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 val file = if (json.isNull("file")) null else json.optString("file").takeIf { it.isNotEmpty() && it != "null" }
                                 val existingMsgs = repository.getMessagesForClientSync(uuid)
                                 val isDuplicate = existingMsgs.any { m ->
-                                    (messageId.isNotEmpty() && m.id.toString() == messageId) ||
+                                    (messageId.isNotEmpty() && m.serverId.toString() == messageId) ||
                                     (m.messageText == text && m.filePath == file && kotlin.math.abs(m.timestamp - System.currentTimeMillis()) < 10000)
                                 }
                                 if (!isDuplicate) {
@@ -682,22 +684,39 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 }
                 "call" -> {
                     val token = json.optString("token", "")
-                    val name = json.optString("name", "Approved Caller")
-                    val isVideo = json.optBoolean("video", false)
+                    val name = json.optString("name", "Caller")
+                    val isVideo = json.optBoolean("video", true)
                     val sdp = json.optString("sdp", "")
 
                     scope.launch {
-                        val request = repository.getRequestByUuid(uuid)
-                        if (request != null && request.status == "APPROVED" && (token.isEmpty() || request.token == token)) {
-                            if (_activeCall.value is CallState.Idle) {
-                                _activeCall.value = CallState.Incoming(uuid, name, isVideo, sdp)
-                                showNotification(
-                                    "Incoming Call",
-                                    "Incoming call from approved contact '$name'. Tap to answer.",
-                                    1002
+                        val existing = repository.getRequestByUuid(uuid)
+                        val callerName = if (!existing?.name.isNullOrEmpty() && existing?.name != "Guest") existing!!.name else name
+                        if (existing == null) {
+                            repository.insertRequest(
+                                ClientRequest(
+                                    uuid = uuid,
+                                    name = callerName,
+                                    message = "Approved Contact",
+                                    status = "APPROVED",
+                                    token = token,
+                                    timestamp = System.currentTimeMillis(),
+                                    lastSeen = System.currentTimeMillis(),
+                                    isOnline = true
                                 )
-                            }
+                            )
+                        } else if (existing.status != "APPROVED" || (token.isNotEmpty() && existing.token != token)) {
+                            repository.updateRequest(
+                                existing.copy(
+                                    status = "APPROVED",
+                                    token = if (token.isNotEmpty()) token else existing.token,
+                                    name = callerName,
+                                    lastSeen = System.currentTimeMillis()
+                                )
+                            )
                         }
+
+                        setIncomingCallState(uuid, callerName, isVideo, sdp)
+                        showIncomingCallNotification(uuid, callerName, isVideo)
                     }
                 }
                 "signal" -> {
@@ -707,13 +726,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     _incomingSignal.tryEmit(WebRtcSignal(uuid, signalType, candidate, sdp))
                 }
                 "hangup" -> {
-                    val token = json.optString("token", "")
                     scope.launch {
-                        val request = repository.getRequestByUuid(uuid)
-                        if (request != null && request.status == "APPROVED" && (token.isEmpty() || request.token == token)) {
-                            if (_activeCall.value !is CallState.Idle) {
-                                _activeCall.value = CallState.Idle
-                            }
+                        if (_activeCall.value !is CallState.Idle) {
+                            _activeCall.value = CallState.Idle
+                            cancelCallNotification()
+                            updateAudioModeForCall(false)
                         }
                     }
                 }
@@ -811,22 +828,33 @@ class GatewayNetworkManager(private val context: Context, private val repository
             val clientName = req?.name ?: "Guest"
             val isIncoming = (sender != "phone")
 
-            repository.insertMessage(
-                Message(
-                    serverId = currentId,
-                    clientUuid = msgUuid,
-                    clientName = clientName,
-                    messageText = text,
-                    timestamp = createdAt,
-                    filePath = filePath,
-                    isIncoming = isIncoming,
-                    previousMessageId = prevId
-                )
-            )
+            val existingLocal = repository.getMessagesForClientSync(msgUuid).find { 
+                it.serverId == currentId || 
+                (it.serverId == 0L && it.messageText == text && it.isIncoming == isIncoming && kotlin.math.abs(it.timestamp - createdAt) < 15000) 
+            }
 
-            if (isIncoming) {
-                val cleanMsg = if (filePath != null) "🔗 File: [$text]" else text
-                showNotification("Message from $clientName", cleanMsg, 1003, msgUuid)
+            if (existingLocal != null) {
+                if (existingLocal.serverId == 0L) {
+                    repository.updateMessage(existingLocal.copy(serverId = currentId, previousMessageId = prevId))
+                }
+            } else {
+                repository.insertMessage(
+                    Message(
+                        serverId = currentId,
+                        clientUuid = msgUuid,
+                        clientName = clientName,
+                        messageText = text,
+                        timestamp = createdAt,
+                        filePath = filePath,
+                        isIncoming = isIncoming,
+                        previousMessageId = prevId
+                    )
+                )
+
+                if (isIncoming) {
+                    val cleanMsg = if (filePath != null) "🔗 File: [$text]" else text
+                    showNotification("Message from $clientName", cleanMsg, 1003, msgUuid)
+                }
             }
 
             currentId = if (prevId != null && prevId > 0) prevId else null
@@ -1212,11 +1240,26 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
+    fun setIncomingCallState(clientUuid: String, clientName: String, isVideo: Boolean = true, sdp: String = "") {
+        val current = _activeCall.value
+        if (current is CallState.Idle) {
+            _activeCall.value = CallState.Incoming(clientUuid, clientName, isVideo, sdp)
+        } else if (current is CallState.Incoming && current.clientUuid == clientUuid) {
+            val updatedSdp = if (sdp.isNotEmpty()) sdp else current.sdp
+            _activeCall.value = CallState.Incoming(clientUuid, clientName, isVideo, updatedSdp)
+        }
+    }
+
     fun acceptCall(clientUuid: String, clientName: String) {
-        val currentIncoming = _activeCall.value as? CallState.Incoming
+        val current = _activeCall.value
+        if (current is CallState.Active && current.clientUuid == clientUuid) return
+
+        val currentIncoming = current as? CallState.Incoming
         val sdpOffer = currentIncoming?.sdp ?: ""
         val isVideo = currentIncoming?.isVideo ?: true
 
+        cancelCallNotification()
+        updateAudioModeForCall(true)
         _activeCall.value = CallState.Active(clientUuid, clientName, isVideo, 0, sdpOffer)
         scope.launch {
             repository.insertCallLog(
@@ -1270,6 +1313,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
     fun declineOrEndCall() {
         val current = _activeCall.value
+        cancelCallNotification()
+        updateAudioModeForCall(false)
         _activeCall.value = CallState.Idle
         scope.launch {
             if (current is CallState.Active) {
@@ -1310,6 +1355,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
     }
 
     fun startOutgoingCall(clientUuid: String, clientName: String, isVideo: Boolean = true) {
+        cancelCallNotification()
+        updateAudioModeForCall(true)
         _activeCall.value = CallState.Outgoing(clientUuid, clientName, isVideo)
         scope.launch {
             repository.insertCallLog(
@@ -1353,6 +1400,130 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 put("timestamp", System.currentTimeMillis())
             }
             publishToClient(clientUuid, payload)
+        }
+    }
+
+    fun cancelCallNotification() {
+        try {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.cancel(1002)
+        } catch (e: Exception) {
+            Log.e("GatewayNetworkManager", "Error cancelling call notification", e)
+        }
+    }
+
+    private fun updateAudioModeForCall(inCall: Boolean) {
+        try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+            if (audioManager != null) {
+                if (inCall) {
+                    audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+                    audioManager.isSpeakerphoneOn = true
+                } else {
+                    audioManager.mode = android.media.AudioManager.MODE_NORMAL
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("GatewayNetworkManager", "Error updating audio mode", e)
+        }
+    }
+
+    fun showIncomingCallNotification(clientUuid: String, clientName: String, isVideo: Boolean = true) {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channelId = "incoming_calls_channel"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            val audioAttributes = android.media.AudioAttributes.Builder()
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                .build()
+
+            val channel = NotificationChannel(
+                channelId,
+                "Incoming Calls",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Full screen incoming call alerts"
+                enableLights(true)
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 1000, 500, 1000)
+                setSound(soundUri, audioAttributes)
+                lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        // 1. Full-screen intent launching MainActivity
+        val fullScreenIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("incoming_call", true)
+            putExtra("client_uuid", clientUuid)
+            putExtra("client_name", clientName)
+            putExtra("is_video", isVideo)
+        }
+        val fullScreenPendingIntent = PendingIntent.getActivity(
+            context,
+            1002,
+            fullScreenIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // 2. Answer Action Intent
+        val answerIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("action_answer_call", true)
+            putExtra("client_uuid", clientUuid)
+            putExtra("client_name", clientName)
+        }
+        val answerPendingIntent = PendingIntent.getActivity(
+            context,
+            1003,
+            answerIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // 3. Decline Action Intent
+        val declineIntent = Intent(context, CallActionReceiver::class.java).apply {
+            action = "ACTION_DECLINE_CALL"
+            putExtra("client_uuid", clientUuid)
+        }
+        val declinePendingIntent = PendingIntent.getBroadcast(
+            context,
+            1004,
+            declineIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+
+        val builder = NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(com.example.R.drawable.ic_launcher_foreground)
+            .setContentTitle("Incoming ${if (isVideo) "Video" else "Audio"} Call")
+            .setContentText("$clientName is calling...")
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setFullScreenIntent(fullScreenPendingIntent, true)
+            .setOngoing(true)
+            .setAutoCancel(true)
+            .setSound(soundUri)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .addAction(com.example.R.drawable.ic_launcher_foreground, "Answer", answerPendingIntent)
+            .addAction(com.example.R.drawable.ic_launcher_foreground, "Decline", declinePendingIntent)
+
+        notificationManager.notify(1002, builder.build())
+
+        // Wake screen up immediately
+        try {
+            val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            @Suppress("DEPRECATION")
+            val wakeLock = powerManager.newWakeLock(
+                PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
+                "Whisker:IncomingCallWakeLock"
+            )
+            wakeLock.acquire(10000)
+        } catch (e: Exception) {
+            Log.e("GatewayNetworkManager", "Error acquiring full screen wake lock for incoming call", e)
         }
     }
 

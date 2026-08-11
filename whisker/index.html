@@ -625,8 +625,17 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
-            }).then(() => {
-                console.log("Message delivered.");
+            })
+            .then(res => res.json())
+            .then((data) => {
+                if (data && data.id) {
+                    const idx = chatLogs.findIndex(m => m.id === newMsg.id);
+                    if (idx !== -1) {
+                        chatLogs[idx].id = data.id;
+                        localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                    }
+                }
+                console.log("Message delivered.", data);
             }).catch(e => {
                 console.error("Delivery failed", e);
             });
@@ -669,8 +678,17 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
-                }).then(() => {
+                })
+                .then(res => res.json())
+                .then((data) => {
                     progress.classList.add('hidden');
+                    if (data && data.id) {
+                        const idx = chatLogs.findIndex(m => m.id === newMsg.id);
+                        if (idx !== -1) {
+                            chatLogs[idx].id = data.id;
+                            localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                        }
+                    }
                     console.log("File uploaded successfully.");
                 }).catch(err => {
                     progress.classList.add('hidden');

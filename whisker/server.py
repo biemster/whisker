@@ -667,7 +667,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
 
         try:
             # Deliver any pending stored events
-            pending_events = self.db.pop_guest_events(uuid)
+            pending_events = self.db.get_guest_events(uuid)
             for ev in pending_events:
                 payload = ev.get('payload', '')
                 if isinstance(payload, dict):
@@ -675,6 +675,9 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 msg_line = f"data: {payload}\n\n".encode('utf-8')
                 wfile.write(msg_line)
                 wfile.flush()
+
+            if pending_events:
+                self.db.delete_guest_events(uuid)
 
             wfile.write(b": keep-alive\n\n")
             wfile.flush()

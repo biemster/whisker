@@ -50,6 +50,9 @@ interface MessageDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessage(message: Message)
 
+    @Update
+    suspend fun updateMessage(message: Message)
+
     @Query("UPDATE messages SET isRead = 1 WHERE clientUuid = :clientUuid")
     suspend fun markAsRead(clientUuid: String)
 

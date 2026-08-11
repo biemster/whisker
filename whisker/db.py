@@ -348,7 +348,7 @@ class DatabaseManager:
             finally:
                 conn.close()
 
-    def pop_guest_events(self, client_uuid):
+    def get_guest_events(self, client_uuid):
         with self.lock:
             conn = self.get_connection()
             try:
@@ -359,9 +359,16 @@ class DatabaseManager:
                 )
                 rows = cursor.fetchall()
                 events = [dict(r) for r in rows]
-                if events:
-                    cursor.execute("DELETE FROM guest_events WHERE client_uuid = ?", (client_uuid,))
-                    conn.commit()
                 return events
+            finally:
+                conn.close()
+
+    def delete_guest_events(self, client_uuid):
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM guest_events WHERE client_uuid = ?", (client_uuid,))
+                conn.commit()
             finally:
                 conn.close()

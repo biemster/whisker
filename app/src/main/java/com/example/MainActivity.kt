@@ -1,17 +1,22 @@
 package com.example
 
+import android.app.KeyguardManager
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Scaffold
-import androidx.compose.ui.Modifier
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
 import com.example.data.AppDatabase
-import com.example.data.GatewayNetworkManager
+import com.example.data.CallState
 import com.example.data.LinkRepository
 import com.example.ui.GatewayDashboard
 import com.example.ui.GatewayViewModel
@@ -19,7 +24,6 @@ import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
     
-    // Simple Constructor Injection/Initialization as mandated by architecture guidelines
     private val database by lazy { AppDatabase.getDatabase(this) }
     private val repository by lazy { LinkRepository(database) }
     private val networkManager by lazy { com.example.data.CompanionRegistry.getOrInitializeManager(this) }
@@ -31,22 +35,16 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Request Notification, Camera, and Microphone Permissions
-        val permissionsToRequest = mutableListOf<String>()
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            permissionsToRequest.add(android.Manifest.permission.POST_NOTIFICATIONS)
-        }
-        permissionsToRequest.add(android.Manifest.permission.CAMERA)
-        permissionsToRequest.add(android.Manifest.permission.RECORD_AUDIO)
-        requestPermissions(permissionsToRequest.toTypedArray(), 101)
+        turnScreenOnAndShowWhenLocked()
+        checkAndRequestAppPermissions()
         
-        // Supports full-bleed edge-to-edge drawing, safe areas automatically handled inside Compose
         enableEdgeToEdge()
         
-        // Register connection manager for BroadcastReceiver push-delivery
         com.example.data.CompanionRegistry.networkManager = networkManager
         networkManager.registerFcmToken()
         
+        handleCallOrChatIntent(intent)
+
         setContent {
             MyApplicationTheme {
                 val chatUuid = intent.getStringExtra("chat_uuid")
@@ -65,13 +63,86 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        turnScreenOnAndShowWhenLocked()
+        handleCallOrChatIntent(intent)
+    }
+
     override fun onResume() {
         super.onResume()
         com.example.data.CompanionRegistry.isAppInForeground = true
+        checkAndRequestAppPermissions()
     }
 
     override fun onPause() {
         super.onPause()
         com.example.data.CompanionRegistry.isAppInForeground = false
+    }
+
+    private fun checkAndRequestAppPermissions() {
+        val permissionsToRequest = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(android.Manifest.permission.CAMERA)
+        }
+        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(android.Manifest.permission.RECORD_AUDIO)
+        }
+        if (permissionsToRequest.isNotEmpty()) {
+            requestPermissions(permissionsToRequest.toTypedArray(), 101)
+        }
+    }
+
+    private fun turnScreenOnAndShowWhenLocked() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+            val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+            keyguardManager?.requestDismissKeyguard(this, null)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
+    }
+
+    private fun handleCallOrChatIntent(intent: Intent?) {
+        if (intent == null) return
+        
+        val chatUuid = intent.getStringExtra("chat_uuid")
+        if (!chatUuid.isNullOrEmpty()) {
+            viewModel.setActiveChatClientId(chatUuid)
+        }
+
+        val clientUuid = intent.getStringExtra("client_uuid")
+        val clientName = intent.getStringExtra("client_name") ?: "Contact"
+        val isAnswer = intent.getBooleanExtra("action_answer_call", false)
+        val isDecline = intent.getBooleanExtra("action_decline_call", false)
+        val isIncomingCall = intent.getBooleanExtra("incoming_call", false)
+
+        if (isAnswer && !clientUuid.isNullOrEmpty()) {
+            networkManager.acceptCall(clientUuid, clientName)
+            networkManager.cancelCallNotification()
+        } else if (isDecline && !clientUuid.isNullOrEmpty()) {
+            networkManager.declineOrEndCall()
+            networkManager.cancelCallNotification()
+        } else if ((isIncomingCall || !clientUuid.isNullOrEmpty()) && networkManager.activeCall.value is CallState.Idle) {
+            if (!clientUuid.isNullOrEmpty()) {
+                networkManager.setIncomingCallState(clientUuid, clientName, isVideo = intent.getBooleanExtra("is_video", true))
+            }
+            networkManager.cancelCallNotification()
+        } else if (isIncomingCall) {
+            networkManager.cancelCallNotification()
+        }
     }
 }
