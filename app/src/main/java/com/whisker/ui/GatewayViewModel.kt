@@ -149,6 +149,13 @@ class GatewayViewModel(
         }
     }
 
+    fun toggleAutoAccept(request: ClientRequest, autoAccept: Boolean) {
+        viewModelScope.launch {
+            val updated = request.copy(autoAcceptCall = autoAccept)
+            repository.updateRequest(updated)
+        }
+    }
+
     // Message controls
     fun sendMessage(clientUuid: String, clientName: String, text: String, filePath: String? = null) {
         networkManager.sendLocalMessage(clientUuid, clientName, text, filePath)

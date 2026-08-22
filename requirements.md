@@ -16,7 +16,9 @@ The system consists of three primary components:
 ### 2.1 Core Functionality
 - **Home Server Connectivity**:
   - Connects to the Home Server via standard HTTP/HTTPS API routes.
-  - Pure FCM Signaling & Battery Efficiency: Event fetching is triggered strictly on-demand when an FCM push tickle notification is received. The app connects to the Home Server to fetch pending events (`/api/host/events`), processes the events, and immediately returns to a low-power sleep state. Persistent background connections (such as continuous SSE background streams or periodic polling loops) are explicitly prohibited to maximize battery life.
+  - Pure FCM Signaling & Battery Efficiency: When the app is in the background or dormant, persistent background connections (such as continuous SSE background streams or background polling loops) are explicitly prohibited to maximize battery life. Background event fetching is triggered strictly on-demand when an FCM push tickle notification is received. The app connects to the Home Server to fetch pending events (`/api/host/events`), processes the events, and immediately returns to a low-power sleep state.
+  - Active Foreground Health & Client Presence Polling: When the mobile app is open and active in the foreground, the app runs a lightweight foreground polling loop to query client online statuses and verify server health, keeping the real-time Connection bubble and guest online indicators up-to-date.
+  - No Battery Optimization Exemption Required: Every feature and background/Doze wakeup function must work out-of-the-box on standard Android power management without requiring battery optimization exemptions (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) or special whitelisting.
 - **WebRTC Calling & Video**:
   - Receives incoming calls and places outgoing WebRTC audio/video calls with guest clients with live video rendering and WebRTC PeerConnection setup.
   - Requests runtime CAMERA and RECORD_AUDIO permissions upon setup and gracefully falls back to synthetic video/audio generators if physical media hardware is unavailable.
@@ -139,7 +141,10 @@ The system consists of three primary components:
 3. **Pure FCM Push Tickle Architecture & Battery Preservation**:
    - When a guest posts a call, message, or invite claim event, the Home Server enqueues the event and triggers an FCM HTTP v1 "tickle" payload via Google's OAuth2 service account credentials (`whisker-push-sa.json`) to wake up or notify the Whisker Mobile Gateway App.
    - FCM HTTP v1 authentication uses Google OAuth2 JWT tokens dynamically generated from `whisker-push-sa.json` (created via `whisker setup-fcm`). Legacy FCM server keys are deprecated and removed.
-   - The Mobile App relies strictly on FCM push notifications to trigger fetching pending events from `/api/host/events` on-demand. Continuous background SSE streams and periodic polling loops are explicitly prohibited to conserve mobile device battery.
+   - Zero Metadata in Push Messages: Push notifications sent via FCM are strictly empty tickles containing no payload data (no call SDP, contact names, tokens, or client UUIDs). They serve solely as a wake-up impulse informing the mobile device to fetch pending host events from `/api/host/events` on the Home Server.
+   - The Mobile App relies strictly on FCM push notifications to trigger fetching pending events from `/api/host/events` on-demand when in the background or dormant. Continuous background SSE streams and background polling loops are explicitly prohibited to conserve mobile device battery.
+   - When the mobile app is open in the foreground, a lightweight foreground presence/health polling loop is permitted to maintain accurate real-time connection bubbles and client online status indicators.
+   - No battery optimization exemption is required for standard operation.
 
 ---
 

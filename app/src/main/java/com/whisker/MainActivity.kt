@@ -73,6 +73,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         com.whisker.data.CompanionRegistry.isAppInForeground = true
+        networkManager.fetchPendingEventsFromServer()
         checkAndRequestAppPermissions()
     }
 
@@ -105,15 +106,14 @@ class MainActivity : ComponentActivity() {
             setTurnScreenOn(true)
             val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
             keyguardManager?.requestDismissKeyguard(this, null)
-        } else {
-            @Suppress("DEPRECATION")
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-            )
         }
+        @Suppress("DEPRECATION")
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        )
     }
 
     private fun handleCallOrChatIntent(intent: Intent?) {
@@ -130,8 +130,10 @@ class MainActivity : ComponentActivity() {
         val isDecline = intent.getBooleanExtra("action_decline_call", false)
         val isIncomingCall = intent.getBooleanExtra("incoming_call", false)
 
+        val isVideo = intent.getBooleanExtra("is_video", true)
+
         if (isAnswer && !clientUuid.isNullOrEmpty()) {
-            networkManager.acceptCall(clientUuid, clientName)
+            networkManager.acceptCall(clientUuid, clientName, isVideo = isVideo)
             networkManager.cancelCallNotification()
         } else if (isDecline && !clientUuid.isNullOrEmpty()) {
             networkManager.declineOrEndCall()

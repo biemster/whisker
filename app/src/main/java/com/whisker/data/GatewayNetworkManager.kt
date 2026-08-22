@@ -82,8 +82,23 @@ class GatewayNetworkManager(private val context: Context, private val repository
         .writeTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
         .build()
 
+    private fun isEmulator(): Boolean {
+        return Build.FINGERPRINT.startsWith("generic") ||
+                Build.FINGERPRINT.startsWith("unknown") ||
+                Build.MODEL.contains("google_sdk") ||
+                Build.MODEL.contains("Emulator") ||
+                Build.MODEL.contains("Android SDK built for x86") ||
+                Build.MANUFACTURER.contains("Genymotion") ||
+                (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic")) ||
+                "google_sdk" == Build.PRODUCT
+    }
+
+    private fun getDefaultServerUrl(): String {
+        return if (isEmulator()) "http://10.0.2.2:3000" else "http://localhost:3000"
+    }
+
     // Configuration Settings
-    val serverUrl = MutableStateFlow("https://whisker-tunnel.local")
+    val serverUrl = MutableStateFlow("http://10.0.2.2:3000")
     val apiKey = MutableStateFlow("")
     val autoApproveAllowed = MutableStateFlow(false)
     val pushToken = MutableStateFlow("Fetching FCM push token...")
@@ -117,7 +132,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
         processedEventIds.addAll(savedEventIds)
         
         // Restore serverUrl
-        val storedServerUrl = prefs.getString("server_url", "https://whisker-tunnel.local") ?: "https://whisker-tunnel.local"
+        var storedServerUrl = prefs.getString("server_url", "") ?: ""
+        if (storedServerUrl.isEmpty() || storedServerUrl == "https://whisker-tunnel.local") {
+            storedServerUrl = getDefaultServerUrl()
+            prefs.edit().putString("server_url", storedServerUrl).apply()
+        }
         serverUrl.value = storedServerUrl
 
         // Restore or Generate apiKey as UUID4
@@ -148,64 +167,10 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
 
         fetchPendingEventsFromServer()
-        startRealtimeSseStream()
         startForegroundPollingLoop()
     }
 
-    @Volatile private var isSseRunning = false
-
-    fun startRealtimeSseStream() {
-        synchronized(GatewayNetworkManager::class.java) {
-            if (isSseRunning) return
-            isSseRunning = true
-        }
-        scope.launch(Dispatchers.IO) {
-            while (isActive) {
-                val cleanUrl = getCleanServerUrl()
-                val pinVal = apiKey.value
-                if (cleanUrl.isNotEmpty() && cleanUrl.startsWith("http")) {
-                    try {
-                        val sseClient = okHttpClient.newBuilder()
-                            .readTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS)
-                            .build()
-
-                        val request = Request.Builder()
-                            .url("$cleanUrl/api/host/stream")
-                            .header("Authorization", "Bearer $pinVal")
-                            .header("Accept", "text/event-stream")
-                            .get()
-                            .build()
-
-                        sseClient.newCall(request).execute().use { response ->
-                            if (response.isSuccessful) {
-                                serverReachable.value = true
-                                _connectionStatus.value = "Connected"
-                                val source = response.body?.source()
-                                if (source != null) {
-                                    val reader = BufferedReader(InputStreamReader(source.inputStream(), Charsets.UTF_8))
-                                    var line: String? = reader.readLine()
-                                    while (isActive && line != null) {
-                                        if (line.startsWith("data: ")) {
-                                            val dataStr = line.substring(6).trim()
-                                            if (dataStr.isNotEmpty() && dataStr != "keep-alive") {
-                                                serverReachable.value = true
-                                                _connectionStatus.value = "Connected"
-                                                processIncomingPayload(dataStr)
-                                            }
-                                        }
-                                        line = reader.readLine()
-                                    }
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.w("GatewayNetworkManager", "SSE stream disconnect: ${e.message}")
-                    }
-                }
-                delay(3000)
-            }
-        }
-    }
+    @Volatile private var isPollingLoopRunning = false
 
     private fun startForegroundPollingLoop() {
         synchronized(GatewayNetworkManager::class.java) {
@@ -213,16 +178,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
             isPollingLoopRunning = true
         }
         scope.launch(Dispatchers.IO) {
+            Log.d("GatewayNetworkManager", "Foreground polling loop activated.")
             while (true) {
                 try {
-                    if (CompanionRegistry.isAppInForeground) {
-                        val serverUrlVal = serverUrl.value.removeSuffix("/")
-                        if (serverUrlVal.isNotEmpty() && serverUrlVal.startsWith("http")) {
-                            fetchPendingEventsFromServerSuspended()
-                        }
+                    val inForeground = CompanionRegistry.isAppInForeground
+                    val serverUrlVal = serverUrl.value.removeSuffix("/")
+                    if (inForeground && serverUrlVal.isNotEmpty() && serverUrlVal.startsWith("http")) {
+                        fetchPendingEventsFromServerSuspended()
                     }
                 } catch (e: Exception) {
-                    // ignore transient polling exceptions
+                    Log.d("GatewayNetworkManager", "Polling loop cycle error: ${e.message}")
                 }
                 delay(3000)
             }
@@ -235,7 +200,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    suspend fun fetchPendingEventsFromServerSuspended(fallbackTickle: String? = null) {
+    suspend fun fetchPendingEventsFromServerSuspended() {
         val serverUrlVal = serverUrl.value.removeSuffix("/")
         val pinVal = apiKey.value
         val pushTokenVal = pushToken.value
@@ -251,7 +216,68 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
         fetchMutex.withLock {
             try {
-                // Sync client presences first
+                Log.d("GatewayNetworkManager", "Polling Home Server: $serverUrlVal/api/host/events")
+                // 1. Fetch pending host events immediately for fast FCM response
+                val request = Request.Builder()
+                    .url("$serverUrlVal/api/host/events")
+                    .header("Authorization", "Bearer $pinVal")
+                    .get()
+                    .build()
+
+                okHttpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        fetchSuccess = true
+                        serverReachable.value = true
+                        _connectionStatus.value = "Connected"
+                        Log.d("GatewayNetworkManager", "Successfully connected to Home Server ($serverUrlVal)")
+                        val body = response.body?.string() ?: ""
+                        val eventsArray = JSONArray(body)
+                        for (i in 0 until eventsArray.length()) {
+                            val eventObj = eventsArray.getJSONObject(i)
+                            val id = eventObj.getString("id")
+                            fetchedEventIds.add(id)
+                            val type = eventObj.getString("type")
+                            val payload = eventObj.getJSONObject("payload")
+
+                            val alreadyProcessed = synchronized(processedEventIds) {
+                                if (processedEventIds.contains(id)) {
+                                    true
+                                } else {
+                                    processedEventIds.add(id)
+                                    if (processedEventIds.size > 200) {
+                                        val iterator = processedEventIds.iterator()
+                                        if (iterator.hasNext()) {
+                                            iterator.next()
+                                            iterator.remove()
+                                        }
+                                    }
+                                    val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
+                                    prefs.edit().putStringSet("processed_event_ids", processedEventIds.toSet()).apply()
+                                    false
+                                }
+                            }
+
+                            if (!alreadyProcessed) {
+                                // Adapts the server-fetched payload back to original processor format
+                                payload.put("event", type)
+                                processIncomingPayload(payload.toString(), fromServerPoll = true)
+                            }
+
+                            // Clear event queue item on server
+                            ackEventOnServer(serverUrlVal, pinVal, id)
+                        }
+
+                        // Also sync FCM push config and register current FCM push token if connected
+                        fetchFcmConfigFromServer(serverUrlVal, pinVal)
+                        registerPushTokenOnServer(serverUrlVal, pinVal, pushToken.value)
+                    } else {
+                        serverReachable.value = false
+                        _connectionStatus.value = "Connecting..."
+                        Log.e("GatewayNetworkManager", "Failed to fetch events from server: ${response.code}")
+                    }
+                }
+
+                // 2. Sync client presences
                 val presenceReq = Request.Builder()
                     .url("$serverUrlVal/api/host/clients")
                     .header("Authorization", "Bearer $pinVal")
@@ -323,63 +349,6 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 repository.insertRequest(newRequest)
                             }
                         }
-                    } else {
-                        serverReachable.value = false
-                        _connectionStatus.value = "Connecting..."
-                    }
-                }
-
-                val request = Request.Builder()
-                    .url("$serverUrlVal/api/host/events")
-                    .header("Authorization", "Bearer $pinVal")
-                    .get()
-                    .build()
-
-                okHttpClient.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) {
-                        fetchSuccess = true
-                        serverReachable.value = true
-                        _connectionStatus.value = "Connected"
-                        val body = response.body?.string() ?: ""
-                        val eventsArray = JSONArray(body)
-                        for (i in 0 until eventsArray.length()) {
-                            val eventObj = eventsArray.getJSONObject(i)
-                            val id = eventObj.getString("id")
-                            fetchedEventIds.add(id)
-                            val type = eventObj.getString("type")
-                            val payload = eventObj.getJSONObject("payload")
-
-                            val alreadyProcessed = synchronized(processedEventIds) {
-                                if (processedEventIds.contains(id)) {
-                                    true
-                                } else {
-                                    processedEventIds.add(id)
-                                    if (processedEventIds.size > 200) {
-                                        val iterator = processedEventIds.iterator()
-                                        if (iterator.hasNext()) {
-                                            iterator.next()
-                                            iterator.remove()
-                                        }
-                                    }
-                                    val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
-                                    prefs.edit().putStringSet("processed_event_ids", processedEventIds.toSet()).apply()
-                                    false
-                                }
-                            }
-
-                            if (!alreadyProcessed) {
-                                // Adapts the server-fetched payload back to original processor format
-                                payload.put("event", type)
-                                processIncomingPayload(payload.toString())
-                            }
-
-                            // Clear event queue item on server
-                            ackEventOnServer(serverUrlVal, pinVal, id)
-                        }
-                    } else {
-                        serverReachable.value = false
-                        _connectionStatus.value = "Connecting..."
-                        Log.e("GatewayNetworkManager", "Failed to fetch events from server: ${response.code}")
                     }
                 }
             } catch (e: Exception) {
@@ -387,68 +356,41 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 _connectionStatus.value = "Connecting..."
                 if (e is java.io.IOException) {
                     Log.w("GatewayNetworkManager", "Home Server unreachable ($serverUrlVal): ${e.localizedMessage ?: e.message}")
+                    tryProbeFallbackCandidates(pinVal)
                 } else {
                     Log.e("GatewayNetworkManager", "Error pulling tasks from Home Server", e)
                 }
             }
+        }
+    }
 
-            // Process fallback tickle if provided and the event was not successfully fetched
-            if (fallbackTickle != null) {
-                try {
-                    val tickleJson = JSONObject(fallbackTickle)
-                    val eventId = tickleJson.optString("eventId")
-                    val type = tickleJson.optString("type")
-                    
-                    if (eventId.isNotEmpty() && type.isNotEmpty()) {
-                        val alreadyProcessed = synchronized(processedEventIds) {
-                            processedEventIds.contains(eventId)
-                        }
-                        
-                        if (!alreadyProcessed && !fetchedEventIds.contains(eventId)) {
-                            synchronized(processedEventIds) {
-                                processedEventIds.add(eventId)
-                                if (processedEventIds.size > 200) {
-                                    val iterator = processedEventIds.iterator()
-                                    if (iterator.hasNext()) {
-                                        iterator.next()
-                                        iterator.remove()
-                                    }
-                                }
-                                val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
-                                prefs.edit().putStringSet("processed_event_ids", processedEventIds.toSet()).apply()
-                            }
-                            
-                            // Show fallback notification!
-                            when (type) {
-                                "message" -> {
-                                    showNotification(
-                                        "New Message",
-                                        "You have a new message. Tap to view.",
-                                        1003
-                                    )
-                                }
-                                "call" -> {
-                                    val name = tickleJson.optString("name", "Incoming Call")
-                                    val clientUuid = tickleJson.optString("clientUuid", tickleJson.optString("uuid", ""))
-                                    if (clientUuid.isNotEmpty()) {
-                                        setIncomingCallState(clientUuid, name, isVideo = true, sdp = "")
-                                        showIncomingCallNotification(clientUuid, name, true)
-                                    }
-                                }
-                                "visitor" -> {
-                                    showNotification(
-                                        "Access Request",
-                                        "New visitor is requesting direct calling access.",
-                                        1001
-                                    )
-                                }
-                            }
-                        }
+    private fun tryProbeFallbackCandidates(pinVal: String) {
+        val candidates = if (isEmulator()) {
+            listOf("http://10.0.2.2:3000", "http://10.0.2.2:8000", "http://localhost:3000", "http://localhost:8000")
+        } else {
+            listOf("http://localhost:3000", "http://localhost:8000", "http://10.0.2.2:3000", "http://10.0.2.2:8000")
+        }
+        val current = serverUrl.value.removeSuffix("/")
+        for (candidate in candidates) {
+            if (candidate == current) continue
+            try {
+                val testReq = Request.Builder()
+                    .url("$candidate/api/host/events")
+                    .header("Authorization", "Bearer $pinVal")
+                    .get()
+                    .build()
+                okHttpClient.newCall(testReq).execute().use { res ->
+                    if (res.isSuccessful) {
+                        Log.i("GatewayNetworkManager", "Found active Home Server at fallback candidate: $candidate")
+                        val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
+                        prefs.edit().putString("server_url", candidate).apply()
+                        serverUrl.value = candidate
+                        serverReachable.value = true
+                        _connectionStatus.value = "Connected"
+                        return
                     }
-                } catch (ex: Exception) {
-                    Log.e("GatewayNetworkManager", "Error processing fallback tickle", ex)
                 }
-            }
+            } catch (ignored: Exception) {}
         }
     }
 
@@ -562,7 +504,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    fun processIncomingPayload(payloadStr: String) {
+    fun processIncomingPayload(payloadStr: String, fromServerPoll: Boolean = false) {
         try {
             val json = JSONObject(payloadStr)
             val eventType = json.optString("event", json.optString("type", ""))
@@ -570,7 +512,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
             val eventId = json.optString("eventId", json.optString("id", ""))
             val messageId = json.optString("messageId", "")
 
-            if (eventId.isNotEmpty()) {
+            if (eventId.isNotEmpty() && !fromServerPoll) {
                 val isDup = synchronized(processedEventIds) {
                     if (processedEventIds.contains(eventId)) {
                         true
@@ -647,37 +589,60 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val pinVal = apiKey.value
 
                     scope.launch(Dispatchers.IO) {
-                        val request = repository.getRequestByUuid(uuid)
-                        if (request != null && request.status == "APPROVED" && (token.isEmpty() || request.token == token)) {
-                            if (msgIdLong > 0 && cleanUrl.isNotEmpty()) {
-                                fetchAndSyncMessageChain(cleanUrl, pinVal, uuid, msgIdLong)
-                            } else {
-                                val name = json.optString("name", "Approved Caller")
-                                val text = json.optString("text", "")
-                                val file = if (json.isNull("file")) null else json.optString("file").takeIf { it.isNotEmpty() && it != "null" }
-                                val existingMsgs = repository.getMessagesForClientSync(uuid)
-                                val isDuplicate = existingMsgs.any { m ->
-                                    (messageId.isNotEmpty() && m.serverId.toString() == messageId) ||
-                                    (m.messageText == text && m.filePath == file && kotlin.math.abs(m.timestamp - System.currentTimeMillis()) < 10000)
-                                }
-                                if (!isDuplicate) {
-                                    repository.insertMessage(
-                                        Message(
-                                            clientUuid = uuid,
-                                            clientName = name,
-                                            messageText = text,
-                                            filePath = file,
-                                            isIncoming = true
-                                        )
+                        var request = repository.getRequestByUuid(uuid)
+                        val name = json.optString("name", "Guest")
+                        if (request == null) {
+                            val newReq = ClientRequest(
+                                uuid = uuid,
+                                name = name,
+                                message = "Visitor / Chat Partner",
+                                status = "APPROVED",
+                                token = token,
+                                timestamp = System.currentTimeMillis(),
+                                lastSeen = System.currentTimeMillis(),
+                                isOnline = true
+                            )
+                            repository.insertRequest(newReq)
+                            request = newReq
+                        } else if (request.status != "APPROVED" || (token.isNotEmpty() && request.token.isEmpty())) {
+                            val updatedReq = request.copy(
+                                status = "APPROVED",
+                                token = if (token.isNotEmpty()) token else request.token,
+                                name = if (name != "Guest" && request.name == "Guest") name else request.name,
+                                lastSeen = System.currentTimeMillis()
+                            )
+                            repository.updateRequest(updatedReq)
+                            request = updatedReq
+                        }
+
+                        if (msgIdLong > 0 && cleanUrl.isNotEmpty()) {
+                            fetchAndSyncMessageChain(cleanUrl, pinVal, uuid, msgIdLong)
+                        } else {
+                            val text = json.optString("text", "")
+                            val file = if (json.isNull("file")) null else json.optString("file").takeIf { it.isNotEmpty() && it != "null" }
+                            val existingMsgs = repository.getMessagesForClientSync(uuid)
+                            val isDuplicate = existingMsgs.any { m ->
+                                (messageId.isNotEmpty() && m.serverId.toString() == messageId) ||
+                                (m.messageText == text && m.filePath == file && kotlin.math.abs(m.timestamp - System.currentTimeMillis()) < 10000)
+                            }
+                            if (!isDuplicate) {
+                                repository.insertMessage(
+                                    Message(
+                                        serverId = msgIdLong,
+                                        clientUuid = uuid,
+                                        clientName = request.name,
+                                        messageText = text,
+                                        filePath = file,
+                                        isIncoming = true
                                     )
-                                    val cleanMsg = if (file != null) "🔗 File: [$text]" else text
-                                    showNotification(
-                                        "Message from $name",
-                                        cleanMsg,
-                                        1003,
-                                        uuid
-                                    )
-                                }
+                                )
+                                val cleanMsg = if (file != null) "🔗 File: [$text]" else text
+                                showNotification(
+                                    "Message from ${request.name}",
+                                    cleanMsg,
+                                    1003,
+                                    uuid
+                                )
                             }
                         }
                     }
@@ -691,6 +656,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     scope.launch {
                         val existing = repository.getRequestByUuid(uuid)
                         val callerName = if (!existing?.name.isNullOrEmpty() && existing?.name != "Guest") existing!!.name else name
+                        val isAutoAccept = existing?.autoAcceptCall == true
+
                         if (existing == null) {
                             repository.insertRequest(
                                 ClientRequest(
@@ -701,7 +668,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                     token = token,
                                     timestamp = System.currentTimeMillis(),
                                     lastSeen = System.currentTimeMillis(),
-                                    isOnline = true
+                                    isOnline = true,
+                                    autoAcceptCall = false
                                 )
                             )
                         } else if (existing.status != "APPROVED" || (token.isNotEmpty() && existing.token != token)) {
@@ -716,7 +684,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         }
 
                         setIncomingCallState(uuid, callerName, isVideo, sdp)
-                        showIncomingCallNotification(uuid, callerName, isVideo)
+
+                        if (isAutoAccept) {
+                            Log.d("GatewayNetworkManager", "Auto-accepting incoming call from $callerName ($uuid)")
+                            showIncomingCallNotification(uuid, callerName, isVideo, autoAccept = true)
+                            if (CompanionRegistry.isAppInForeground) {
+                                acceptCall(uuid, callerName, isVideo, sdp)
+                            }
+                        } else {
+                            showIncomingCallNotification(uuid, callerName, isVideo, autoAccept = false)
+                        }
                     }
                 }
                 "signal" -> {
@@ -824,8 +801,22 @@ class GatewayNetworkManager(private val context: Context, private val repository
             val createdAt = msgObj!!.optLong("createdAt", System.currentTimeMillis())
             val prevId = if (msgObj!!.has("previousMessageId") && !msgObj!!.isNull("previousMessageId")) msgObj!!.optLong("previousMessageId") else null
 
-            val req = repository.getRequestByUuid(msgUuid)
-            val clientName = req?.name ?: "Guest"
+            var req = repository.getRequestByUuid(msgUuid)
+            if (req == null) {
+                val newReq = ClientRequest(
+                    uuid = msgUuid,
+                    name = "Guest",
+                    message = "Visitor / Chat Partner",
+                    status = "APPROVED",
+                    token = "",
+                    timestamp = System.currentTimeMillis(),
+                    lastSeen = System.currentTimeMillis(),
+                    isOnline = true
+                )
+                repository.insertRequest(newReq)
+                req = newReq
+            }
+            val clientName = req.name
             val isIncoming = (sender != "phone")
 
             val existingLocal = repository.getMessagesForClientSync(msgUuid).find { 
@@ -1233,7 +1224,6 @@ class GatewayNetworkManager(private val context: Context, private val repository
     companion object {
         private val processedEventIds = Collections.synchronizedSet(LinkedHashSet<String>())
         private val processedMessageIds = Collections.synchronizedSet(LinkedHashSet<String>())
-        @Volatile private var isPollingLoopRunning = false
 
         fun getInstance(context: Context): GatewayNetworkManager {
             return CompanionRegistry.getOrInitializeManager(context)
@@ -1250,17 +1240,17 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    fun acceptCall(clientUuid: String, clientName: String) {
+    fun acceptCall(clientUuid: String, clientName: String, isVideo: Boolean = true, sdpOffer: String = "") {
         val current = _activeCall.value
         if (current is CallState.Active && current.clientUuid == clientUuid) return
 
         val currentIncoming = current as? CallState.Incoming
-        val sdpOffer = currentIncoming?.sdp ?: ""
-        val isVideo = currentIncoming?.isVideo ?: true
+        val effectiveSdpOffer = if (sdpOffer.isNotEmpty()) sdpOffer else (currentIncoming?.sdp ?: "")
+        val effectiveIsVideo = if (currentIncoming != null) currentIncoming.isVideo else isVideo
 
         cancelCallNotification()
         updateAudioModeForCall(true)
-        _activeCall.value = CallState.Active(clientUuid, clientName, isVideo, 0, sdpOffer)
+        _activeCall.value = CallState.Active(clientUuid, clientName, effectiveIsVideo, 0, effectiveSdpOffer)
         scope.launch {
             repository.insertCallLog(
                 CallLog(
@@ -1428,12 +1418,19 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    fun showIncomingCallNotification(clientUuid: String, clientName: String, isVideo: Boolean = true) {
+    fun showIncomingCallNotification(
+        clientUuid: String,
+        clientName: String,
+        isVideo: Boolean = true,
+        autoAccept: Boolean = false
+    ) {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channelId = "incoming_calls_channel"
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            val soundUri = RingtoneManager.getDefaultUri(
+                if (autoAccept) RingtoneManager.TYPE_NOTIFICATION else RingtoneManager.TYPE_RINGTONE
+            )
             val audioAttributes = android.media.AudioAttributes.Builder()
                 .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
                 .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
@@ -1447,69 +1444,93 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 description = "Full screen incoming call alerts"
                 enableLights(true)
                 enableVibration(true)
-                vibrationPattern = longArrayOf(0, 1000, 500, 1000)
+                vibrationPattern = if (autoAccept) longArrayOf(0, 300, 200, 300) else longArrayOf(0, 1000, 500, 1000)
                 setSound(soundUri, audioAttributes)
                 lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
             }
             notificationManager.createNotificationChannel(channel)
         }
 
-        // 1. Full-screen intent launching MainActivity
+        // Full-screen intent launching MainActivity
         val fullScreenIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra("incoming_call", true)
+            if (autoAccept) {
+                putExtra("action_answer_call", true)
+                putExtra("auto_accepted", true)
+            } else {
+                putExtra("incoming_call", true)
+            }
             putExtra("client_uuid", clientUuid)
             putExtra("client_name", clientName)
             putExtra("is_video", isVideo)
         }
         val fullScreenPendingIntent = PendingIntent.getActivity(
             context,
-            1002,
+            if (autoAccept) 1005 else 1002,
             fullScreenIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // 2. Answer Action Intent
-        val answerIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra("action_answer_call", true)
-            putExtra("client_uuid", clientUuid)
-            putExtra("client_name", clientName)
-        }
-        val answerPendingIntent = PendingIntent.getActivity(
-            context,
-            1003,
-            answerIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val soundUri = RingtoneManager.getDefaultUri(
+            if (autoAccept) RingtoneManager.TYPE_NOTIFICATION else RingtoneManager.TYPE_RINGTONE
         )
-
-        // 3. Decline Action Intent
-        val declineIntent = Intent(context, CallActionReceiver::class.java).apply {
-            action = "ACTION_DECLINE_CALL"
-            putExtra("client_uuid", clientUuid)
-        }
-        val declinePendingIntent = PendingIntent.getBroadcast(
-            context,
-            1004,
-            declineIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
 
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(com.whisker.R.drawable.ic_launcher_foreground)
-            .setContentTitle("Incoming ${if (isVideo) "Video" else "Audio"} Call")
-            .setContentText("$clientName is calling...")
+            .setContentTitle(if (autoAccept) "📹 IP Camera Auto-Answering" else "Incoming ${if (isVideo) "Video" else "Audio"} Call")
+            .setContentText(if (autoAccept) "Connecting stream with $clientName..." else "$clientName is calling...")
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setFullScreenIntent(fullScreenPendingIntent, true)
+            .setContentIntent(fullScreenPendingIntent)
             .setOngoing(true)
             .setAutoCancel(true)
             .setSound(soundUri)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .addAction(com.whisker.R.drawable.ic_launcher_foreground, "Answer", answerPendingIntent)
-            .addAction(com.whisker.R.drawable.ic_launcher_foreground, "Decline", declinePendingIntent)
+
+        if (!autoAccept) {
+            // Answer Action Intent
+            val answerIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("action_answer_call", true)
+                putExtra("client_uuid", clientUuid)
+                putExtra("client_name", clientName)
+                putExtra("is_video", isVideo)
+            }
+            val answerPendingIntent = PendingIntent.getActivity(
+                context,
+                1003,
+                answerIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            // Decline Action Intent
+            val declineIntent = Intent(context, CallActionReceiver::class.java).apply {
+                action = "ACTION_DECLINE_CALL"
+                putExtra("client_uuid", clientUuid)
+            }
+            val declinePendingIntent = PendingIntent.getBroadcast(
+                context,
+                1004,
+                declineIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            builder.addAction(com.whisker.R.drawable.ic_launcher_foreground, "Answer", answerPendingIntent)
+            builder.addAction(com.whisker.R.drawable.ic_launcher_foreground, "Decline", declinePendingIntent)
+        } else {
+            val declineIntent = Intent(context, CallActionReceiver::class.java).apply {
+                action = "ACTION_DECLINE_CALL"
+                putExtra("client_uuid", clientUuid)
+            }
+            val declinePendingIntent = PendingIntent.getBroadcast(
+                context,
+                1004,
+                declineIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(com.whisker.R.drawable.ic_launcher_foreground, "End Call", declinePendingIntent)
+        }
 
         notificationManager.notify(1002, builder.build())
 
@@ -1521,9 +1542,22 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
                 "Whisker:IncomingCallWakeLock"
             )
-            wakeLock.acquire(10000)
+            wakeLock.acquire(20000)
         } catch (e: Exception) {
             Log.e("GatewayNetworkManager", "Error acquiring full screen wake lock for incoming call", e)
+        }
+
+        // For auto-accept: dispatch PendingIntent / direct startActivity to bring MainActivity up immediately
+        if (autoAccept) {
+            try {
+                fullScreenPendingIntent.send()
+            } catch (e: Exception) {
+                try {
+                    context.startActivity(fullScreenIntent)
+                } catch (e2: Exception) {
+                    Log.d("GatewayNetworkManager", "PendingIntent dispatched via notification")
+                }
+            }
         }
     }
 

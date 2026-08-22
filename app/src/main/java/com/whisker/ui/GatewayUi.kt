@@ -3,6 +3,8 @@ package com.whisker.ui
 import com.whisker.R
 import android.annotation.SuppressLint
 import android.content.Context
+import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
@@ -56,6 +58,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -320,7 +323,8 @@ fun GatewayDashboard(
                             onReject = { viewModel.rejectClient(it) },
                             onDelete = { viewModel.deleteClient(it) },
                             onRename = { request, newName -> viewModel.renameClient(request, newName) },
-                            onDeleteInvite = { viewModel.deleteInvite(it) }
+                            onDeleteInvite = { viewModel.deleteInvite(it) },
+                            onToggleAutoAccept = { request, autoAccept -> viewModel.toggleAutoAccept(request, autoAccept) }
                         )
                         1 -> {
                             val selectedChatUuid by viewModel.selectedChatUuid.collectAsState()
@@ -654,17 +658,7 @@ fun GatewayDashboard(
                             }
                         }
 
-                        HorizontalDivider(color = Color.Gray.copy(alpha = 0.15f))
 
-                        Text(
-                            text = "FCM SERVER KEY",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                            letterSpacing = 1.sp
-                        )
-
-                        HorizontalDivider(color = Color.Gray.copy(alpha = 0.15f))
 
                         // HOME SERVER ACCESS KEY SECTION
                         Text(
@@ -825,7 +819,8 @@ fun ApprovalsTab(
     onReject: (ClientRequest) -> Unit,
     onDelete: (ClientRequest) -> Unit,
     onRename: (ClientRequest, String) -> Unit = { _, _ -> },
-    onDeleteInvite: (Invite) -> Unit = {}
+    onDeleteInvite: (Invite) -> Unit = {},
+    onToggleAutoAccept: (ClientRequest, Boolean) -> Unit = { _, _ -> }
 ) {
     var editingRequest by remember { mutableStateOf<ClientRequest?>(null) }
     var renameInputText by remember { mutableStateOf("") }
@@ -1007,7 +1002,8 @@ fun ApprovalsTab(
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f, fill = false)
                             ) {
                                 Box(
                                     modifier = Modifier
@@ -1022,14 +1018,16 @@ fun ApprovalsTab(
                                         text = request.name,
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color.White
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                     IconButton(
                                         onClick = {
                                             editingRequest = request
                                             renameInputText = request.name
                                         },
-                                        modifier = Modifier.size(20.dp)
+                                        modifier = Modifier.size(24.dp)
                                     ) {
                                         Icon(
                                             imageVector = Icons.Default.Edit,
@@ -1040,11 +1038,44 @@ fun ApprovalsTab(
                                     }
                                 }
                             }
-                            IconButton(
-                                onClick = { onDelete(request) },
-                                modifier = Modifier.size(24.dp)
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = "Auto-accept",
+                                        fontSize = 11.sp,
+                                        fontWeight = if (request.autoAcceptCall) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (request.autoAcceptCall) MaterialTheme.colorScheme.primary else Color.Gray
+                                    )
+                                    Switch(
+                                        checked = request.autoAcceptCall,
+                                        onCheckedChange = { isChecked ->
+                                            onToggleAutoAccept(request, isChecked)
+                                        },
+                                        modifier = Modifier
+                                            .scale(0.75f)
+                                            .testTag("auto_accept_switch_${request.uuid}"),
+                                        colors = SwitchDefaults.colors(
+                                            checkedThumbColor = Color.Black,
+                                            checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                            uncheckedThumbColor = Color.LightGray,
+                                            uncheckedTrackColor = Color(0xFF374151)
+                                        )
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = { onDelete(request) },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                                }
                             }
                         }
 
@@ -1055,12 +1086,26 @@ fun ApprovalsTab(
                                     .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
                                     .padding(8.dp)
                             ) {
-                                Text(
-                                    text = "GUEST ACCESS PASS:",
-                                    fontSize = 8.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color.Gray
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "GUEST ACCESS PASS:",
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color.Gray
+                                    )
+                                    if (request.autoAcceptCall) {
+                                        Text(
+                                            text = "📹 IP CAMERA AUTO-ACCEPT",
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
                                 Text(
                                     text = request.token,
                                     fontSize = 11.sp,

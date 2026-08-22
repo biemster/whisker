@@ -12,7 +12,8 @@ data class ClientRequest(
     val token: String,
     val timestamp: Long = System.currentTimeMillis(),
     val lastSeen: Long = System.currentTimeMillis(),
-    val isOnline: Boolean = false
+    val isOnline: Boolean = false,
+    val autoAcceptCall: Boolean = false
 )
 
 @Entity(tableName = "messages")

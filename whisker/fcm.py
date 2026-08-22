@@ -97,14 +97,14 @@ class FCMManager:
             self._token_expiry = now + data.get('expires_in', 3600)
             return self._cached_token
 
-    def send_tickle_notification(self, push_token, event_id, event_type):
+    def send_tickle_notification(self, push_token, event_id=None, event_type=None):
         if not push_token or push_token.startswith('device-push-token-') or push_token.startswith('mock-'):
-            print(f"[Push Notification] Skipping FCM tickle for event '{event_type}' (id: {event_id}): No valid pushToken registered.")
+            print(f"[Push Notification] Skipping FCM tickle for event '{event_type}': No valid pushToken registered.")
             return False
 
         sa = get_service_account_file()
         if not sa:
-            print(f"[Push Notification] Skipping FCM tickle for event '{event_type}' (id: {event_id}): Service account file not found.")
+            print(f"[Push Notification] Skipping FCM tickle for event '{event_type}': Service account file not found.")
             return False
 
         project_id = sa.get('project_id')
@@ -118,16 +118,17 @@ class FCMManager:
             print(f"[Push Notification] Error generating OAuth access token: {e}")
             return False
 
+        # Pure tickle payload: Zero metadata/payload attached
+        data_payload = {
+            "event": "tickle",
+            "timestamp": str(int(time.time() * 1000))
+        }
+
         fcm_url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
         payload = {
             "message": {
                 "token": push_token,
-                "data": {
-                    "event": "tickle",
-                    "eventId": str(event_id),
-                    "type": str(event_type),
-                    "timestamp": str(int(time.time() * 1000))
-                },
+                "data": data_payload,
                 "android": {
                     "priority": "HIGH"
                 }

@@ -34,68 +34,48 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
         super.onMessageReceived(remoteMessage)
-        Log.d("FCMService", "From: ${remoteMessage.from}")
+        Log.d("FCMService", "FCM tickle received from: ${remoteMessage.from}")
 
-        // 1. Wake up the device!
+        // 1. Acquire partial wake lock to keep CPU awake while fetching from home server
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         val wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            PowerManager.PARTIAL_WAKE_LOCK,
             "Whisker:FCMWakeLock"
         )
         try {
-            wakeLock.acquire(10000) // Acquire for 10 seconds max
+            wakeLock.acquire(20000) // Acquire for 20 seconds max
         } catch (e: Exception) {
             Log.e("FCMService", "Failed to acquire wake lock", e)
         }
 
-        // 2. Fetch data from the home server in the background
+        // 2. Pure tickle push: fetch pending events directly from home server on-demand
         val networkManager = CompanionRegistry.getOrInitializeManager(applicationContext)
-        
-        // 3. Extract payload as JSON if available
-        val dataMap = remoteMessage.data
-        val dataPayload = if (dataMap.isNotEmpty()) {
-            try {
-                org.json.JSONObject(dataMap as Map<*, *>).toString()
-            } catch (e: Exception) {
-                null
+        try {
+            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                networkManager.fetchPendingEventsFromServerSuspended()
             }
-        } else null
-        Log.d("FCMService", "Message data payload JSON: $dataPayload")
-
-        // 4. Force fetch pending events from the home server to get the latest messages, calls, or visitor requests
-        CoroutineScope(Dispatchers.IO).launch {
+        } catch (e: Exception) {
+            if (e is java.io.IOException) {
+                Log.w("FCMService", "Home Server unreachable after push tickle: ${e.message}")
+            } else {
+                Log.e("FCMService", "Error pulling tasks from Home Server after push tickle", e)
+            }
+        } finally {
             try {
-                // Always contact home server to fetch actual events
-                networkManager.fetchPendingEventsFromServerSuspended(fallbackTickle = dataPayload)
+                if (wakeLock.isHeld) {
+                    wakeLock.release()
+                }
             } catch (e: Exception) {
-                if (e is java.io.IOException) {
-                    Log.w("FCMService", "Home Server unreachable after push: ${e.message}")
-                } else {
-                    Log.e("FCMService", "Error pulling tasks from Home Server after push", e)
-                }
-            } finally {
-                try {
-                    if (wakeLock.isHeld) {
-                        wakeLock.release()
-                    }
-                } catch (e: Exception) {
-                    Log.e("FCMService", "Error releasing wake lock", e)
-                }
+                Log.e("FCMService", "Error releasing wake lock", e)
             }
         }
 
-        // 5. Display a notification directly ONLY if an explicit FCM notification payload or custom title was provided.
-        // For standard background tickle pushes, fetchPendingEventsFromServerSuspended will fetch and display the real event notification.
+        // 3. Display explicit FCM notification payload if provided
         val notification = remoteMessage.notification
-        val customTitle = remoteMessage.data["title"]
-        val customBody = remoteMessage.data["body"]
-
         if (notification != null) {
             val title = notification.title ?: "Whisker Notification"
             val body = notification.body ?: ""
             showBasicNotification(title, body)
-        } else if (!customTitle.isNullOrEmpty() && customTitle != "New Signaling Alert") {
-            showBasicNotification(customTitle, customBody ?: "")
         }
     }
 

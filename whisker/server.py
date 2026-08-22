@@ -160,6 +160,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         if not saved_pin:
             if token:
                 self.db.set_setting('host_pin_token', token)
+                print(f"[Whisker Server] 🐱 Mobile app paired successfully! Host Access Key locked: {token[:8]}...")
                 return True
             else:
                 self._send_json({"error": "Access Key required in Authorization header or query token"}, 401)
@@ -168,6 +169,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         if token == saved_pin:
             return True
 
+        print(f"[Whisker Server] ⚠️ Unauthorized access attempt with key: {token[:8] if token else 'None'}")
         self._send_json({"error": "Unauthorized access key"}, 401)
         return False
 
@@ -372,6 +374,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             push_token = body.get('pushToken') or body.get('token') or body.get('fcmToken') or self.headers.get('X-Push-Token', '')
             if push_token:
                 self.db.set_setting('push_token', push_token)
+                print(f"[Whisker Server] 📲 Host FCM Push Token registered: {push_token[:16]}... (Length: {len(push_token)})")
                 return self._send_json({"message": "Push token registered successfully"})
             return self._send_json({"error": "No push token provided"}, 400)
 
