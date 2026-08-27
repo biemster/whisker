@@ -97,7 +97,8 @@ class FCMManager:
             self._token_expiry = now + data.get('expires_in', 3600)
             return self._cached_token
 
-    def send_tickle_notification(self, push_token, event_id=None, event_type=None):
+
+    def send_tickle_notification(self, push_token, event_id=None, event_type=None, extra_status=None):
         if not push_token or push_token.startswith('device-push-token-') or push_token.startswith('mock-'):
             print(f"[Push Notification] Skipping FCM tickle for event '{event_type}': No valid pushToken registered.")
             return False
@@ -118,11 +119,19 @@ class FCMManager:
             print(f"[Push Notification] Error generating OAuth access token: {e}")
             return False
 
-        # Pure tickle payload: Zero metadata/payload attached
+        # Pure tickle payload
         data_payload = {
             "event": "tickle",
             "timestamp": str(int(time.time() * 1000))
         }
+        if event_id is not None:
+            data_payload["id"] = str(event_id)
+            data_payload["eventId"] = str(event_id)
+            data_payload["messageId"] = str(event_id)
+        if event_type:
+            data_payload["eventType"] = str(event_type)
+        if extra_status:
+            data_payload["status"] = str(extra_status)
 
         fcm_url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
         payload = {
@@ -134,7 +143,6 @@ class FCMManager:
                 }
             }
         }
-
         try:
             req_data = json.dumps(payload).encode('utf-8')
             req = urllib.request.Request(

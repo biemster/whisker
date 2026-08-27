@@ -28,7 +28,7 @@ class LinkRepository(private val db: AppDatabase) {
 
     suspend fun getMessagesForClientSync(clientUuid: String): List<Message> = messageDao.getMessagesForClientSync(clientUuid)
 
-    suspend fun getMessageByServerId(serverId: Long): Message? = messageDao.getMessageByServerId(serverId)
+    suspend fun getMessageByServerId(serverId: String): Message? = messageDao.getMessageByServerId(serverId)
 
     suspend fun markAsRead(clientUuid: String) = messageDao.markAsRead(clientUuid)
 

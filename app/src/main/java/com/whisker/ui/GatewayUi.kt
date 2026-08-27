@@ -477,7 +477,9 @@ fun GatewayDashboard(
 
         // CORE NETWORK CONFIGURATION AND PAIRING SETTINGS DIALOG
         if (showServerConfigDialog) {
-            var inputUrl by remember { mutableStateOf(serverUrlVal) }
+            val usernameVal by viewModel.networkManager.hostUsername.collectAsState()
+            var inputUrl by remember(serverUrlVal) { mutableStateOf(serverUrlVal) }
+            var inputUsername by remember(usernameVal) { mutableStateOf(usernameVal) }
             val clipboardManager = LocalClipboardManager.current
             val scrollState = rememberScrollState()
 
@@ -495,7 +497,7 @@ fun GatewayDashboard(
                             modifier = Modifier.size(24.dp)
                         )
                         Text(
-                            text = "Network & guest Settings",
+                            text = "Network & Guest Settings",
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
@@ -506,7 +508,7 @@ fun GatewayDashboard(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 420.dp)
+                            .heightIn(max = 520.dp)
                             .verticalScroll(scrollState),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
@@ -517,6 +519,19 @@ fun GatewayDashboard(
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary,
                             letterSpacing = 1.sp
+                        )
+
+                        OutlinedTextField(
+                            value = inputUsername,
+                            onValueChange = { inputUsername = it },
+                            label = { Text("Mobile App Username (Visible to Guests)", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary) },
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = Color.Gray.copy(alpha = 0.5f)
+                            ),
+                            shape = RoundedCornerShape(10.dp)
                         )
 
                         OutlinedTextField(
@@ -720,7 +735,7 @@ fun GatewayDashboard(
                 confirmButton = {
                     Button(
                         onClick = {
-                            viewModel.networkManager.updateServerUrl(inputUrl)
+                            viewModel.networkManager.updateSettings(inputUrl, inputUsername)
                             showServerConfigDialog = false
                             Toast.makeText(context, "Server link updated!", Toast.LENGTH_SHORT).show()
                         },
@@ -804,6 +819,131 @@ fun GatewayDashboard(
                 tonalElevation = 6.dp
             )
         }
+
+        // Active Mobile Pairing Prompt Dialog
+        val mobilePendingRequest = pendingReqs.firstOrNull { it.status == "MOBILE_PENDING" }
+        if (mobilePendingRequest != null) {
+            AlertDialog(
+                onDismissRequest = { },
+                icon = {
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .background(Color(0xFF8B5CF6).copy(alpha = 0.2f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Phone,
+                            contentDescription = "Companion Mobile Device",
+                            tint = Color(0xFFA78BFA),
+                            modifier = Modifier.size(30.dp)
+                        )
+                    }
+                },
+                title = {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Mobile Companion Pairing",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                        Text(
+                            text = "Secondary Mobile App Request",
+                            fontSize = 12.sp,
+                            color = Color(0xFFA78BFA),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF1E1B4B).copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                                .border(1.dp, Color(0xFF8B5CF6).copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = "Device Name:",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.Gray
+                                    )
+                                    Text(
+                                        text = mobilePendingRequest.name,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color.White
+                                    )
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = "Device UUID:",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.Gray
+                                    )
+                                    Text(
+                                        text = mobilePendingRequest.uuid,
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = Color(0xFFA78BFA)
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            text = "This mobile app is requesting pairing authorization with your Home Server. Approving allows it to act as an authorized companion client.",
+                            fontSize = 12.sp,
+                            color = Color.LightGray,
+                            lineHeight = 16.sp
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { viewModel.approveClient(mobilePendingRequest) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.Check, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Approve Mobile App", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                },
+                dismissButton = {
+                    OutlinedButton(
+                        onClick = { viewModel.rejectClient(mobilePendingRequest) },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Red),
+                        border = BorderStroke(1.dp, Color.Red.copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = null, tint = Color.Red, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Decline", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                },
+                containerColor = Color(0xFF151926),
+                tonalElevation = 6.dp
+            )
+        }
     }
 }
 
@@ -825,16 +965,166 @@ fun ApprovalsTab(
     var editingRequest by remember { mutableStateOf<ClientRequest?>(null) }
     var renameInputText by remember { mutableStateOf("") }
 
+    val mobilePending = pendingRequests.filter { it.status == "MOBILE_PENDING" }
+    val visitorPending = pendingRequests.filter { it.status == "PENDING" }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Pending Queue header
+        // Companion Mobile App Queue (if any)
+        if (mobilePending.isNotEmpty()) {
+            item {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("📱", fontSize = 16.sp)
+                    Text(
+                        text = "COMPANION MOBILE APP REQUESTS (${mobilePending.size})",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFFA78BFA),
+                        letterSpacing = 1.sp
+                    )
+                }
+            }
+
+            items(mobilePending) { request ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1B4B).copy(alpha = 0.8f)),
+                    border = BorderStroke(1.5.dp, Color(0xFF8B5CF6))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.weight(1f, fill = false)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .background(Color(0xFF8B5CF6).copy(alpha = 0.25f), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Phone,
+                                        contentDescription = "Mobile Device",
+                                        tint = Color(0xFFA78BFA),
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                                Column {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = request.name,
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                        Surface(
+                                            color = Color(0xFF8B5CF6).copy(alpha = 0.25f),
+                                            shape = RoundedCornerShape(6.dp),
+                                            border = BorderStroke(1.dp, Color(0xFF8B5CF6).copy(alpha = 0.6f))
+                                        ) {
+                                            Text(
+                                                text = "📱 MOBILE APP",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFA78BFA),
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = "DEVICE UUID: ${request.uuid}",
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = Color(0xFFA78BFA).copy(alpha = 0.8f)
+                                    )
+                                }
+                            }
+
+                            Text(
+                                text = SimpleDateFormat("HH:mm • dd MMM", Locale.getDefault()).format(Date(request.timestamp)),
+                                fontSize = 11.sp,
+                                color = Color.LightGray
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                .border(1.dp, Color(0xFF8B5CF6).copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "PAIRING REQUEST:",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFA78BFA),
+                                    letterSpacing = 0.5.sp
+                                )
+                                Text(
+                                    text = "A secondary mobile app or tablet ('${request.name}') wants to connect to your Home Server to receive intercom calls and manage events.",
+                                    fontSize = 12.sp,
+                                    color = Color.White,
+                                    lineHeight = 18.sp
+                                )
+                            }
+                        }
+
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Button(
+                                onClick = { onApprove(request) },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Icon(Icons.Default.Check, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Approve Mobile App", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                            OutlinedButton(
+                                onClick = { onReject(request) },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Red),
+                                border = BorderStroke(1.dp, Color.Red.copy(alpha = 0.5f)),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = null, tint = Color.Red, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Decline", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Web Visitor Pending Queue header
         item {
             Text(
-                text = "INCOMING VISITOR REQUESTS (${pendingRequests.size})",
+                text = "INCOMING VISITOR REQUESTS (${visitorPending.size})",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary,
@@ -842,7 +1132,7 @@ fun ApprovalsTab(
             )
         }
 
-        if (pendingRequests.isEmpty()) {
+        if (visitorPending.isEmpty() && mobilePending.isEmpty()) {
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -872,8 +1162,8 @@ fun ApprovalsTab(
                     }
                 }
             }
-        } else {
-            items(pendingRequests) { request ->
+        } else if (visitorPending.isNotEmpty()) {
+            items(visitorPending) { request ->
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -895,12 +1185,14 @@ fun ApprovalsTab(
                                     fontWeight = FontWeight.ExtraBold,
                                     color = Color.White
                                 )
+
                                 Text(
                                     text = "GUEST ID: ${request.uuid}",
                                     fontSize = 10.sp,
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.primary
                                 )
+
                             }
                             Text(
                                 text = SimpleDateFormat("HH:mm • dd MMM", Locale.getDefault()).format(Date(request.timestamp)),
@@ -973,7 +1265,7 @@ fun ApprovalsTab(
             )
         }
 
-        val approved = allRequests.filter { it.status == "APPROVED" }
+        val approved = allRequests.filter { it.status == "APPROVED" || it.status == "MOBILE_APPROVED" }
         if (approved.isEmpty()) {
             item {
                 Text(
@@ -986,10 +1278,11 @@ fun ApprovalsTab(
             }
         } else {
             items(approved) { request ->
+                val isMobileApp = request.status == "MOBILE_APPROVED"
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)),
-                    border = BorderStroke(1.dp, Color.Gray.copy(alpha = 0.2f))
+                    colors = CardDefaults.cardColors(containerColor = if (isMobileApp) Color(0xFF1E1B4B).copy(alpha = 0.4f) else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)),
+                    border = BorderStroke(1.dp, if (isMobileApp) Color(0xFF8B5CF6).copy(alpha = 0.5f) else Color.Gray.copy(alpha = 0.2f))
                 ) {
                     Column(
                         modifier = Modifier.padding(14.dp),
@@ -1012,7 +1305,7 @@ fun ApprovalsTab(
                                 )
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
                                         text = request.name,
@@ -1022,6 +1315,20 @@ fun ApprovalsTab(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    if (isMobileApp) {
+                                        Surface(
+                                            color = Color(0xFF8B5CF6).copy(alpha = 0.25f),
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                text = "📱 APP",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFA78BFA),
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
                                     IconButton(
                                         onClick = {
                                             editingRequest = request
@@ -1043,31 +1350,33 @@ fun ApprovalsTab(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        text = "Auto-accept",
-                                        fontSize = 11.sp,
-                                        fontWeight = if (request.autoAcceptCall) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (request.autoAcceptCall) MaterialTheme.colorScheme.primary else Color.Gray
-                                    )
-                                    Switch(
-                                        checked = request.autoAcceptCall,
-                                        onCheckedChange = { isChecked ->
-                                            onToggleAutoAccept(request, isChecked)
-                                        },
-                                        modifier = Modifier
-                                            .scale(0.75f)
-                                            .testTag("auto_accept_switch_${request.uuid}"),
-                                        colors = SwitchDefaults.colors(
-                                            checkedThumbColor = Color.Black,
-                                            checkedTrackColor = MaterialTheme.colorScheme.primary,
-                                            uncheckedThumbColor = Color.LightGray,
-                                            uncheckedTrackColor = Color(0xFF374151)
+                                if (!isMobileApp) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "Auto-accept",
+                                            fontSize = 11.sp,
+                                            fontWeight = if (request.autoAcceptCall) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (request.autoAcceptCall) MaterialTheme.colorScheme.primary else Color.Gray
                                         )
-                                    )
+                                        Switch(
+                                            checked = request.autoAcceptCall,
+                                            onCheckedChange = { isChecked ->
+                                                onToggleAutoAccept(request, isChecked)
+                                            },
+                                            modifier = Modifier
+                                                .scale(0.75f)
+                                                .testTag("auto_accept_switch_${request.uuid}"),
+                                            colors = SwitchDefaults.colors(
+                                                checkedThumbColor = Color.Black,
+                                                checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                                uncheckedThumbColor = Color.LightGray,
+                                                uncheckedTrackColor = Color(0xFF374151)
+                                            )
+                                        )
+                                    }
                                 }
 
                                 IconButton(
@@ -1092,12 +1401,12 @@ fun ApprovalsTab(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "GUEST ACCESS PASS:",
+                                        text = if (isMobileApp) "PAIRED DEVICE UUID:" else "GUEST ACCESS PASS:",
                                         fontSize = 8.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = Color.Gray
                                     )
-                                    if (request.autoAcceptCall) {
+                                    if (request.autoAcceptCall && !isMobileApp) {
                                         Text(
                                             text = "📹 IP CAMERA AUTO-ACCEPT",
                                             fontSize = 8.sp,
@@ -1107,10 +1416,10 @@ fun ApprovalsTab(
                                     }
                                 }
                                 Text(
-                                    text = request.token,
+                                    text = if (isMobileApp) request.uuid else request.token,
                                     fontSize = 11.sp,
                                     fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.primary,
+                                    color = if (isMobileApp) Color(0xFFA78BFA) else MaterialTheme.colorScheme.primary,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )

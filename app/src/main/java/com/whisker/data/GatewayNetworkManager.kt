@@ -100,6 +100,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
     // Configuration Settings
     val serverUrl = MutableStateFlow("http://10.0.2.2:3000")
     val apiKey = MutableStateFlow("")
+    val hostUsername = MutableStateFlow("")
     val autoApproveAllowed = MutableStateFlow(false)
     val pushToken = MutableStateFlow("Fetching FCM push token...")
     val serverReachable = MutableStateFlow(false)
@@ -154,6 +155,14 @@ class GatewayNetworkManager(private val context: Context, private val repository
         } else {
             pushToken.value = ""
             prefs.edit().remove("fallback_device_push_token").remove("fcm_token").apply()
+        }
+
+        // Restore or initialize hostUsername
+        val savedUsername = prefs.getString("host_username", "") ?: ""
+        val defaultName = if (savedUsername.isNotEmpty()) savedUsername else (Build.MODEL ?: "Mobile Device")
+        hostUsername.value = defaultName
+        if (savedUsername.isEmpty()) {
+            prefs.edit().putString("host_username", defaultName).apply()
         }
 
         createNotificationChannel()
@@ -272,8 +281,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         registerPushTokenOnServer(serverUrlVal, pinVal, pushToken.value)
                     } else {
                         serverReachable.value = false
-                        _connectionStatus.value = "Connecting..."
                         Log.e("GatewayNetworkManager", "Failed to fetch events from server: ${response.code}")
+                        if (response.code == 401 || response.code == 403) {
+                            checkAndRegisterMobileStatus(serverUrlVal, pinVal)
+                        } else {
+                            _connectionStatus.value = "Connecting..."
+                        }
                     }
                 }
 
@@ -547,6 +560,29 @@ class GatewayNetworkManager(private val context: Context, private val repository
             }
 
             when (eventType) {
+
+                "mobile_pairing_request" -> {
+                    val username = json.optString("username", "Unknown Mobile App")
+                    val hostUuid = json.optString("host_uuid", "")
+                    if (hostUuid.isNotEmpty()) {
+                        scope.launch {
+                            val req = com.whisker.data.ClientRequest(
+                                uuid = hostUuid,
+                                name = username,
+                                message = "Companion Mobile App / Tablet pairing request ($username)",
+                                status = "MOBILE_PENDING",
+                                token = ""
+                            )
+                            repository.insertRequest(req)
+                            showNotification(
+                                "📱 Mobile App Pairing Request",
+                                "Companion mobile device '$username' is requesting pairing.",
+                                1005
+                            )
+                        }
+                    }
+                }
+
                 "visitor" -> {
                     val name = json.optString("name", "Incoming Visitor")
                     val reason = json.optString("reason", "Local call request")
@@ -562,6 +598,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                     put("status", "APPROVED")
                                     put("token", existing.token)
                                     put("clientUuid", existing.uuid)
+                                    put("hostName", hostUsername.value)
+                                    put("host_name", hostUsername.value)
                                 }
                                 publishToClient(existing.uuid, response)
                             }
@@ -584,7 +622,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 }
                 "message" -> {
                     val token = json.optString("token", "")
-                    val msgIdLong = json.optLong("messageId", json.optLong("id", 0L))
+                    val msgIdStr = json.optString("messageId", json.optString("id", ""))
+                    val prevMsgIdStr = if (json.has("previousMessageId") && !json.isNull("previousMessageId")) json.optString("previousMessageId").takeIf { it.isNotEmpty() && it != "null" } else null
                     val cleanUrl = getCleanServerUrl()
                     val pinVal = apiKey.value
 
@@ -615,35 +654,42 @@ class GatewayNetworkManager(private val context: Context, private val repository
                             request = updatedReq
                         }
 
-                        if (msgIdLong > 0 && cleanUrl.isNotEmpty()) {
-                            fetchAndSyncMessageChain(cleanUrl, pinVal, uuid, msgIdLong)
-                        } else {
-                            val text = json.optString("text", "")
-                            val file = if (json.isNull("file")) null else json.optString("file").takeIf { it.isNotEmpty() && it != "null" }
-                            val existingMsgs = repository.getMessagesForClientSync(uuid)
-                            val isDuplicate = existingMsgs.any { m ->
-                                (messageId.isNotEmpty() && m.serverId.toString() == messageId) ||
-                                (m.messageText == text && m.filePath == file && kotlin.math.abs(m.timestamp - System.currentTimeMillis()) < 10000)
-                            }
-                            if (!isDuplicate) {
-                                repository.insertMessage(
-                                    Message(
-                                        serverId = msgIdLong,
-                                        clientUuid = uuid,
-                                        clientName = request.name,
-                                        messageText = text,
-                                        filePath = file,
-                                        isIncoming = true
-                                    )
+                        val rawText = if (json.isNull("text")) "" else json.optString("text", "")
+                        val text = if (rawText == "null") "" else rawText
+                        val file = if (json.isNull("file")) (if (json.isNull("filePath")) null else json.optString("filePath").takeIf { it.isNotEmpty() && it != "null" }) else json.optString("file").takeIf { it.isNotEmpty() && it != "null" }
+                        val effectiveText = if (text.isEmpty() && file != null) "Attachment" else text
+                        val msgTimestamp = json.optLong("timestamp", System.currentTimeMillis())
+
+                        val existingMsgs = repository.getMessagesForClientSync(uuid)
+                        val isDuplicate = existingMsgs.any { m ->
+                            (msgIdStr.isNotEmpty() && m.serverId == msgIdStr) ||
+                            (m.messageText == effectiveText && m.filePath == file && kotlin.math.abs(m.timestamp - msgTimestamp) < 10000)
+                        }
+
+                        if (!isDuplicate) {
+                            repository.insertMessage(
+                                Message(
+                                    serverId = msgIdStr,
+                                    clientUuid = uuid,
+                                    clientName = request.name,
+                                    messageText = effectiveText,
+                                    filePath = file,
+                                    isIncoming = true,
+                                    timestamp = msgTimestamp,
+                                    previousMessageId = prevMsgIdStr
                                 )
-                                val cleanMsg = if (file != null) "🔗 File: [$text]" else text
-                                showNotification(
-                                    "Message from ${request.name}",
-                                    cleanMsg,
-                                    1003,
-                                    uuid
-                                )
-                            }
+                            )
+                            val cleanMsg = if (file != null) "🔗 File: [$effectiveText]" else (if (effectiveText.isNotEmpty()) effectiveText else "New message")
+                            showNotification(
+                                "Message from ${request.name}",
+                                cleanMsg,
+                                1003,
+                                uuid
+                            )
+                        }
+
+                        if (!prevMsgIdStr.isNullOrEmpty() && cleanUrl.isNotEmpty()) {
+                            fetchAndSyncMessageChain(cleanUrl, pinVal, uuid, prevMsgIdStr)
                         }
                     }
                 }
@@ -760,10 +806,10 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    private suspend fun fetchAndSyncMessageChain(cleanUrl: String, pinVal: String, uuid: String, startMsgId: Long) {
-        var currentId: Long? = startMsgId
-        val visited = mutableSetOf<Long>()
-        while (currentId != null && currentId > 0 && !visited.contains(currentId)) {
+    private suspend fun fetchAndSyncMessageChain(cleanUrl: String, pinVal: String, uuid: String, startMsgId: String) {
+        var currentId: String? = startMsgId
+        val visited = mutableSetOf<String>()
+        while (!currentId.isNullOrEmpty() && !visited.contains(currentId)) {
             visited.add(currentId)
             val existing = repository.getMessageByServerId(currentId)
             if (existing != null) {
@@ -796,10 +842,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
             val msgUuid = msgObj!!.optString("clientUuid", uuid)
             val sender = msgObj!!.optString("sender", "guest")
-            val text = msgObj!!.optString("text", "")
+            val rawText = if (msgObj!!.isNull("text")) "" else msgObj!!.optString("text", "")
+            val text = if (rawText == "null") "" else rawText
             val filePath = if (msgObj!!.has("filePath") && !msgObj!!.isNull("filePath")) msgObj!!.optString("filePath").takeIf { it.isNotEmpty() && it != "null" } else null
+            val effectiveText = if (text.isEmpty() && filePath != null) "Attachment" else text
             val createdAt = msgObj!!.optLong("createdAt", System.currentTimeMillis())
-            val prevId = if (msgObj!!.has("previousMessageId") && !msgObj!!.isNull("previousMessageId")) msgObj!!.optLong("previousMessageId") else null
+            val prevId = if (msgObj!!.has("previousMessageId") && !msgObj!!.isNull("previousMessageId")) msgObj!!.optString("previousMessageId").takeIf { it.isNotEmpty() && it != "null" } else null
 
             var req = repository.getRequestByUuid(msgUuid)
             if (req == null) {
@@ -821,11 +869,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
             val existingLocal = repository.getMessagesForClientSync(msgUuid).find { 
                 it.serverId == currentId || 
-                (it.serverId == 0L && it.messageText == text && it.isIncoming == isIncoming && kotlin.math.abs(it.timestamp - createdAt) < 15000) 
+                (it.serverId.isEmpty() && it.messageText == effectiveText && it.isIncoming == isIncoming && kotlin.math.abs(it.timestamp - createdAt) < 15000) 
             }
 
             if (existingLocal != null) {
-                if (existingLocal.serverId == 0L) {
+                if (existingLocal.serverId.isEmpty()) {
                     repository.updateMessage(existingLocal.copy(serverId = currentId, previousMessageId = prevId))
                 }
             } else {
@@ -834,7 +882,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         serverId = currentId,
                         clientUuid = msgUuid,
                         clientName = clientName,
-                        messageText = text,
+                        messageText = effectiveText,
                         timestamp = createdAt,
                         filePath = filePath,
                         isIncoming = isIncoming,
@@ -843,12 +891,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 )
 
                 if (isIncoming) {
-                    val cleanMsg = if (filePath != null) "🔗 File: [$text]" else text
+                    val cleanMsg = if (filePath != null) "🔗 File: [$effectiveText]" else (if (effectiveText.isNotEmpty()) effectiveText else "New message")
                     showNotification("Message from $clientName", cleanMsg, 1003, msgUuid)
                 }
             }
 
-            currentId = if (prevId != null && prevId > 0) prevId else null
+            currentId = prevId
         }
     }
 
@@ -1077,51 +1125,119 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    fun updateServerUrl(url: String) {
+    suspend fun checkAndRegisterMobileStatus(serverUrlVal: String, pinVal: String) {
+        if (serverUrlVal.isEmpty() || !serverUrlVal.startsWith("http")) return
+        try {
+            fetchFcmConfigFromServer(serverUrlVal, pinVal)
+            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+            val cleanUser = if (hostUsername.value.isNotEmpty()) hostUsername.value else (Build.MODEL ?: "Mobile Device")
+            val token = pushToken.value
+            val body = JSONObject().apply {
+                put("username", cleanUser)
+                put("pin_token", pinVal)
+                put("push_token", token)
+            }
+            val requestBody = RequestBody.create(mediaType, body.toString())
+            val request = Request.Builder()
+                .url("$serverUrlVal/api/register_mobile")
+                .post(requestBody)
+                .build()
+            okHttpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val respBody = response.body?.string() ?: ""
+                    val json = JSONObject(respBody)
+                    val status = json.optString("status", "")
+                    if (status == "APPROVED") {
+                        serverReachable.value = true
+                        _connectionStatus.value = "Connected"
+                        lastRegisteredServerUrl = serverUrlVal
+                        lastRegisteredApiKey = pinVal
+                    } else if (status == "PENDING") {
+                        serverReachable.value = false
+                        _connectionStatus.value = "Pairing pending admin approval..."
+                    } else if (status == "REJECTED") {
+                        serverReachable.value = false
+                        _connectionStatus.value = "Pairing rejected by admin"
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.d("GatewayNetworkManager", "checkAndRegisterMobileStatus error: ${e.message}")
+        }
+    }
+
+    fun updateSettings(url: String, username: String) {
         val cleanUrl = url.trim().removeSuffix("/")
+        val cleanUser = username.trim().ifEmpty { Build.MODEL ?: "Mobile Device" }
         serverUrl.value = cleanUrl
+        hostUsername.value = cleanUser
         val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
-        prefs.edit().putString("server_url", cleanUrl).apply()
+        prefs.edit()
+            .putString("server_url", cleanUrl)
+            .putString("host_username", cleanUser)
+            .apply()
+
         _connectionStatus.value = "Connecting..."
-        
         registerFcmToken()
-        
         val pinVal = apiKey.value
+
         scope.launch(Dispatchers.IO) {
             fetchFcmConfigFromServer(cleanUrl, pinVal)
             var isSuccess = false
             var errorMsg: String? = null
             try {
-                // Test connection to home server via host clients endpoint
+                // Register mobile app (Pairing request)
+                val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+                val body = JSONObject().apply {
+                    put("username", cleanUser)
+                    put("pin_token", pinVal)
+                    put("push_token", pushToken.value)
+                }
+                val requestBody = RequestBody.create(mediaType, body.toString())
                 val request = Request.Builder()
-                    .url("$cleanUrl/api/host/clients")
-                    .header("Authorization", "Bearer $pinVal")
-                    .get()
+                    .url("$cleanUrl/api/register_mobile")
+                    .post(requestBody)
                     .build()
-                    
                 okHttpClient.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
-                        isSuccess = true
-                        lastRegisteredServerUrl = cleanUrl
-                        lastRegisteredApiKey = pinVal
+                        val respBody = response.body?.string()
+                        if (respBody != null) {
+                            val json = JSONObject(respBody)
+                            val status = json.optString("status", "")
+                            if (status == "APPROVED") {
+                                isSuccess = true
+                                lastRegisteredServerUrl = cleanUrl
+                                lastRegisteredApiKey = pinVal
+                            } else if (status == "PENDING") {
+                                errorMsg = "Pairing request pending admin approval."
+                            } else if (status == "REJECTED") {
+                                errorMsg = "Pairing request was rejected."
+                            }
+                        }
                     } else {
                         errorMsg = "HTTP Error ${response.code}: ${response.message}"
                     }
                 }
             } catch (e: Exception) {
-                errorMsg = e.localizedMessage ?: "Connection timed out"
+                errorMsg = "Connection failed: ${e.message}"
             }
 
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
+            withContext(Dispatchers.Main) {
                 if (isSuccess) {
-                    android.widget.Toast.makeText(context, "Successfully initialized & linked with Home Server!", android.widget.Toast.LENGTH_LONG).show()
+                    serverReachable.value = true
+                    _connectionStatus.value = "Connected"
+                    fetchPendingEventsFromServerSuspended()
                 } else {
-                    android.widget.Toast.makeText(context, "Server link error: $errorMsg", android.widget.Toast.LENGTH_LONG).show()
+                    serverReachable.value = false
+                    _connectionStatus.value = errorMsg ?: "Connection Failed"
                 }
             }
-            
-            fetchPendingEventsFromServerSuspended()
         }
+    }
+
+    fun updateServerUrl(url: String) {
+        val cleanUrl = url.trim().removeSuffix("/")
+        updateSettings(cleanUrl, hostUsername.value)
     }
 
     suspend fun fetchInvitesFromServer(): List<Invite> {

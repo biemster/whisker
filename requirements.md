@@ -13,7 +13,17 @@ The system consists of three primary components:
 
 ## 2. Whisker Mobile App (Android Client) Requirements
 
-### 2.1 Core Functionality
+### 2.1 Target API Level & Legacy Android Device Support (Repurposing Old Phones)
+- **Minimum Supported API Version**: **API Level 23 (Android 6.0 Marshmallow)**.
+  - **Rationale**: To maximize hardware reuse and allow older smartphones (from 2015+) to be repurposed as dedicated IP cameras, doorbell hubs, and Whisker gateways, the minimum SDK is pegged to the lowest viable API level permitted by modern Google Play Services and Firebase Messaging SDKs.
+  - **Language & Runtime Compatibility**: Core Library Desugaring (`desugar_jdk_libs`) is enabled to allow modern Java 8+ APIs and Kotlin coroutines/flows to run seamlessly on Android 6.0+ devices without runtime missing symbol exceptions.
+  - **Permission & Hardware Handling**:
+    - Leverages dynamic runtime permissions (`CAMERA`, `RECORD_AUDIO`) introduced in Android 6.0 (API 23).
+    - Features defensive camera hardware checks (`android.hardware.camera`, `android.hardware.camera.autofocus` declared with `required="false"`) ensuring smooth operation even on legacy devices with partial or front-only camera modules.
+    - Uses backward-compatible screen wake & lockscreen dismissal flags (`FLAG_SHOW_WHEN_LOCKED`, `FLAG_TURN_SCREEN_ON`, `FLAG_KEEP_SCREEN_ON`, `FLAG_DISMISS_KEYGUARD`) alongside modern Android O+ APIs so incoming video calls wake legacy displays reliably.
+    - Employs version-gated notification channels (supporting legacy notifications on Android 6.0-7.1 and Notification Channels on Android 8.0+).
+
+### 2.2 Core Functionality
 - **Home Server Connectivity**:
   - Connects to the Home Server via standard HTTP/HTTPS API routes.
   - Pure FCM Signaling & Battery Efficiency: When the app is in the background or dormant, persistent background connections (such as continuous SSE background streams or background polling loops) are explicitly prohibited to maximize battery life. Background event fetching is triggered strictly on-demand when an FCM push tickle notification is received. The app connects to the Home Server to fetch pending events (`/api/host/events`), processes the events, and immediately returns to a low-power sleep state.
@@ -32,7 +42,7 @@ The system consists of three primary components:
   - Automatically syncs complete message history chains using `previousMessageId` links and `/api/host/message` queries when receiving new message event notifications.
   - Message status delivery indicators and thread organization.
 
-### 2.2 Settings Modal UI & Configuration
+### 2.3 Settings Modal UI & Configuration
 - **Home Server Field**:
   - Text input field labeled **"Home Server Address"** (e.g., `https://whisker-tunnel.local`).
 - **Home Server Access Key Box**:
@@ -75,10 +85,10 @@ The system consists of three primary components:
 
 ### 3.3 Guest & Web Client API Endpoints (`/api/*`)
 - `POST /api/register`: Submits a visitor access request (creates a `PENDING` request record). [Access: Public Unauthenticated]
-- `POST /api/claim_invite`: Claims a single-use invite code and receives a valid guest `uuid` and `token`. [Access: Public Unauthenticated (Requires valid Invite Code)]
+- `POST /api/claim_invite`: Claims a single-use invite code and receives a valid guest `uuid`, `token`, `name`, `host_uuid`, and `host_name`. [Access: Public Unauthenticated (Requires valid Invite Code)]
 - `GET /api/messages`: Retrieves message history for an approved guest client. [Access: Guest Auth (`uuid` + `token` parameter verification)]
-- `POST /api/message`: Delivers a guest chat message to the host event queue. [Access: Guest Auth (`uuid` + `token` parameter verification)]
-- `POST /api/call`: Submits a WebRTC call offer SDP from a guest client. [Access: Guest Auth (`uuid` + `token` parameter verification)]
+- `POST /api/message`: Delivers a guest chat message to the host event queue. Supports optional `contact` / `host_uuid` parameter to route to a specific approved host. [Access: Guest Auth (`uuid` + `token` parameter verification)]
+- `POST /api/call`: Submits a WebRTC call offer SDP from a guest client. Supports optional `contact` / `host_uuid` parameter to route to a specific approved host. [Access: Guest Auth (`uuid` + `token` parameter verification)]
 - `POST /api/signal`: Submits WebRTC ICE candidate signals from a guest client. [Access: Guest Auth (`uuid` + `token` parameter verification)]
 - `POST /api/hangup`: Submits a hangup signal from a guest client. [Access: Guest Auth (`uuid` + `token` parameter verification)]
 - `GET /api/events`: SSE stream for guest clients to receive real-time host replies (chat messages, call accept/reject SDPs, ICE candidates, hangup). [Access: Guest Subscriber (`uuid` parameter)]
@@ -90,6 +100,9 @@ The system consists of three primary components:
 ## 4. Web Visitor Application (`whisker/index.html`) Requirements
 
 - **Responsive Web Portal**: Served directly by `whisker/server.py` at the server root URL.
+- **Multi-Connection Browser Management**:
+  - Automatically manages multiple paired host sessions in browser `localStorage` (`whisker_connections`).
+  - Top navigation bar features a dynamic **Connected Devices** dropdown switcher showing paired host names, active indicator, and one-click session switching or manual invite code claiming.
 - **Active Call Expansion**:
   - When an audio or video call is active, the call video window expands to fill the full container width and height (up to 2/3 view on mobile screens).
   - The instant messages thread smoothly re-positions below the active video element.
@@ -105,27 +118,32 @@ The system consists of three primary components:
 
 ## 5. Whisker Python CLI (`whisker`) Requirements
 
-### 5.1 Local Persistence & Client CLI Engine
+### 5.1 Local Persistence & Multi-Connection CLI Engine
 - **Storage**: Manages client configuration in a local SQLite database (`whisker.db`).
-- **Config Keys**: `server_url`, `uuid`, `token`, `name`.
+- **Database Tables**:
+  - `connections`: `id` (INTEGER PK), `name` (TEXT), `uuid` (TEXT UNIQUE), `token` (TEXT), `server_url` (TEXT), `host_uuid` (TEXT), `host_name` (TEXT), `is_active` (INTEGER), `created_at` (INTEGER).
+  - `config`: Legacy key-value table kept in sync with the active connection for backwards compatibility.
+- **Connection Resolution**: Automatically resolves targets by connection ID (`#1`), host name (exact or substring), client UUID, or host UUID.
 
 ### 5.2 Commands & Workflows
 1. `whisker init <invite_url>`:
-   - Parses the Home Server URL and single-use invite code from the invite URL.
-   - Calls `POST /api/claim_invite` on the Home Server to retrieve client credentials (`uuid`, `token`, `name`).
-   - Persists config into `whisker.db`.
-2. `whisker send <message>`:
-   - Validates client initialization.
-   - Sends a text message to the host via `POST /api/message`.
-3. `whisker call`:
-   - Validates client initialization.
-   - Initiates a WebRTC call offer to the host via `POST /api/call`.
-4. `whisker listen`:
-   - Connects to the SSE endpoint `GET /api/events?uuid=<uuid>&token=<token>`.
-   - Listens continuously for real-time events: `chat_message`, `call_accepted`, `call_rejected`, `webrtc_call_initiate`, `hangup`.
-5. `whisker info`:
-   - Displays local client configuration (`Name`, `UUID`, `Home Server`).
-   - Queries `GET /api/info` on the Home Server to check mobile app reachability and push status.
+   - Parses the Home Server URL and single-use invite code from the invite URL or prompt.
+   - Calls `POST /api/claim_invite` on the Home Server to retrieve client credentials (`uuid`, `token`, `name`, `host_uuid`, `host_name`).
+   - Saves the connection into the `connections` table in `whisker.db` and marks it as the active default connection.
+2. `whisker connections` (aliases: `contacts`, `list`, `conns`):
+   - Lists all configured paired host connections in a formatted table displaying active status indicator, connection ID, host name, client name, UUID, and server URL.
+3. `whisker switch <id|name|uuid>` (aliases: `use`, `select`):
+   - Switches the active default host connection.
+4. `whisker remove <id|name|uuid>` (aliases: `delete`, `disconnect`):
+   - Removes a saved paired host connection from local storage.
+5. `whisker send [-c <contact>] <message>`:
+   - Delivers a text message to the active host or targeted contact via `POST /api/message`.
+6. `whisker call [-c <contact>]`:
+   - Initiates a WebRTC call offer to the active host or targeted contact via `POST /api/call`.
+7. `whisker listen [-c <contact>] [--all]`:
+   - Listens to live SSE events from `GET /api/events`. Supports listening to the active connection, a specific targeted contact (`-c`), or across all saved connections simultaneously (`--all`).
+8. `whisker info [-c <contact>]`:
+   - Displays client configuration and queries Home Server `GET /api/info` to check mobile app reachability and push status.
 
 ---
 
@@ -148,13 +166,33 @@ The system consists of three primary components:
 
 ---
 
-## 7. Future System Roadmap
+## 8. Multi-Mobile App Support (Implementation Requirements)
 
-1. **iOS Mobile Gateway Application**:
-   - Native iOS application developed in Swift / SwiftUI.
-   - WebRTC audio/video call integration with CallKit support.
-   - Background APNs (Apple Push Notification service) push tickle support for power-efficient wakeup.
-2. **Multi-Device & Multi-Server Client Support**:
-   - Support for multiple mobile gateway clients paired with a single Home Server.
-   - Support for connecting a single mobile app to multiple Home Servers with independent server toggles.
-   - Direct cross-server audio/video call routing.
+As part of the roadmap for supporting multiple mobile apps on a single Home Server, the following architecture and behavioral rules apply:
+
+### 8.1 First Pairing (Admin Mobile App)
+- **Auto-Approval**: The first mobile app to pair with the Home Server is automatically approved and becomes the **Admin** of the server.
+- **Username Requirement**: The user must specify a **Username** in addition to the Home Server Address during pairing. This username is displayed in the web client and CLI.
+- **ID-Based Connection**: Connections and routing remain ID-based (UUID). The mobile app can dynamically change its username at will without losing functionality. The Home Server will silently inform web/cli clients of this username change.
+- **Legacy Compatibility**: For the first paired app, the setup experience and HTML presented to the web client remain identical to the single-host setup.
+
+### 8.2 Subsequent Pairings (Secondary Mobile Apps)
+- **Admin Approval Required**: A second (and any subsequent) mobile app attempting to pair must be explicitly approved by the Admin mobile app.
+- **Pairing Request UI**: The pairing request appears in the Admin's mobile app similar to a web/cli visitor request, but is clearly badged and prioritized as a **Mobile App Pairing Request**.
+- **Early FCM Registration**: Secondary mobile apps must register their FCM push token *during* the initial pairing request (before approval). 
+- **Approval/Rejection Tickles**: The Admin's response (approve/reject) triggers an FCM tickle to the secondary mobile app. In the case of a rejection, the rejection status is exceptionally included directly in the FCM tickle payload, because the rejected app lacks the API credentials to fetch events from the Home Server's restricted endpoints.
+
+### 8.3 Web & CLI Client Isolation
+- **Scoped Visibility**: Web and CLI clients only have access to, and knowledge of, the specific mobile app(s) that invited or approved them. Other paired mobile apps on the same Home Server are completely invisible to them.
+- **CLI `--contact` Parameter**: The `whisker` CLI will introduce a `--contact` parameter. If a CLI client has been approved by multiple mobile apps on the same Home Server, this parameter specifies which mobile app to message or call.
+- **Web Client Contact Selection**: If a web client is approved by or holds invites for more than one mobile app on the same Home Server, the web client's landing page will present a contact selection screen before initiating communication.
+
+### 8.4 Future-Proofing
+- The implementation data model and routing logic must account for future direct connections (messaging/calling) between different mobile apps on the same Home Server, though the actual mobile-to-mobile UI and signaling are deferred to a later update.
+
+### 8.5 Identified Edge Cases & Architectural Adjustments
+1. **Unauthenticated FCM Registration (Edge Case)**: Currently, registering a push token (`/api/host/register_push`) requires full Host authorization. A new unauthenticated or guest-scoped endpoint (e.g., `/api/register_mobile`) must be created so pending secondary mobile apps can submit their FCM token *before* they are approved.
+2. **Data Model Restructuring**: The Home Server's database requires a dedicated `hosts` table (`host_uuid`, `username`, `pin_token`, `push_token`, `is_admin`, `status`) to replace the global single-host `settings` entries.
+3. **Routing Relationships**: The `requests`, `messages`, and `events` tables must be updated to include a `host_uuid` foreign key. A many-to-many relationship (e.g., `client_host_approvals`) is required to support a single CLI/Web client being approved by multiple distinct mobile apps on the same server.
+4. **Admin Single Point of Failure**: If the sole Admin mobile app is uninstalled or disconnected permanently, the Home Server cannot approve new mobile apps. A fallback mechanism (e.g., server reset or CLI admin promotion) should be considered in the future.
+5. **FCM Payload Limits**: Rejection data sent in the FCM tickle must be kept minimal (e.g., a simple `status: rejected` flag) to strictly adhere to FCM's 4KB data payload limits and preserve the lightweight tickle architecture.

@@ -19,7 +19,7 @@ data class ClientRequest(
 @Entity(tableName = "messages")
 data class Message(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
-    val serverId: Long = 0,
+    val serverId: String = "",
     val clientUuid: String,
     val clientName: String,
     val messageText: String,
@@ -27,7 +27,7 @@ data class Message(
     val filePath: String? = null,
     val isIncoming: Boolean = true,
     val isRead: Boolean = false,
-    val previousMessageId: Long? = null
+    val previousMessageId: String? = null
 )
 
 @Entity(tableName = "call_logs")

@@ -37,10 +37,38 @@
                 <h1 class="text-lg font-bold text-white leading-none">Whisker</h1>
             </div>
         </div>
-        <div id="connectionStatus" onclick="openConnectivityModal()" class="flex items-center space-x-2 bg-gray-800 hover:bg-gray-750 border border-gray-700 px-3 py-1.5 rounded-full text-xs cursor-pointer transition select-none">
-            <span class="w-2.5 h-2.5 rounded-full bg-yellow-500" id="statusDot"></span>
-            <span id="statusText" class="text-gray-300 font-medium">Checking connection</span>
-            <span class="text-[10px] text-gray-500">ℹ️</span>
+
+        <div class="flex items-center space-x-2">
+            <!-- MULTI-HOST CONNECTION SWITCHER -->
+            <div id="connectionSelectorContainer" class="hidden relative">
+                <button id="connectionDropdownBtn" onclick="toggleConnectionDropdown()" class="flex items-center space-x-2 bg-cyan-950/70 hover:bg-cyan-900/70 border border-cyan-700/60 text-cyan-300 px-3 py-1.5 rounded-full text-xs font-medium transition select-none">
+                    <span>📱</span>
+                    <span id="activeHostLabel">Primary Device</span>
+                    <span class="text-[10px] text-cyan-400">▼</span>
+                </button>
+                <div id="connectionDropdownMenu" class="hidden absolute right-0 mt-2 w-64 bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl p-2 z-40 space-y-1 text-xs">
+                    <div class="px-2 py-1 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Connected Devices</div>
+                    <div id="connectionsList" class="space-y-1 max-h-48 overflow-y-auto">
+                        <!-- Populated dynamically -->
+                    </div>
+                    <div class="border-t border-gray-800 pt-1 mt-1 flex flex-col space-y-1">
+                        <button onclick="promptEnterInviteCode()" class="w-full text-left px-2.5 py-1.5 rounded-lg text-cyan-400 hover:bg-cyan-950/50 flex items-center space-x-2 transition font-medium">
+                            <span>🎟️</span>
+                            <span>Claim Another Invite...</span>
+                        </button>
+                        <button onclick="disconnectActiveConnection()" class="w-full text-left px-2.5 py-1.5 rounded-lg text-red-400 hover:bg-red-950/50 flex items-center space-x-2 transition font-medium">
+                            <span>🛑</span>
+                            <span>Disconnect Active Session</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="connectionStatus" onclick="openConnectivityModal()" class="flex items-center space-x-2 bg-gray-800 hover:bg-gray-750 border border-gray-700 px-3 py-1.5 rounded-full text-xs cursor-pointer transition select-none">
+                <span class="w-2.5 h-2.5 rounded-full bg-yellow-500" id="statusDot"></span>
+                <span id="statusText" class="text-gray-300 font-medium">Checking connection</span>
+                <span class="text-[10px] text-gray-500">ℹ️</span>
+            </div>
         </div>
     </header>
 
@@ -119,6 +147,22 @@
                     Connect Now
                 </button>
             </form>
+
+            <div class="mt-6 pt-5 border-t border-gray-800 text-center space-y-3">
+                <div class="flex items-center justify-center space-x-2 text-xs text-gray-400 font-semibold uppercase tracking-wider">
+                    <span>🎟️</span>
+                    <span>Have an Invite Code?</span>
+                </div>
+                <div class="flex space-x-2">
+                    <input type="text" id="manualInviteInput" placeholder="e.g. AbC12" 
+                           onkeydown="if(event.key==='Enter') claimManualInvite()"
+                           class="flex-1 bg-gray-950 border border-gray-800 rounded-xl px-3 py-2.5 text-white text-xs font-mono tracking-wider text-center uppercase focus:outline-none focus:border-cyan-500">
+                    <button type="button" onclick="claimManualInvite()" 
+                            class="bg-cyan-600 hover:bg-cyan-500 text-black font-bold text-xs px-4 py-2.5 rounded-xl transition shadow-md shadow-cyan-600/20">
+                        Claim
+                    </button>
+                </div>
+            </div>
         </div>
 
         <!-- STEP 2: PENDING APPROVAL -->
@@ -231,40 +275,266 @@
 
     <script>
         const HOME_SERVER_URL = window.HOME_SERVER_URL || '';
-        let clientUuid = localStorage.getItem('dc_uuid') || '';
-        let clientName = localStorage.getItem('dc_name') || '';
-        let clientToken = localStorage.getItem('dc_token') || '';
-        let chatLogs = JSON.parse(localStorage.getItem('dc_chat_history') || '[]');
+        let clientUuid = '';
+        let clientName = '';
+        let clientToken = '';
+        let hostUuid = '';
+        let hostName = '';
+        let chatLogs = [];
         let isCallActive = false;
         let callTimer = null;
         let callSeconds = 0;
         let sseConnection = null;
         let e2eStatusInterval = null;
 
-        if (window.WHISKER_INVITE_CODE && !clientToken) {
-            console.log("Auto-claiming invite code:", window.WHISKER_INVITE_CODE);
+        function loadActiveConnection() {
+            let conns = JSON.parse(localStorage.getItem('whisker_connections') || '[]');
+            let activeUuid = localStorage.getItem('whisker_active_uuid') || '';
+
+            // Migrate legacy single session keys if found
+            if (conns.length === 0 && localStorage.getItem('dc_token')) {
+                const legacy = {
+                    uuid: localStorage.getItem('dc_uuid') || '',
+                    token: localStorage.getItem('dc_token') || '',
+                    name: localStorage.getItem('dc_name') || 'Guest',
+                    hostUuid: localStorage.getItem('dc_host_uuid') || '',
+                    hostName: localStorage.getItem('dc_host_name') || '',
+                    chatLogs: JSON.parse(localStorage.getItem('dc_chat_history') || '[]')
+                };
+                conns.push(legacy);
+                activeUuid = legacy.uuid;
+                localStorage.setItem('whisker_connections', JSON.stringify(conns));
+                localStorage.setItem('whisker_active_uuid', activeUuid);
+            }
+
+            let active = conns.find(c => c.uuid === activeUuid);
+            if (!active && conns.length > 0) {
+                active = conns[0];
+                activeUuid = active.uuid;
+                localStorage.setItem('whisker_active_uuid', activeUuid);
+            }
+
+            if (active) {
+                clientUuid = active.uuid;
+                clientToken = active.token;
+                clientName = active.name;
+                hostUuid = active.hostUuid || '';
+                hostName = (active.hostName && active.hostName !== 'Primary Device' && active.hostName !== 'Paired Device' && active.hostName !== 'Companion Device') ? active.hostName : '';
+                chatLogs = active.chatLogs || [];
+            } else {
+                clientUuid = localStorage.getItem('dc_uuid') || '';
+                clientToken = localStorage.getItem('dc_token') || '';
+                clientName = localStorage.getItem('dc_name') || '';
+                hostUuid = localStorage.getItem('dc_host_uuid') || '';
+                const storedHn = localStorage.getItem('dc_host_name') || '';
+                hostName = (storedHn !== 'Primary Device' && storedHn !== 'Paired Device' && storedHn !== 'Companion Device') ? storedHn : '';
+                chatLogs = JSON.parse(localStorage.getItem('dc_chat_history') || '[]');
+            }
+
+            // Keep legacy storage keys in sync
+            localStorage.setItem('dc_uuid', clientUuid);
+            localStorage.setItem('dc_token', clientToken);
+            localStorage.setItem('dc_name', clientName);
+            localStorage.setItem('dc_host_uuid', hostUuid);
+            localStorage.setItem('dc_host_name', hostName);
+            localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+
+            renderConnectionSelector();
+        }
+
+        function saveActiveConnectionData() {
+            let conns = JSON.parse(localStorage.getItem('whisker_connections') || '[]');
+            const idx = conns.findIndex(c => c.uuid === clientUuid);
+            if (idx >= 0) {
+                conns[idx].name = clientName;
+                conns[idx].token = clientToken;
+                conns[idx].hostUuid = hostUuid;
+                conns[idx].hostName = hostName;
+                conns[idx].chatLogs = chatLogs;
+            } else if (clientUuid && clientToken) {
+                conns.push({
+                    uuid: clientUuid,
+                    token: clientToken,
+                    name: clientName,
+                    hostUuid: hostUuid,
+                    hostName: hostName || "Companion Device",
+                    chatLogs: chatLogs
+                });
+            }
+            localStorage.setItem('whisker_connections', JSON.stringify(conns));
+            localStorage.setItem('whisker_active_uuid', clientUuid);
+            localStorage.setItem('dc_uuid', clientUuid);
+            localStorage.setItem('dc_token', clientToken);
+            localStorage.setItem('dc_name', clientName);
+            localStorage.setItem('dc_host_uuid', hostUuid);
+            localStorage.setItem('dc_host_name', hostName);
+            localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+            renderConnectionSelector();
+        }
+
+        function renderConnectionSelector() {
+            const container = document.getElementById('connectionSelectorContainer');
+            const label = document.getElementById('activeHostLabel');
+            const list = document.getElementById('connectionsList');
+            if (!container || !label || !list) return;
+
+            let conns = JSON.parse(localStorage.getItem('whisker_connections') || '[]');
+            if (conns.length === 0 || !clientToken) {
+                container.classList.add('hidden');
+                return;
+            }
+
+            container.classList.remove('hidden');
+            label.innerText = hostName || "Connected Device";
+
+            list.innerHTML = '';
+            conns.forEach(c => {
+                const isActive = c.uuid === clientUuid;
+                const item = document.createElement('div');
+                item.className = "flex items-center justify-between p-2 rounded-xl " + (isActive ? "bg-cyan-950/80 border border-cyan-700/60" : "bg-gray-950/60 hover:bg-gray-800/60 cursor-pointer border border-transparent");
+                item.innerHTML = `
+                    <div class="flex items-center space-x-2 truncate">
+                        <span class="w-2 h-2 rounded-full ${isActive ? 'bg-cyan-400' : 'bg-gray-500'}"></span>
+                        <div class="truncate">
+                            <p class="font-bold text-white text-xs truncate">${c.hostName || 'Host Device'}</p>
+                            <p class="text-[10px] text-gray-400 truncate">As: ${c.name || 'Guest'}</p>
+                        </div>
+                    </div>
+                    ${isActive ? '<span class="text-[10px] font-mono text-cyan-400 font-bold px-1.5 py-0.5 rounded bg-cyan-950 border border-cyan-800">Active</span>' : '<button class="text-xs text-cyan-400 hover:underline">Switch</button>'}
+                `;
+                if (!isActive) {
+                    item.onclick = () => {
+                        toggleConnectionDropdown(false);
+                        switchConnection(c.uuid);
+                    };
+                }
+                list.appendChild(item);
+            });
+        }
+
+        function toggleConnectionDropdown(forceState) {
+            const menu = document.getElementById('connectionDropdownMenu');
+            if (!menu) return;
+            if (forceState !== undefined) {
+                if (forceState) menu.classList.remove('hidden');
+                else menu.classList.add('hidden');
+            } else {
+                menu.classList.toggle('hidden');
+            }
+        }
+
+        document.addEventListener('click', (e) => {
+            const container = document.getElementById('connectionSelectorContainer');
+            if (container && !container.contains(e.target)) {
+                toggleConnectionDropdown(false);
+            }
+        });
+
+        function switchConnection(targetUuid) {
+            if (targetUuid === clientUuid) return;
+            if (sseConnection) {
+                sseConnection.close();
+                sseConnection = null;
+            }
+            if (isCallActive) {
+                hangUpCall(true);
+            }
+            localStorage.setItem('whisker_active_uuid', targetUuid);
+            loadActiveConnection();
+            initSession();
+        }
+
+        function promptEnterInviteCode() {
+            toggleConnectionDropdown(false);
+            const code = prompt("Enter 5-character invite code from host device:");
+            if (code && code.trim()) {
+                claimInvite(code.trim());
+            }
+        }
+
+        function claimManualInvite() {
+            const input = document.getElementById('manualInviteInput');
+            if (!input) return;
+            const code = input.value.trim();
+            if (!code) {
+                alert("Please enter an invite code.");
+                return;
+            }
+            claimInvite(code);
+        }
+
+        function claimInvite(code) {
+            console.log("Claiming invite code:", code);
             fetch(HOME_SERVER_URL + "/api/claim_invite", {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ code: window.WHISKER_INVITE_CODE })
+                body: JSON.stringify({ code: code })
             })
             .then(res => res.json())
             .then(data => {
                 if (data.success && data.uuid && data.token) {
-                    clientUuid = data.uuid;
-                    clientToken = data.token;
-                    clientName = data.name || "Invited Guest";
-                    localStorage.setItem('dc_uuid', clientUuid);
-                    localStorage.setItem('dc_token', clientToken);
-                    localStorage.setItem('dc_name', clientName);
+                    const newConn = {
+                        uuid: data.uuid,
+                        token: data.token,
+                        name: data.name || "Invited Guest",
+                        hostUuid: data.host_uuid || "",
+                        hostName: data.host_name || "Companion Device",
+                        chatLogs: []
+                    };
+
+                    let conns = JSON.parse(localStorage.getItem('whisker_connections') || '[]');
+                    conns = conns.filter(c => c.uuid !== newConn.uuid);
+                    conns.unshift(newConn);
+                    localStorage.setItem('whisker_connections', JSON.stringify(conns));
+                    localStorage.setItem('whisker_active_uuid', newConn.uuid);
+
+                    if (window.history && window.history.replaceState) {
+                        window.history.replaceState({}, document.title, window.location.origin + window.location.pathname.replace(/\/invite\/.*$/, '/'));
+                    }
+
+                    if (sseConnection) {
+                        sseConnection.close();
+                        sseConnection = null;
+                    }
+                    if (isCallActive) {
+                        hangUpCall(true);
+                    }
+
+                    loadActiveConnection();
+                    initSession();
+                } else {
+                    alert(data.error || "Failed to claim invite code. The code may be expired or already claimed.");
+                    loadActiveConnection();
                     initSession();
                 }
             })
-            .catch(err => console.error("Error auto-claiming invite:", err));
+            .catch(err => {
+                console.error("Error auto-claiming invite:", err);
+                alert("Could not reach Home Server to claim invite.");
+                loadActiveConnection();
+                initSession();
+            });
+        }
+
+        function checkAndProcessInitialInvite() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+            let pathCode = '';
+            if (window.location.pathname.startsWith('/invite/')) {
+                pathCode = window.location.pathname.split('/invite/')[1].split('/')[0].split('?')[0].split('#')[0].trim();
+            }
+            const code = window.WHISKER_INVITE_CODE || urlParams.get('invite') || urlParams.get('code') || hashParams.get('invite') || hashParams.get('code') || pathCode;
+
+            if (code) {
+                claimInvite(code);
+            } else {
+                loadActiveConnection();
+                initSession();
+            }
         }
 
         window.addEventListener('DOMContentLoaded', () => {
-            initSession();
+            checkAndProcessInitialInvite();
         });
 
         function startE2eStatusPolling() {
@@ -381,6 +651,8 @@
                 showView('provisionedView');
                 document.getElementById('approvedName').innerText = clientName;
                 
+                renderConnectionSelector();
+                syncHostInfo();
                 fetchHistoryFromServer();
                 startClientSse();
                 startE2eStatusPolling();
@@ -389,6 +661,7 @@
                 document.getElementById('statusText').innerText = "Awaiting response";
                 document.getElementById('uuidDisplay').innerText = "Guest ID: " + clientUuid;
                 showView('pendingView');
+                renderConnectionSelector();
                 startClientSse();
             } else {
                 if (e2eStatusInterval) {
@@ -398,11 +671,43 @@
                 document.getElementById('statusDot').className = "w-2.5 h-2.5 rounded-full bg-red-500";
                 document.getElementById('statusText').innerText = "Currently Offline";
                 showView('unprovisionedView');
+                renderConnectionSelector();
                 if (sseConnection) {
                     sseConnection.close();
                     sseConnection = null;
                 }
             }
+        }
+
+        function syncHostInfo() {
+            if (!clientUuid || !clientToken) return;
+            const hostsUrl = HOME_SERVER_URL + "/api/client/hosts?uuid=" + clientUuid + "&token=" + clientToken;
+            fetch(hostsUrl)
+                .then(res => res.json())
+                .then(hosts => {
+                    if (Array.isArray(hosts) && hosts.length > 0) {
+                        let matched = hostUuid ? hosts.find(h => h.uuid === hostUuid) : null;
+                        if (!matched) matched = hosts[0];
+                        if (matched && matched.username) {
+                            let updated = false;
+                            if (hostName !== matched.username) {
+                                hostName = matched.username;
+                                updated = true;
+                            }
+                            if (hostUuid !== matched.uuid) {
+                                hostUuid = matched.uuid;
+                                updated = true;
+                            }
+                            if (updated) {
+                                saveActiveConnectionData();
+                                renderConnectionSelector();
+                            }
+                        }
+                    }
+                })
+                .catch(err => {
+                    console.log("Could not sync host list:", err);
+                });
         }
 
         function showView(viewId) {
@@ -428,7 +733,7 @@
                         isIncoming: item.sender === 'phone',
                         filePath: item.file_path || null
                     }));
-                    localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                    saveActiveConnectionData();
                     renderChat();
                 })
                 .catch(err => {
@@ -465,7 +770,13 @@
                 const token = payload.token;
                 if (token) {
                     clientToken = token;
-                    localStorage.setItem('dc_token', clientToken);
+                    if (payload.host_uuid) {
+                        hostUuid = payload.host_uuid;
+                    }
+                    if (payload.host_name || payload.hostName) {
+                        hostName = payload.host_name || payload.hostName;
+                    }
+                    saveActiveConnectionData();
                     initSession();
                 }
             } else if (payload.type === "chat_message" || payload.event === "message") {
@@ -487,7 +798,7 @@
                             filePath: fileVal
                         };
                         chatLogs.push(newMsg);
-                        localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                        saveActiveConnectionData();
                         renderChat();
                     }
                 }
@@ -525,8 +836,7 @@
 
             clientUuid = 'cli_' + Math.random().toString(36).substr(2, 9);
             clientName = name;
-            localStorage.setItem('dc_uuid', clientUuid);
-            localStorage.setItem('dc_name', clientName);
+            saveActiveConnectionData();
 
             console.log("Posting registration request...", {clientUuid, clientName, intent});
             
@@ -552,6 +862,7 @@
 
         function renderChat() {
             const chatBox = document.getElementById('chatBox');
+            if (!chatBox) return;
             const banner = chatBox.firstElementChild;
             chatBox.innerHTML = '';
             if (banner) chatBox.appendChild(banner);
@@ -577,7 +888,7 @@
                 }
 
                 messageDiv.innerHTML = 
-                    '<span class="text-[9px] text-gray-500 mb-0.5 px-1 ' + (msg.isIncoming ? 'text-left' : 'text-right') + '">' + (msg.isIncoming ? 'Phone' : 'You') + ' • ' + timeStr + '</span>' +
+                    '<span class="text-[9px] text-gray-500 mb-0.5 px-1 ' + (msg.isIncoming ? 'text-left' : 'text-right') + '">' + (msg.isIncoming ? (hostName || 'Phone') : 'You') + ' • ' + timeStr + '</span>' +
                     textBody;
                 chatBox.appendChild(messageDiv);
             });
@@ -606,7 +917,7 @@
                 filePath: null
             };
             chatLogs.push(newMsg);
-            localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+            saveActiveConnectionData();
             renderChat();
             chatInput.value = '';
 
@@ -618,6 +929,7 @@
                 token: clientToken,
                 name: clientName,
                 text: text,
+                host_uuid: hostUuid || null,
                 file: null
             };
 
@@ -632,8 +944,14 @@
                     const idx = chatLogs.findIndex(m => m.id === newMsg.id);
                     if (idx !== -1) {
                         chatLogs[idx].id = data.id;
-                        localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                        saveActiveConnectionData();
                     }
+                }
+                if (data && data.host_name && hostName !== data.host_name) {
+                    hostName = data.host_name;
+                    if (data.host_uuid) hostUuid = data.host_uuid;
+                    saveActiveConnectionData();
+                    renderConnectionSelector();
                 }
                 console.log("Message delivered.", data);
             }).catch(e => {
@@ -662,7 +980,7 @@
                 };
                 
                 chatLogs.push(fileMsg);
-                localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                saveActiveConnectionData();
                 renderChat();
 
                 const payload = {
@@ -671,6 +989,7 @@
                     token: clientToken,
                     name: clientName,
                     text: file.name,
+                    host_uuid: hostUuid || null,
                     file: base64Data
                 };
 
@@ -683,11 +1002,17 @@
                 .then((data) => {
                     progress.classList.add('hidden');
                     if (data && data.id) {
-                        const idx = chatLogs.findIndex(m => m.id === newMsg.id);
+                        const idx = chatLogs.findIndex(m => m.id === fileMsg.id);
                         if (idx !== -1) {
                             chatLogs[idx].id = data.id;
-                            localStorage.setItem('dc_chat_history', JSON.stringify(chatLogs));
+                            saveActiveConnectionData();
                         }
+                    }
+                    if (data && data.host_name && hostName !== data.host_name) {
+                        hostName = data.host_name;
+                        if (data.host_uuid) hostUuid = data.host_uuid;
+                        saveActiveConnectionData();
+                        renderConnectionSelector();
                     }
                     console.log("File uploaded successfully.");
                 }).catch(err => {
@@ -700,7 +1025,7 @@
 
         function clearChatHistory() {
             chatLogs = [];
-            localStorage.setItem('dc_chat_history', '[]');
+            saveActiveConnectionData();
             renderChat();
         }
 
@@ -779,7 +1104,6 @@
             const localVid = document.getElementById('localVideo');
             if (localVid) localVid.srcObject = localStream;
 
-            // WebRTC RTCConfiguration with direct P2P STUN and TURN server scaffolding
             const rtcConfig = {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
@@ -831,6 +1155,7 @@
                 token: clientToken,
                 name: clientName,
                 video: isVideo,
+                host_uuid: hostUuid || null,
                 sdp: offer.sdp
             };
 
@@ -869,6 +1194,13 @@
             let localStream = await acquireLocalMediaStream(isVideo, clientName || "Web Client");
             const localVid = document.getElementById('localVideo');
             if (localVid) localVid.srcObject = localStream;
+
+            const rtcConfig = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            };
 
             const pc = new RTCPeerConnection(rtcConfig);
             window.pc = pc;
@@ -943,7 +1275,7 @@
             
             document.getElementById('localVideo').classList.add('hidden');
             const localVid = document.getElementById('localVideo');
-            if (localVid.srcObject) {
+            if (localVid && localVid.srcObject) {
                 localVid.srcObject.getTracks().forEach(track => track.stop());
                 localVid.srcObject = null;
             }
@@ -968,19 +1300,39 @@
             }
         }
 
-        function resetCredentials() {
-            if (confirm("Disconnect session? History will clean.")) {
+        function disconnectActiveConnection() {
+            if (confirm("Disconnect active host connection?")) {
                 if (sseConnection) {
                     sseConnection.close();
                     sseConnection = null;
                 }
-                localStorage.clear();
-                clientUuid = '';
-                clientName = '';
-                clientToken = '';
-                chatLogs = [];
+                if (isCallActive) {
+                    hangUpCall(true);
+                }
+
+                let conns = JSON.parse(localStorage.getItem('whisker_connections') || '[]');
+                conns = conns.filter(c => c.uuid !== clientUuid);
+                localStorage.setItem('whisker_connections', JSON.stringify(conns));
+                
+                if (conns.length > 0) {
+                    localStorage.setItem('whisker_active_uuid', conns[0].uuid);
+                } else {
+                    localStorage.removeItem('whisker_active_uuid');
+                    localStorage.removeItem('dc_uuid');
+                    localStorage.removeItem('dc_token');
+                    localStorage.removeItem('dc_name');
+                    localStorage.removeItem('dc_host_uuid');
+                    localStorage.removeItem('dc_host_name');
+                    localStorage.removeItem('dc_chat_history');
+                }
+                
+                loadActiveConnection();
                 initSession();
             }
+        }
+
+        function resetCredentials() {
+            disconnectActiveConnection();
         }
     </script>
 </body>

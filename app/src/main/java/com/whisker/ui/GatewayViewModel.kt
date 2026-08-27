@@ -114,6 +114,18 @@ class GatewayViewModel(
     // Client Request Approval Flows
     fun approveClient(request: ClientRequest) {
         viewModelScope.launch {
+            if (request.status == "MOBILE_PENDING") {
+                val updated = request.copy(status = "MOBILE_APPROVED", lastSeen = System.currentTimeMillis())
+                repository.updateRequest(updated)
+                val payload = org.json.JSONObject().apply {
+                    put("type", "mobile_pairing_response")
+                    put("event", "approved")
+                    put("uuid", request.uuid)
+                }
+                networkManager.publishToClient(request.uuid, payload)
+                return@launch
+            }
+
             val approvedToken = "auth_tok_" + java.util.UUID.randomUUID().toString().substring(0, 12)
             val updated = request.copy(status = "APPROVED", token = approvedToken, lastSeen = System.currentTimeMillis())
             repository.updateRequest(updated)
@@ -124,6 +136,8 @@ class GatewayViewModel(
                 put("status", "APPROVED")
                 put("token", approvedToken)
                 put("clientUuid", request.uuid)
+                put("hostName", networkManager.hostUsername.value)
+                put("host_name", networkManager.hostUsername.value)
             }
             networkManager.publishToClient(request.uuid, payload)
         }
@@ -131,6 +145,18 @@ class GatewayViewModel(
 
     fun rejectClient(request: ClientRequest) {
         viewModelScope.launch {
+            if (request.status == "MOBILE_PENDING") {
+                val updated = request.copy(status = "MOBILE_REJECTED")
+                repository.updateRequest(updated)
+                val payload = org.json.JSONObject().apply {
+                    put("type", "mobile_pairing_response")
+                    put("event", "rejected")
+                    put("uuid", request.uuid)
+                }
+                networkManager.publishToClient(request.uuid, payload)
+                return@launch
+            }
+
             val updated = request.copy(status = "REJECTED")
             repository.updateRequest(updated)
         }

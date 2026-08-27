@@ -11,7 +11,7 @@ interface ClientRequestDao {
     @Query("SELECT * FROM client_requests ORDER BY timestamp DESC")
     suspend fun getAllRequestsSync(): List<ClientRequest>
 
-    @Query("SELECT * FROM client_requests WHERE status = 'PENDING' ORDER BY timestamp DESC")
+    @Query("SELECT * FROM client_requests WHERE status IN ('PENDING', 'MOBILE_PENDING') ORDER BY timestamp DESC")
     fun getPendingRequests(): Flow<List<ClientRequest>>
 
     @Query("SELECT * FROM client_requests WHERE uuid = :uuid")
@@ -45,7 +45,7 @@ interface MessageDao {
     suspend fun getMessagesForClientSync(clientUuid: String): List<Message>
 
     @Query("SELECT * FROM messages WHERE serverId = :serverId LIMIT 1")
-    suspend fun getMessageByServerId(serverId: Long): Message?
+    suspend fun getMessageByServerId(serverId: String): Message?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessage(message: Message)
