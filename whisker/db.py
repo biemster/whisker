@@ -132,6 +132,26 @@ class DatabaseManager:
                     cursor.execute("ALTER TABLE invites ADD COLUMN host_uuid TEXT DEFAULT NULL")
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    cursor.execute("ALTER TABLE requests ADD COLUMN client_type TEXT DEFAULT 'WEB'")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE requests ADD COLUMN server_address TEXT DEFAULT 'local'")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE hosts ADD COLUMN allow_direct_calls INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE requests ADD COLUMN remote_uuid TEXT DEFAULT NULL")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE requests ADD COLUMN remote_token TEXT DEFAULT NULL")
+                except sqlite3.OperationalError:
+                    pass
 
                 # Backfill unlinked approved requests with primary host
                 try:
@@ -174,15 +194,17 @@ class DatabaseManager:
             finally:
                 conn.close()
 
-    def add_request(self, uuid, name, reason):
+    def add_request(self, uuid, name, reason, status='PENDING', token='', client_type='WEB', server_address='local', remote_uuid=None, remote_token=None):
         now = int(time.time() * 1000)
         with self.lock:
             conn = self.get_connection()
             try:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT OR REPLACE INTO requests (uuid, name, reason, status, created_at) VALUES (?, ?, ?, 'PENDING', ?)",
-                    (uuid, name, reason, now)
+                    """INSERT OR REPLACE INTO requests 
+                       (uuid, name, reason, status, token, created_at, client_type, server_address, remote_uuid, remote_token) 
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (uuid, name, reason, status, token, now, client_type, server_address, remote_uuid, remote_token)
                 )
                 conn.commit()
             finally:
@@ -563,6 +585,7 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT r.uuid, r.name, r.reason, r.status as req_status, r.token, r.created_at,
+                           r.client_type, r.server_address,
                            c.is_online, c.last_seen
                     FROM requests r
                     JOIN client_host_approvals cha ON r.uuid = cha.client_uuid
@@ -576,6 +599,7 @@ class DatabaseManager:
                     if h_row and h_row['is_admin'] == 1:
                         cursor.execute("""
                             SELECT r.uuid, r.name, r.reason, r.status as req_status, r.token, r.created_at,
+                                   r.client_type, r.server_address,
                                    c.is_online, c.last_seen
                             FROM requests r
                             LEFT JOIN client_presence c ON r.uuid = c.uuid

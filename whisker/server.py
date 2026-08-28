@@ -411,6 +411,16 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             msgs = self.db.get_messages(uuid)
             return self._send_json(msgs)
 
+        if path in ['/api/guest/events', '/api/guest/pending_events']:
+            uuid = qs.get('uuid', [''])[0]
+            token = qs.get('token', [''])[0]
+            if not self._authorize_guest(uuid, token):
+                return
+            events = self.db.get_guest_events(uuid)
+            if events:
+                self.db.delete_guest_events(uuid)
+            return self._send_json(events)
+
         if path == '/api/events':
             uuid = qs.get('uuid', [''])[0]
             token = qs.get('token', [''])[0]
@@ -445,10 +455,23 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             with WhiskerServerHandler.streams_lock:
                 host_conn = any(len(stms) > 0 for stms in WhiskerServerHandler.host_streams.values())
 
+            direct_hosts = [
+                {
+                    "uuid": h['uuid'],
+                    "username": h.get('username') or 'Mobile App',
+                    "is_admin": h.get('is_admin', 0)
+                }
+                for h in hosts
+                if h.get('allow_direct_calls', 0) == 1 and h.get('status') == 'APPROVED'
+            ]
+            direct_calls_enabled = len(direct_hosts) > 0
+
             return self._send_json({
                 "host_connected": host_conn,
                 "push_configured": push_configured,
                 "host_reachable": host_conn or push_configured,
+                "allow_direct_calls": direct_calls_enabled,
+                "direct_call_hosts": direct_hosts,
                 "server_time": int(time.time() * 1000)
             })
 
@@ -541,6 +564,15 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 return self._send_json({"message": "FCM API Key updated successfully"})
             return self._send_json({"error": "Missing api_key"}, 400)
 
+        if path == '/api/host/direct_calls':
+            host = self._authorize_host()
+            if not host: return
+            host_uuid = host["uuid"]
+            allow = 1 if body.get('allow_direct_calls') or body.get('enabled') else 0
+            self.db.update_host(host_uuid, allow_direct_calls=allow)
+            print(f"⚡ [Direct Calls] Host '{host.get('username') or host_uuid}' updated allow_direct_calls to {bool(allow)}")
+            return self._send_json({"message": "Direct calls setting updated", "allow_direct_calls": bool(allow)})
+
         if path == '/api/host/ack':
             host = self._authorize_host()
             if not host: return
@@ -585,6 +617,68 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 self.db.delete_invite(code)
             return self._send_json({"success": True})
 
+        if path == '/api/host/claim_remote_invite':
+            host = self._authorize_host()
+            if not host: return
+            host_uuid = host["uuid"]
+            invite_url = (body.get('invite_url') or body.get('url') or '').strip()
+            my_name = body.get('my_name') or host.get('username') or 'Mobile App'
+
+            if not invite_url:
+                return self._send_json({"error": "Missing invite_url"}, 400)
+
+            code = ""
+            remote_base = ""
+            if '/invite/' in invite_url:
+                parts = invite_url.split('/invite/')
+                remote_base = parts[0].rstrip('/')
+                code = parts[1].split('?')[0].split('#')[0].strip()
+            else:
+                code = invite_url
+                remote_base = (body.get('server_url') or '').rstrip('/')
+
+            if not remote_base or not code:
+                return self._send_json({"error": "Invalid invite URL or missing server_url"}, 400)
+
+            try:
+                req_data = json.dumps({"code": code, "name": my_name}).encode('utf-8')
+                req = urllib.request.Request(
+                    f"{remote_base}/api/claim_invite",
+                    data=req_data,
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp_body = json.loads(resp.read().decode('utf-8'))
+                    if not resp_body.get('success'):
+                        return self._send_json({"error": resp_body.get('error', 'Remote claim failed')}, 400)
+
+                    client_uuid = resp_body['uuid']
+                    token = resp_body['token']
+                    peer_name = resp_body.get('host_name') or resp_body.get('name') or 'Remote Mobile App'
+
+                    self.db.add_request(
+                        client_uuid,
+                        peer_name,
+                        f"Connected from remote home server ({remote_base})",
+                        status='APPROVED',
+                        token=token,
+                        client_type='MOBILE',
+                        server_address=remote_base
+                    )
+                    self.db.add_client_host_approval(client_uuid, host_uuid)
+
+                    return self._send_json({
+                        "success": True,
+                        "uuid": client_uuid,
+                        "token": token,
+                        "name": peer_name,
+                        "client_type": "MOBILE",
+                        "server_address": remote_base,
+                        "status": "APPROVED"
+                    })
+            except Exception as e:
+                return self._send_json({"error": f"Failed to claim remote invite: {str(e)}"}, 500)
+
         if path == '/api/host/response':
             host = self._authorize_host()
             if not host: return
@@ -593,9 +687,9 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             resp_type = body.get('type')
             resp_event = body.get('event')
 
-            # Ensure host is paired/authorized for this client unless approving initial request or mobile pairing
+            target_host = self.db.get_host(client_uuid)
             approved_clients = self.db.get_approved_clients_for_host(host_uuid)
-            is_approved = any(c['uuid'] == client_uuid for c in approved_clients)
+            is_approved = (target_host is not None) or any(c['uuid'] == client_uuid for c in approved_clients)
 
             if not is_approved and resp_type not in ['registration_response', 'mobile_pairing_response']:
                 return self._send_json({"error": "Host not paired with this client"}, 403)
@@ -612,29 +706,94 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 target_host_uuid = body.get('uuid') or body.get('host_uuid')
                 if target_host_uuid:
                     self.db.update_host(target_host_uuid, status='APPROVED')
-                    target_host = self.db.get_host(target_host_uuid)
-                    if target_host and target_host.get('push_token'):
-                        # Send tickle to target host so it wakes up and knows it's approved
-                        self._send_fcm_tickle(target_host['push_token'], event_id=target_host_uuid, event_type="mobile_pairing", extra_status="approved")
+                    target_h = self.db.get_host(target_host_uuid)
+                    if target_h and target_h.get('push_token'):
+                        self._send_fcm_tickle(target_h['push_token'], event_id=target_host_uuid, event_type="mobile_pairing", extra_status="approved")
                         
             elif resp_type == 'mobile_pairing_response' and resp_event == 'rejected':
                 target_host_uuid = body.get('uuid') or body.get('host_uuid')
                 if target_host_uuid:
                     self.db.update_host(target_host_uuid, status='REJECTED')
-                    target_host = self.db.get_host(target_host_uuid)
-                    if target_host and target_host.get('push_token'):
-                        # Send tickle with rejection payload
-                        # FCM payload limit is 4KB. A small flag is fine.
-                        self._send_fcm_tickle(target_host['push_token'], event_id=target_host_uuid, event_type="mobile_pairing", extra_status="rejected")
+                    target_h = self.db.get_host(target_host_uuid)
+                    if target_h and target_h.get('push_token'):
+                        self._send_fcm_tickle(target_h['push_token'], event_id=target_host_uuid, event_type="mobile_pairing", extra_status="rejected")
                         
-            elif resp_type == 'chat_message' and body.get('sender') == 'phone':
+            elif resp_type in ['chat_message', 'message'] and (body.get('sender') == 'phone' or 'text' in body):
                 text = body.get('text', '')
-                file_path = body.get('filePath')
-                if client_uuid and text:
+                file_path = body.get('filePath') or body.get('file')
+                if client_uuid and (text or file_path):
                     msg_id, prev_id = self.db.add_message(client_uuid, host_uuid, 'phone', text, file_path)
                     body['messageId'] = msg_id
                     body['id'] = msg_id
                     body['previousMessageId'] = prev_id
+
+                    # If target is a companion mobile app on the same server, route as host event
+                    if target_host:
+                        event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
+                        payload = {
+                            "event": "message",
+                            "eventId": event_id,
+                            "messageId": msg_id,
+                            "previousMessageId": prev_id,
+                            "uuid": host_uuid,
+                            "name": host.get('username') or 'Mobile App',
+                            "text": text,
+                            "filePath": file_path,
+                            "file": file_path,
+                            "timestamp": int(time.time() * 1000),
+                            "client_type": "MOBILE",
+                            "server_address": "local"
+                        }
+                        self.db.add_host_event(target_host['uuid'], event_id, "message", payload)
+                        self._notify_host_streams(target_host['uuid'], "message", payload)
+                        if target_host.get('push_token'):
+                            self._send_fcm_tickle(target_host['push_token'], event_id=msg_id, event_type="message")
+                        return self._send_json({"message": "Message routed to companion mobile app", "messageId": msg_id})
+
+            if target_host and (resp_type in ['webrtc_call_initiate', 'call'] or resp_event in ['call_initiate', 'call']):
+                event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
+                payload = {
+                    "event": "call",
+                    "eventId": event_id,
+                    "uuid": host_uuid,
+                    "name": host.get('username') or 'Mobile App',
+                    "sdp": body.get('sdp', ''),
+                    "video": body.get('video', True),
+                    "client_type": "MOBILE",
+                    "server_address": "local"
+                }
+                self.db.add_host_event(target_host['uuid'], event_id, "call", payload)
+                self._notify_host_streams(target_host['uuid'], "call", payload)
+                if target_host.get('push_token'):
+                    self._send_fcm_tickle(target_host['push_token'], event_id=event_id, event_type="call")
+                return self._send_json({"message": "Call routed to companion mobile app"})
+
+            if target_host and (resp_type in ['webrtc_call_answer', 'webrtc_ice_candidate'] or resp_event in ['call_answered', 'ice_candidate']):
+                event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
+                payload = {
+                    "event": "signal",
+                    "eventId": event_id,
+                    "uuid": host_uuid,
+                    "type": resp_type or resp_event,
+                    "sdp": body.get('sdp', ''),
+                    "candidate": body.get('candidate'),
+                    "client_type": "MOBILE",
+                    "server_address": "local"
+                }
+                self.db.add_host_event(target_host['uuid'], event_id, "signal", payload)
+                self._notify_host_streams(target_host['uuid'], "signal", payload)
+                return self._send_json({"message": "Signal routed to companion mobile app"})
+
+            if target_host and (resp_type in ['webrtc_call_hangup', 'call_declined', 'call_ended'] or resp_event in ['call_ended', 'hangup']):
+                event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
+                payload = {
+                    "event": "hangup",
+                    "eventId": event_id,
+                    "uuid": host_uuid
+                }
+                self.db.add_host_event(target_host['uuid'], event_id, "hangup", payload)
+                self._notify_host_streams(target_host['uuid'], "hangup", payload)
+                return self._send_json({"message": "Hangup routed to companion mobile app"})
 
             if resp_type in ['webrtc_call_answer', 'webrtc_call_initiate', 'webrtc_ice_candidate'] or resp_event in ['call_answered', 'call_initiate', 'ice_candidate']:
                 sdp_str = body.get('sdp', '')
@@ -787,13 +946,28 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         if path == '/api/call':
             uuid = body.get('uuid')
             token = body.get('token')
-            if not self._authorize_guest(uuid, token):
-                return
-
-            contact_uuid = body.get('contact') or body.get('host_uuid')
-            host = self._resolve_target_host(uuid, contact_uuid)
-            if not host:
-                return self._send_json({"error": "No reachable host found for this client"}, 403)
+            is_direct = body.get('is_direct_call', False) or body.get('direct_call', False)
+            
+            host = None
+            if is_direct:
+                # Find an approved host that allows direct calls
+                hosts = self.db.get_hosts()
+                target_host_uuid = body.get('contact') or body.get('host_uuid')
+                if target_host_uuid:
+                    matched = [h for h in hosts if h['uuid'] == target_host_uuid and h.get('allow_direct_calls', 0) == 1 and h.get('status') == 'APPROVED']
+                    if matched: host = matched[0]
+                if not host:
+                    matched = [h for h in hosts if h.get('allow_direct_calls', 0) == 1 and h.get('status') == 'APPROVED']
+                    if matched: host = matched[0]
+                if not host:
+                    return self._send_json({"error": "No host currently allows direct calls without prior approval."}, 403)
+            else:
+                if not self._authorize_guest(uuid, token):
+                    return
+                contact_uuid = body.get('contact') or body.get('host_uuid')
+                host = self._resolve_target_host(uuid, contact_uuid)
+                if not host:
+                    return self._send_json({"error": "No reachable host found for this client"}, 403)
             
             host_uuid = host['uuid']
             push_token = host.get('push_token')
@@ -804,16 +978,19 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             sdp_len = len(sdp_str)
             has_audio = "m=audio" in sdp_str
             has_video = "m=video" in sdp_str
-            print(f"📞 [WebRTC Call] Guest '{uuid}' ({body.get('name')}) initiated call | Host: '{host.get('username') or host_uuid}' | Video: {is_vid} | SDP Len: {sdp_len} (Audio: {has_audio}, Video: {has_video})")
+            reason_str = body.get('reason', '')
+            print(f"📞 [WebRTC Call] {'⚡ DIRECT CALL' if is_direct else 'Guest'} '{uuid}' ({body.get('name')}) initiated call | Host: '{host.get('username') or host_uuid}' | Video: {is_vid} | Reason: '{reason_str}' | SDP Len: {sdp_len}")
 
             payload = {
                 "event": "call",
                 "eventId": event_id,
                 "uuid": uuid,
-                "token": token,
+                "token": token or "",
                 "name": body.get('name', 'Guest'),
                 "video": is_vid,
-                "sdp": sdp_str
+                "sdp": sdp_str,
+                "is_direct_call": is_direct,
+                "reason": reason_str
             }
             self.db.add_host_event(host_uuid, event_id, "call", payload)
             self._notify_host_streams(host_uuid, "call", payload)
@@ -821,29 +998,41 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             if push_token:
                 self._send_fcm_tickle(push_token, event_id=event_id, event_type="call")
 
-            return self._send_json({"status": "dialing", "eventId": event_id})
+            return self._send_json({"status": "dialing", "eventId": event_id, "host_uuid": host_uuid})
 
         if path == '/api/hangup':
             uuid = body.get('uuid')
             token = body.get('token')
-            if not self._authorize_guest(uuid, token):
-                return
+            is_direct = body.get('is_direct_call', False) or body.get('direct_call', False)
+            host = None
+            if is_direct or not token:
+                hosts = self.db.get_hosts()
+                contact_uuid = body.get('contact') or body.get('host_uuid')
+                if contact_uuid:
+                    matched = [h for h in hosts if h['uuid'] == contact_uuid]
+                    if matched: host = matched[0]
+                if not host:
+                    matched = [h for h in hosts if h.get('status') == 'APPROVED']
+                    if matched: host = matched[0]
+            else:
+                if not self._authorize_guest(uuid, token):
+                    return
+                contact_uuid = body.get('contact') or body.get('host_uuid')
+                host = self._resolve_target_host(uuid, contact_uuid)
 
-            contact_uuid = body.get('contact') or body.get('host_uuid')
-            host = self._resolve_target_host(uuid, contact_uuid)
             if not host:
                 return self._send_json({"error": "No reachable host found for this client"}, 403)
             
             host_uuid = host['uuid']
             push_token = host.get('push_token')
 
-            print(f"🛑 [WebRTC Hangup] Guest '{uuid}' requested call hangup to host '{host.get('username') or host_uuid}'")
+            print(f"🛑 [WebRTC Hangup] Client '{uuid}' requested call hangup to host '{host.get('username') or host_uuid}'")
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
             payload = {
                 "event": "hangup",
                 "eventId": event_id,
                 "uuid": uuid,
-                "token": token
+                "token": token or ""
             }
             self.db.add_host_event(host_uuid, event_id, "hangup", payload)
             self._notify_host_streams(host_uuid, "hangup", payload)
@@ -856,11 +1045,23 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         if path == '/api/signal':
             uuid = body.get('uuid')
             token = body.get('token')
-            if not self._authorize_guest(uuid, token):
-                return
+            is_direct = body.get('is_direct_call', False) or body.get('direct_call', False)
+            host = None
+            if is_direct or not token:
+                hosts = self.db.get_hosts()
+                contact_uuid = body.get('contact') or body.get('host_uuid')
+                if contact_uuid:
+                    matched = [h for h in hosts if h['uuid'] == contact_uuid]
+                    if matched: host = matched[0]
+                if not host:
+                    matched = [h for h in hosts if h.get('status') == 'APPROVED']
+                    if matched: host = matched[0]
+            else:
+                if not self._authorize_guest(uuid, token):
+                    return
+                contact_uuid = body.get('contact') or body.get('host_uuid')
+                host = self._resolve_target_host(uuid, contact_uuid)
 
-            contact_uuid = body.get('contact') or body.get('host_uuid')
-            host = self._resolve_target_host(uuid, contact_uuid)
             if not host:
                 return self._send_json({"error": "No reachable host found for this client"}, 403)
             
@@ -869,14 +1070,14 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             sig_type = body.get('type', 'webrtc_ice_candidate')
             has_cand = bool(body.get('candidate'))
             has_sdp = bool(body.get('sdp'))
-            print(f"📡 [WebRTC Signal] Guest '{uuid}' sent signal '{sig_type}' to host '{host.get('username') or host_uuid}' | Candidate: {has_cand} | SDP: {has_sdp}")
+            print(f"📡 [WebRTC Signal] Client '{uuid}' sent signal '{sig_type}' to host '{host.get('username') or host_uuid}' | Candidate: {has_cand} | SDP: {has_sdp}")
 
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
             payload = {
                 "event": "signal",
                 "eventId": event_id,
                 "uuid": uuid,
-                "token": token,
+                "token": token or "",
                 "type": sig_type,
                 "candidate": body.get('candidate'),
                 "sdp": body.get('sdp')

@@ -8,12 +8,14 @@ data class ClientRequest(
     @PrimaryKey val uuid: String,
     val name: String,
     val message: String,
-    val status: String, // "PENDING", "APPROVED", "REJECTED"
+    val status: String, // "PENDING", "APPROVED", "REJECTED", "MOBILE_PENDING", "MOBILE_APPROVED"
     val token: String,
     val timestamp: Long = System.currentTimeMillis(),
     val lastSeen: Long = System.currentTimeMillis(),
     val isOnline: Boolean = false,
-    val autoAcceptCall: Boolean = false
+    val autoAcceptCall: Boolean = false,
+    val clientType: String = "WEB", // "WEB", "CLI", "MOBILE"
+    val serverAddress: String = "local" // "local" or "http://remote-server:3000"
 )
 
 @Entity(tableName = "messages")

@@ -68,9 +68,14 @@ class GatewayViewModel(
     val apiKey = networkManager.apiKey
     val pushToken = networkManager.pushToken
     val serverReachable = networkManager.serverReachable
+    val allowDirectCalls = networkManager.allowDirectCalls
 
     val selectedTab = MutableStateFlow(1)
     val selectedChatUuid = MutableStateFlow<String?>(null)
+
+    fun toggleAllowDirectCalls(allowed: Boolean) {
+        networkManager.updateDirectCallsAllowed(allowed)
+    }
 
     fun setSelectedTab(tab: Int) {
         selectedTab.value = tab
@@ -225,6 +230,15 @@ class GatewayViewModel(
         viewModelScope.launch {
             networkManager.deleteInviteOnServer(invite.code)
             fetchInvites()
+        }
+    }
+
+    fun claimInvite(inviteUrl: String, onResult: (Boolean, String) -> Unit) {
+        networkManager.claimInviteUrl(inviteUrl) { success, msg ->
+            if (success) {
+                refreshConnectionAndEvents()
+            }
+            onResult(success, msg)
         }
     }
 

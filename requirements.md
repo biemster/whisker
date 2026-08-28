@@ -188,11 +188,53 @@ As part of the roadmap for supporting multiple mobile apps on a single Home Serv
 - **Web Client Contact Selection**: If a web client is approved by or holds invites for more than one mobile app on the same Home Server, the web client's landing page will present a contact selection screen before initiating communication.
 
 ### 8.4 Future-Proofing
-- The implementation data model and routing logic must account for future direct connections (messaging/calling) between different mobile apps on the same Home Server, though the actual mobile-to-mobile UI and signaling are deferred to a later update.
+- The implementation data model and routing logic supports direct connections (messaging/calling) between different mobile apps on the same Home Server, as well as cross-server federation.
 
 ### 8.5 Identified Edge Cases & Architectural Adjustments
-1. **Unauthenticated FCM Registration (Edge Case)**: Currently, registering a push token (`/api/host/register_push`) requires full Host authorization. A new unauthenticated or guest-scoped endpoint (e.g., `/api/register_mobile`) must be created so pending secondary mobile apps can submit their FCM token *before* they are approved.
-2. **Data Model Restructuring**: The Home Server's database requires a dedicated `hosts` table (`host_uuid`, `username`, `pin_token`, `push_token`, `is_admin`, `status`) to replace the global single-host `settings` entries.
-3. **Routing Relationships**: The `requests`, `messages`, and `events` tables must be updated to include a `host_uuid` foreign key. A many-to-many relationship (e.g., `client_host_approvals`) is required to support a single CLI/Web client being approved by multiple distinct mobile apps on the same server.
-4. **Admin Single Point of Failure**: If the sole Admin mobile app is uninstalled or disconnected permanently, the Home Server cannot approve new mobile apps. A fallback mechanism (e.g., server reset or CLI admin promotion) should be considered in the future.
-5. **FCM Payload Limits**: Rejection data sent in the FCM tickle must be kept minimal (e.g., a simple `status: rejected` flag) to strictly adhere to FCM's 4KB data payload limits and preserve the lightweight tickle architecture.
+1. **Unauthenticated FCM Registration (Edge Case)**: Secondary mobile apps submit their FCM token during the pairing request (`/api/register_mobile`) before approval.
+2. **Data Model Restructuring**: The Home Server's database utilizes a dedicated `hosts` table (`host_uuid`, `username`, `pin_token`, `push_token`, `is_admin`, `status`) to replace global single-host settings entries.
+3. **Routing Relationships**: The `requests`, `messages`, and `events` tables include `host_uuid` foreign keys to support multi-host isolation and targeted routing.
+4. **Admin Single Point of Failure**: If the sole Admin mobile app is uninstalled or disconnected permanently, the Home Server can be reset or a secondary host promoted via CLI.
+5. **FCM Payload Limits**: Rejection data sent in the FCM tickle is kept minimal to strictly adhere to FCM's 4KB data payload limits.
+
+---
+
+## 9. Mobile-to-Mobile Messaging & Communication Specification
+
+Whisker supports full-duplex messaging, media transfer, and WebRTC audio/video calls directly between mobile apps—both on the **same Home Server** (local) and across **different Home Servers** (remote federation).
+
+### 9.1 Technical Architecture & Signaling Flow
+
+1. **Same Home Server (Local Mobile Peers)**:
+   - Mobile apps paired to the same Home Server communicate using the same internal event broker (`_notify_host_streams`) as web and CLI clients.
+   - Outgoing messages and WebRTC SDP offers/answers are posted to the Home Server's unified response/message endpoints with the target peer's `host_uuid`.
+   - The Home Server enqueues the event, pushes an FCM tickle to the target mobile device, and delivers the event payload upon retrieval.
+   - **UI Representation**: The contact card and chat header display `📱 MOBILE APP` and an emerald `🏠 local` badge indicating the peer resides on the same Home Server instance.
+
+2. **Cross-Server (Remote Home Server Federation)**:
+   - When connecting mobile apps across different Home Servers, Home Server A acts as a client on Home Server B and vice versa, establishing a symmetric bidirectional channel.
+   - **Invite Mechanism**: Connection uses the same invite structure as standard visitors (`http://<remote-server-address>/invite/<invite-code>`).
+   - **Claim Flow**: The local mobile app enters or scans the invite URL via the **Connect Peer via Invite** dialog (`/api/host/claim_remote_invite` or direct client claim). The local client claims the invite on the remote server, obtaining a guest `uuid` and `token` alongside the remote server's address.
+   - **Outbound Signaling & Messaging**: When messaging or calling a remote mobile peer, the local app issues HTTP requests (`POST /api/message`, `POST /api/call`, `POST /api/signal`, `POST /api/hangup`) directly to the remote server's API endpoints using the claimed guest credentials.
+   - **Inbound Event Polling & Push**: Remote events from the peer server are fetched via `/api/guest/events?uuid=<guest_uuid>` and synced into the local Room database.
+   - **UI Representation**: In both mobile apps, the contact card and chat header prominently display `📱 MOBILE APP` alongside a blue `🌐 <remote_server_address>` badge, making it immediately transparent which Home Server address the peer is hosted on.
+
+### 9.2 Zero Inter-Server Background Traffic & On-Demand Architecture
+- **Strictly Event-Driven / On-Demand**: Home Servers never continuously ping, poll, or broadcast to other Home Servers. There are zero background heartbeats, synchronization cycles, or gossip protocols between servers.
+- **Zero Idle Overhead**: When no user is actively sending a message or initiating a call, inter-server network traffic is strictly 0.0 KB/s.
+- **Client-Initiated Action**: Communication to a remote Home Server occurs exclusively on-demand when the mobile application performs an explicit user-initiated action (e.g., sending a text message, uploading a file, or initiating a WebRTC call handshake) or upon receiving an incoming event wake-up tickle.
+- **Infinite Scalability ($O(1)$ Overhead)**: Because servers operate in complete isolation without global discovery or mesh maintenance, global server capacity scales infinitely with zero performance degradation regardless of the total number of deployed Whisker instances.
+
+### 9.3 Mobile UI Indicator Rules
+- **Peer Type Badge**:
+  - `📱 MOBILE APP` (Purple `#8B5CF6`) for paired mobile applications / companion apps.
+  - `💻 WEB / CLI` (Blue `#3B82F6`) for web visitors and scriptable CLI agents.
+- **Home Server Location Badge**:
+  - `🏠 local` (Teal `#064E3B` / `#6EE7B7`) when `serverAddress` is empty or `"local"`.
+  - `🌐 <server_address>` (Navy `#1E3A8A` / `#93C5FD`) when connected to an external Home Server.
+- **Actions Available**:
+  - Direct **💬 Chat** button opening the encrypted message stream for that specific peer.
+  - Direct **📞 Call** button initiating a peer-to-peer WebRTC video/audio call.
+  - **Inline Rename** to assign friendly custom contact names.
+  - **Revoke / Disconnect** to permanently unpair the peer.
+

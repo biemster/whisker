@@ -142,6 +142,11 @@
                     <textarea id="clientIntentInput" required rows="3" placeholder="e.g. Liam calling regarding our meeting." 
                                class="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:ring-1 focus:ring-cyan-500 focus:border-cyan-500"></textarea>
                 </div>
+
+                <!-- DIRECT CALL OPTION (BEFORE APPROVAL) -->
+                <div id="directCallContainer" class="hidden p-3.5 rounded-2xl bg-amber-950/40 border border-amber-500/40 space-y-2">
+                </div>
+
                 <button type="submit" 
                         class="w-full bg-cyan-500 hover:bg-cyan-400 text-black font-bold py-3 px-6 rounded-xl transition duration-200 shadow-lg shadow-cyan-500/20 active:scale-95">
                     Connect Now
@@ -286,6 +291,77 @@
         let callSeconds = 0;
         let sseConnection = null;
         let e2eStatusInterval = null;
+        let directCallTimeoutTimer = null;
+        let isDirectCallMode = false;
+
+        function downloadChatHistory() {
+            if (!chatLogs || chatLogs.length === 0) {
+                alert("No chat messages to download.");
+                return;
+            }
+            const header = `Whisker Chat History\nClient: ${clientName || 'Guest'} (${clientUuid || 'N/A'})\nHost: ${hostName || 'Whisker Phone'}\nDate: ${new Date().toLocaleString()}\n----------------------------------------\n\n`;
+            const lines = chatLogs.map(m => {
+                const timeStr = new Date(m.timestamp).toLocaleString();
+                const sender = m.isIncoming ? (hostName || 'Phone') : (clientName || 'You');
+                return `[${timeStr}] ${sender}: ${m.text || (m.filePath ? 'Attachment' : '')}`;
+            });
+            const blob = new Blob([header + lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `whisker-chat-history-${(clientName || 'guest').toLowerCase().replace(/[^a-z0-9]/g, '_')}-${Date.now()}.txt`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
+
+        function handleAuthorizationLost(contextMsg) {
+            console.warn("Authorization lost on Home Server:", contextMsg);
+            if (!clientToken && !clientUuid) return;
+
+            if (sseConnection) {
+                sseConnection.close();
+                sseConnection = null;
+            }
+            if (isCallActive) {
+                hangUpCall(true);
+            }
+
+            const hasHistory = chatLogs && chatLogs.length > 0;
+            const promptMsg = "⚠️ Connection Authorization Lost\n\n" +
+                "The Home Server does not recognize your session (e.g. server database was reset or authorization removed).\n\n" +
+                (hasHistory ? "Would you like to download your previous message history before returning to the introduction screen?" : "Returning to introduction mode.");
+
+            if (hasHistory) {
+                if (confirm(promptMsg)) {
+                    downloadChatHistory();
+                }
+            } else {
+                alert(promptMsg);
+            }
+
+            // Remove invalidated connection
+            let conns = JSON.parse(localStorage.getItem('whisker_connections') || '[]');
+            conns = conns.filter(c => c.uuid !== clientUuid);
+            localStorage.setItem('whisker_connections', JSON.stringify(conns));
+
+            localStorage.removeItem('whisker_active_uuid');
+            localStorage.removeItem('dc_uuid');
+            localStorage.removeItem('dc_token');
+            localStorage.removeItem('dc_name');
+            localStorage.removeItem('dc_host_uuid');
+            localStorage.removeItem('dc_host_name');
+            localStorage.removeItem('dc_chat_history');
+
+            clientUuid = '';
+            clientToken = '';
+            clientName = '';
+            chatLogs = [];
+
+            showView('unprovisionedView');
+            initSession();
+        }
 
         function loadActiveConnection() {
             let conns = JSON.parse(localStorage.getItem('whisker_connections') || '[]');
@@ -552,6 +628,94 @@
             document.getElementById('connectivityModal').classList.add('hidden');
         }
 
+        function updateDirectCallsUi(hosts) {
+            const container = document.getElementById('directCallContainer');
+            if (!container) return;
+
+            if (!hosts || !Array.isArray(hosts) || hosts.length === 0) {
+                container.classList.add('hidden');
+                container.innerHTML = '';
+                return;
+            }
+
+            container.classList.remove('hidden');
+
+            if (hosts.length === 1) {
+                const host = hosts[0];
+                const hName = host.username || "Mobile App";
+                const hUuid = host.uuid;
+                const safeName = escapeHtml(hName).replace(/'/g, "\\'");
+                container.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <span class="text-amber-400 font-bold text-xs flex items-center space-x-1.5">
+                            <span>⚡</span>
+                            <span>Direct Call Available: <strong class="text-white">${escapeHtml(hName)}</strong></span>
+                        </span>
+                        <span class="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-mono">10s timeout</span>
+                    </div>
+                    <p class="text-[11px] text-gray-300 leading-tight">
+                        <strong>${escapeHtml(hName)}</strong> is accepting direct pre-approval calls.
+                    </p>
+                    <div class="grid grid-cols-2 gap-2 pt-1">
+                        <button type="button" onclick="initiateDirectCall(false, '${hUuid}', '${safeName}')" 
+                                class="bg-amber-500 hover:bg-amber-400 text-black font-bold py-2 px-3 rounded-xl text-xs transition flex items-center justify-center space-x-1.5 shadow-md shadow-amber-500/20 active:scale-95">
+                            <span>📞</span>
+                            <span>Audio Call</span>
+                        </button>
+                        <button type="button" onclick="initiateDirectCall(true, '${hUuid}', '${safeName}')" 
+                                class="bg-amber-600 hover:bg-amber-500 text-black font-bold py-2 px-3 rounded-xl text-xs transition flex items-center justify-center space-x-1.5 shadow-md shadow-amber-600/20 active:scale-95">
+                            <span>📹</span>
+                            <span>Video Call</span>
+                        </button>
+                    </div>
+                `;
+            } else {
+                let listHtml = hosts.map(h => {
+                    const hName = h.username || "Mobile App";
+                    const hUuid = h.uuid;
+                    const safeName = escapeHtml(hName).replace(/'/g, "\\'");
+                    return `
+                        <div class="flex items-center justify-between p-2 rounded-xl bg-black/40 border border-amber-500/30">
+                            <div class="flex items-center space-x-2 min-w-0 pr-2">
+                                <span class="text-base">📱</span>
+                                <span class="text-xs font-bold text-white truncate">${escapeHtml(hName)}</span>
+                            </div>
+                            <div class="flex items-center space-x-1.5 flex-shrink-0">
+                                <button type="button" onclick="initiateDirectCall(false, '${hUuid}', '${safeName}')" 
+                                        class="bg-amber-500 hover:bg-amber-400 text-black font-bold py-1.5 px-2.5 rounded-lg text-xs transition flex items-center space-x-1 shadow-sm active:scale-95"
+                                        title="Audio Call ${escapeHtml(hName)}">
+                                    <span>📞</span>
+                                    <span>Audio</span>
+                                </button>
+                                <button type="button" onclick="initiateDirectCall(true, '${hUuid}', '${safeName}')" 
+                                        class="bg-amber-600 hover:bg-amber-500 text-black font-bold py-1.5 px-2.5 rounded-lg text-xs transition flex items-center space-x-1 shadow-sm active:scale-95"
+                                        title="Video Call ${escapeHtml(hName)}">
+                                    <span>📹</span>
+                                    <span>Video</span>
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                container.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <span class="text-amber-400 font-bold text-xs flex items-center space-x-1.5">
+                            <span>⚡</span>
+                            <span>Direct Calls Available (${hosts.length})</span>
+                        </span>
+                        <span class="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-mono">10s timeout</span>
+                    </div>
+                    <p class="text-[11px] text-gray-300 leading-tight">
+                        Select which mobile app host you want to call directly:
+                    </p>
+                    <div class="space-y-1.5 pt-1">
+                        ${listHtml}
+                    </div>
+                `;
+            }
+        }
+
         function checkE2eStatus() {
             fetch(HOME_SERVER_URL + "/api/info")
                 .then(res => res.json())
@@ -569,6 +733,9 @@
 
                     if (mName) mName.innerText = clientName || "Guest";
                     if (mUuid) mUuid.innerText = clientUuid || "None";
+
+                    const directHosts = (data && data.direct_call_hosts) ? data.direct_call_hosts : ((data && data.allow_direct_calls) ? [{uuid: '', username: 'Mobile App'}] : []);
+                    updateDirectCallsUi(directHosts);
 
                     if (!data) return;
 
@@ -683,7 +850,13 @@
             if (!clientUuid || !clientToken) return;
             const hostsUrl = HOME_SERVER_URL + "/api/client/hosts?uuid=" + clientUuid + "&token=" + clientToken;
             fetch(hostsUrl)
-                .then(res => res.json())
+                .then(res => {
+                    if (res.status === 403) {
+                        handleAuthorizationLost("Sync hosts 403");
+                        throw new Error("403 Forbidden");
+                    }
+                    return res.json();
+                })
                 .then(hosts => {
                     if (Array.isArray(hosts) && hosts.length > 0) {
                         let matched = hostUuid ? hosts.find(h => h.uuid === hostUuid) : null;
@@ -722,6 +895,10 @@
             const historyUrl = HOME_SERVER_URL + "/api/messages?uuid=" + clientUuid + "&token=" + clientToken;
             fetch(historyUrl)
                 .then(res => {
+                    if (res.status === 403) {
+                        handleAuthorizationLost("History fetch 403");
+                        throw new Error("403 Forbidden");
+                    }
                     if (!res.ok) throw new Error("Unauthorized message history call");
                     return res.json();
                 })
@@ -805,6 +982,10 @@
             } else if (payload.type === "webrtc_call_initiate") {
                 handleIncomingCallOffer(payload);
             } else if (payload.type === "webrtc_call_answer" || payload.event === "call_answered") {
+                if (directCallTimeoutTimer) {
+                    clearInterval(directCallTimeoutTimer);
+                    directCallTimeoutTimer = null;
+                }
                 document.getElementById('callDuration').innerText = "CALL ACTIVE";
                 isCallActive = true;
                 setCallLayoutActive(true);
@@ -859,6 +1040,31 @@
                 initSession();
             });
         });
+
+        function initiateDirectCall(isVideo, targetHostUuid = '', targetHostName = '') {
+            const nameInput = document.getElementById('clientNameInput');
+            const reasonInput = document.getElementById('clientIntentInput');
+            const name = nameInput.value.trim();
+            const reason = reasonInput.value.trim();
+
+            if (!name || !reason) {
+                alert("Please enter both Your Name and Reason for Contact to initiate a direct call.");
+                if (!name) nameInput.focus();
+                else reasonInput.focus();
+                return;
+            }
+
+            clientName = name;
+            clientUuid = 'direct_' + Math.random().toString(36).substr(2, 9);
+            hostUuid = targetHostUuid || '';
+            hostName = targetHostName || 'Mobile Host';
+            isDirectCallMode = true;
+
+            showView('provisionedView');
+            document.getElementById('approvedName').innerText = clientName + " (Direct Call to " + (targetHostName || "Host") + ")";
+            startClientSse();
+            toggleCall(isVideo, true, reason, targetHostUuid);
+        }
 
         function renderChat() {
             const chatBox = document.getElementById('chatBox');
@@ -938,7 +1144,13 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             })
-            .then(res => res.json())
+            .then(res => {
+                if (res.status === 403) {
+                    handleAuthorizationLost("Submit message 403");
+                    throw new Error("403 Forbidden");
+                }
+                return res.json();
+            })
             .then((data) => {
                 if (data && data.id) {
                     const idx = chatLogs.findIndex(m => m.id === newMsg.id);
@@ -998,7 +1210,13 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 })
-                .then(res => res.json())
+                .then(res => {
+                    if (res.status === 403) {
+                        handleAuthorizationLost("File upload 403");
+                        throw new Error("403 Forbidden");
+                    }
+                    return res.json();
+                })
                 .then((data) => {
                     progress.classList.add('hidden');
                     if (data && data.id) {
@@ -1089,7 +1307,7 @@
             return stream;
         }
 
-        async function toggleCall(isVideo) {
+        async function toggleCall(isVideo, isDirectCall = false, directReason = '', targetHostUuid = '') {
             isCallActive = true;
             setCallLayoutActive(true);
             document.getElementById('audioCallBtn').disabled = true;
@@ -1098,9 +1316,19 @@
             
             document.getElementById('localVideo').classList.remove('hidden');
             document.getElementById('videoPlaceholder').classList.add('hidden');
-            document.getElementById('callDuration').innerText = "ROUTING CALL SIGNAL...";
+            document.getElementById('callDuration').innerText = isDirectCall ? "DIRECT CALLING (10s)..." : "ROUTING CALL SIGNAL...";
             
-            let localStream = await acquireLocalMediaStream(isVideo, clientName || "Web Client");
+            let localStream;
+            try {
+                localStream = await acquireLocalMediaStream(isVideo, clientName || "Web Client");
+            } catch (e) {
+                console.error("Local media error", e);
+                if (isDirectCall) {
+                    hangUpCall(true);
+                    showView('unprovisionedView');
+                }
+                return;
+            }
             const localVid = document.getElementById('localVideo');
             if (localVid) localVid.srcObject = localStream;
 
@@ -1123,7 +1351,8 @@
                             event: "signal",
                             type: "webrtc_ice_candidate",
                             uuid: clientUuid,
-                            token: clientToken,
+                            token: clientToken || "",
+                            is_direct_call: isDirectCall,
                             candidate: event.candidate.toJSON()
                         })
                     }).catch(e => console.error("Error sending ICE candidate", e));
@@ -1152,10 +1381,12 @@
             const payload = {
                 event: "call",
                 uuid: clientUuid,
-                token: clientToken,
+                token: clientToken || "",
                 name: clientName,
                 video: isVideo,
-                host_uuid: hostUuid || null,
+                host_uuid: targetHostUuid || hostUuid || null,
+                is_direct_call: isDirectCall,
+                reason: directReason,
                 sdp: offer.sdp
             };
 
@@ -1163,20 +1394,58 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
-            }).then(() => {
+            }).then(res => {
+                if (res.status === 403) {
+                    if (!isDirectCall) {
+                        handleAuthorizationLost("Call 403");
+                    } else {
+                        hangUpCall(true);
+                        alert("Direct call unavailable: Mobile app is not currently accepting pre-approval calls.");
+                        showView('unprovisionedView');
+                        checkE2eStatus();
+                    }
+                    throw new Error("403 Forbidden");
+                }
                 console.log("Call handshaking.");
             }).catch(e => {
                 console.error("Dial signal failure", e);
+                if (isDirectCall) {
+                    hangUpCall(true);
+                    showView('unprovisionedView');
+                    checkE2eStatus();
+                }
             });
 
-            callSeconds = 0;
-            if (callTimer) clearInterval(callTimer);
-            callTimer = setInterval(() => {
-                callSeconds++;
-                const mins = Math.floor(callSeconds / 60).toString().padStart(2, '0');
-                const secs = (callSeconds % 60).toString().padStart(2, '0');
-                document.getElementById('callDuration').innerText = "CALL ALIVE • " + mins + ":" + secs;
-            }, 1000);
+            if (isDirectCall) {
+                if (directCallTimeoutTimer) clearInterval(directCallTimeoutTimer);
+                let directSecondsLeft = 10;
+                directCallTimeoutTimer = setInterval(() => {
+                    directSecondsLeft--;
+                    if (isCallActive && document.getElementById('callDuration').innerText.includes("CALL ACTIVE")) {
+                        clearInterval(directCallTimeoutTimer);
+                        directCallTimeoutTimer = null;
+                        return;
+                    }
+                    if (directSecondsLeft <= 0) {
+                        clearInterval(directCallTimeoutTimer);
+                        directCallTimeoutTimer = null;
+                        hangUpCall(true);
+                        alert("📞 Call was not picked up within 10 seconds.\n\nWe suggest requesting contact access using the form to leave a message.");
+                        showView('unprovisionedView');
+                    } else {
+                        document.getElementById('callDuration').innerText = "DIRECT CALLING... " + directSecondsLeft + "s";
+                    }
+                }, 1000);
+            } else {
+                callSeconds = 0;
+                if (callTimer) clearInterval(callTimer);
+                callTimer = setInterval(() => {
+                    callSeconds++;
+                    const mins = Math.floor(callSeconds / 60).toString().padStart(2, '0');
+                    const secs = (callSeconds % 60).toString().padStart(2, '0');
+                    document.getElementById('callDuration').innerText = "CALL ALIVE • " + mins + ":" + secs;
+                }, 1000);
+            }
         }
 
         async function handleIncomingCallOffer(payload) {
@@ -1214,7 +1483,7 @@
                             event: "signal",
                             type: "webrtc_ice_candidate",
                             uuid: clientUuid,
-                            token: clientToken,
+                            token: clientToken || "",
                             candidate: event.candidate.toJSON()
                         })
                     }).catch(e => console.error("Error sending ICE candidate", e));
@@ -1249,7 +1518,7 @@
                         event: "signal",
                         type: "webrtc_call_answer",
                         uuid: clientUuid,
-                        token: clientToken,
+                        token: clientToken || "",
                         sdp: answer.sdp
                     })
                 }).catch(e => console.error("Error sending call answer SDP", e));
@@ -1266,9 +1535,17 @@
         }
 
         function hangUpCall(receivedFromPhone = false) {
+            const wasDirect = isDirectCallMode;
             isCallActive = false;
             setCallLayoutActive(false);
-            if (callTimer) clearInterval(callTimer);
+            if (callTimer) {
+                clearInterval(callTimer);
+                callTimer = null;
+            }
+            if (directCallTimeoutTimer) {
+                clearInterval(directCallTimeoutTimer);
+                directCallTimeoutTimer = null;
+            }
             document.getElementById('audioCallBtn').disabled = false;
             document.getElementById('videoCallBtn').disabled = false;
             document.getElementById('hangUpBtn').disabled = true;
@@ -1290,13 +1567,25 @@
                 const payload = {
                     event: "hangup",
                     uuid: clientUuid,
-                    token: clientToken
+                    token: clientToken || "",
+                    is_direct_call: wasDirect
                 };
                 fetch(HOME_SERVER_URL + "/api/hangup", {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 }).catch(e => console.error("Hangup signal error", e));
+            }
+            isDirectCallMode = false;
+
+            if (wasDirect) {
+                if (sseConnection) {
+                    sseConnection.close();
+                    sseConnection = null;
+                }
+                clientUuid = '';
+                showView('unprovisionedView');
+                checkE2eStatus();
             }
         }
 

@@ -96,6 +96,7 @@ fun GatewayDashboard(
     val apiKeyVal by viewModel.apiKey.collectAsState()
     val pushTokenVal by viewModel.pushToken.collectAsState()
     val serverReachableVal by viewModel.serverReachable.collectAsState()
+    val allowDirectCalls by viewModel.allowDirectCalls.collectAsState()
 
     val selectedTab by viewModel.selectedTab.collectAsState()
     var showServerConfigDialog by remember { mutableStateOf(false) }
@@ -319,16 +320,26 @@ fun GatewayDashboard(
                             pendingRequests = pendingReqs,
                             allRequests = requests,
                             activeInvites = allInvites,
+                            allowDirectCalls = allowDirectCalls,
+                            onToggleDirectCalls = { viewModel.toggleAllowDirectCalls(it) },
                             onApprove = { viewModel.approveClient(it) },
                             onReject = { viewModel.rejectClient(it) },
                             onDelete = { viewModel.deleteClient(it) },
                             onRename = { request, newName -> viewModel.renameClient(request, newName) },
                             onDeleteInvite = { viewModel.deleteInvite(it) },
-                            onToggleAutoAccept = { request, autoAccept -> viewModel.toggleAutoAccept(request, autoAccept) }
+                            onToggleAutoAccept = { request, autoAccept -> viewModel.toggleAutoAccept(request, autoAccept) },
+                            onChat = { uuid ->
+                                viewModel.setSelectedChatUuid(uuid)
+                                viewModel.setSelectedTab(1)
+                                coroutineScope.launch { pagerState.animateScrollToPage(1) }
+                            },
+                            onCall = { uuid, name ->
+                                viewModel.redialClient(uuid, name)
+                            }
                         )
                         1 -> {
                             val selectedChatUuid by viewModel.selectedChatUuid.collectAsState()
-                            val approvedRequests = requests.filter { it.status == "APPROVED" }
+                            val approvedRequests = requests.filter { it.status == "APPROVED" || it.status == "MOBILE_APPROVED" }
                             LaunchedEffect(approvedRequests) {
                                 if (selectedChatUuid == null || !approvedRequests.any { it.uuid == selectedChatUuid }) {
                                     val firstUuid = approvedRequests.firstOrNull()?.uuid
@@ -371,102 +382,262 @@ fun GatewayDashboard(
         }
 
         if (showInviteDialog) {
+            var selectedDialogTab by remember { mutableStateOf(0) } // 0: Generate, 1: Claim
             var inviteName by remember { mutableStateOf("") }
             var createdInvite by remember { mutableStateOf<Invite?>(null) }
+            var inviteInput by remember { mutableStateOf("") }
+            var isConnecting by remember { mutableStateOf(false) }
+            var claimErrorMessage by remember { mutableStateOf<String?>(null) }
             val clipboardManager = LocalClipboardManager.current
             val scrollState = rememberScrollState()
 
             AlertDialog(
                 onDismissRequest = { 
-                    showInviteDialog = false 
-                    createdInvite = null
-                    inviteName = ""
+                    if (!isConnecting) {
+                        showInviteDialog = false 
+                        createdInvite = null
+                        inviteName = ""
+                        inviteInput = ""
+                        claimErrorMessage = null
+                    }
                 },
-                title = { Text("Generate Invite Link", fontWeight = FontWeight.Bold, color = Color.White) },
+                title = {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "Invite & Connect",
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            fontSize = 18.sp
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        TabRow(
+                            selectedTabIndex = selectedDialogTab,
+                            containerColor = Color(0xFF0F172A),
+                            contentColor = MaterialTheme.colorScheme.primary,
+                            divider = {}
+                        ) {
+                            Tab(
+                                selected = selectedDialogTab == 0,
+                                onClick = { selectedDialogTab = 0 },
+                                text = {
+                                    Text(
+                                        "➕ Generate",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = if (selectedDialogTab == 0) MaterialTheme.colorScheme.primary else Color.Gray
+                                    )
+                                }
+                            )
+                            Tab(
+                                selected = selectedDialogTab == 1,
+                                onClick = { selectedDialogTab = 1 },
+                                text = {
+                                    Text(
+                                        "🔗 Claim",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = if (selectedDialogTab == 1) MaterialTheme.colorScheme.primary else Color.Gray
+                                    )
+                                }
+                            )
+                        }
+                    }
+                },
                 text = {
                     Column(
-                        modifier = Modifier.fillMaxWidth().verticalScroll(scrollState),
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(scrollState),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        if (createdInvite == null) {
-                            Text("Create a single-use invite code for a guest.", fontSize = 12.sp, color = Color.Gray)
+                        if (selectedDialogTab == 0) {
+                            // GENERATE INVITE TAB
+                            if (createdInvite == null) {
+                                Text(
+                                    text = "Create a single-use invite code for a visitor or another mobile app on your home server.",
+                                    fontSize = 12.sp,
+                                    color = Color.LightGray,
+                                    lineHeight = 16.sp
+                                )
+                                OutlinedTextField(
+                                    value = inviteName,
+                                    onValueChange = { inviteName = it },
+                                    label = { Text("Guest / Peer Name") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                        unfocusedBorderColor = Color.Gray.copy(alpha = 0.5f)
+                                    ),
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                            } else {
+                                val inviteUrl = "${serverUrlVal.removeSuffix("/")}/invite/${createdInvite!!.code}"
+                                Text("Invite Generated!", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                
+                                val qrBitmap = remember(inviteUrl) { generateQrCodeBitmap(inviteUrl, 512) }
+                                if (qrBitmap != null) {
+                                    Image(
+                                        bitmap = qrBitmap.asImageBitmap(),
+                                        contentDescription = "QR Code",
+                                        modifier = Modifier.size(180.dp).clip(RoundedCornerShape(8.dp)).background(Color.White).padding(8.dp)
+                                    )
+                                }
+                                
+                                SelectionContainer {
+                                    Text(
+                                        text = inviteUrl,
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontFamily = FontFamily.Monospace,
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    )
+                                }
+                                
+                                Button(
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(inviteUrl))
+                                        Toast.makeText(context, "Invite link copied!", Toast.LENGTH_SHORT).show()
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                ) {
+                                    Text("Copy Link", color = Color.Black, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        } else {
+                            // CLAIM INVITE TAB (Same Home Server or Different Home Server)
+                            Text(
+                                text = "Paste an invite code (same home server) or full invite URL (different home server) to connect:",
+                                fontSize = 12.sp,
+                                color = Color.LightGray,
+                                lineHeight = 16.sp
+                            )
+
                             OutlinedTextField(
-                                value = inviteName,
-                                onValueChange = { inviteName = it },
-                                label = { Text("Guest Name") },
-                                singleLine = true,
+                                value = inviteInput,
+                                onValueChange = {
+                                    inviteInput = it
+                                    claimErrorMessage = null
+                                },
+                                label = { Text("Invite Code or Link", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary) },
+                                placeholder = { Text("e.g. abc12 or http://.../invite/abc12", fontSize = 11.sp, color = Color.Gray) },
                                 modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                enabled = !isConnecting,
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = MaterialTheme.colorScheme.primary,
                                     unfocusedBorderColor = Color.Gray.copy(alpha = 0.5f)
-                                )
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                trailingIcon = {
+                                    IconButton(
+                                        onClick = {
+                                            val clipText = clipboardManager.getText()?.text
+                                            if (!clipText.isNullOrBlank()) {
+                                                inviteInput = clipText.trim()
+                                            }
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Edit,
+                                            contentDescription = "Paste",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
                             )
-                        } else {
-                            val inviteUrl = "${serverUrlVal.removeSuffix("/")}/invite/${createdInvite!!.code}"
-                            Text("Invite Generated!", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                            
-                            val qrBitmap = remember(inviteUrl) { generateQrCodeBitmap(inviteUrl, 512) }
-                            if (qrBitmap != null) {
-                                Image(
-                                    bitmap = qrBitmap.asImageBitmap(),
-                                    contentDescription = "QR Code",
-                                    modifier = Modifier.size(200.dp).clip(RoundedCornerShape(8.dp)).background(Color.White).padding(8.dp)
-                                )
-                            }
-                            
-                            SelectionContainer {
+
+                            if (claimErrorMessage != null) {
                                 Text(
-                                    text = inviteUrl,
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontFamily = FontFamily.Monospace,
-                                    modifier = Modifier.padding(top = 8.dp)
+                                    text = claimErrorMessage!!,
+                                    color = Color(0xFFEF4444),
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp
                                 )
                             }
-                            
-                            Button(
-                                onClick = {
-                                    clipboardManager.setText(AnnotatedString(inviteUrl))
-                                    Toast.makeText(context, "Invite link copied!", Toast.LENGTH_SHORT).show()
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                            ) {
-                                Text("Copy Link", color = Color.Black, fontWeight = FontWeight.Bold)
+
+                            if (isConnecting) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Text("Connecting to peer...", color = Color.LightGray, fontSize = 12.sp)
+                                }
                             }
                         }
                     }
                 },
                 confirmButton = {
-                    if (createdInvite == null) {
-                        Button(
-                            onClick = {
-                                if (inviteName.isNotBlank()) {
-                                    createdInvite = viewModel.createInvite(inviteName)
-                                }
-                            },
-                            enabled = inviteName.isNotBlank(),
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        ) {
-                            Text("Generate", color = Color.Black, fontWeight = FontWeight.Bold)
+                    if (selectedDialogTab == 0) {
+                        if (createdInvite == null) {
+                            Button(
+                                onClick = {
+                                    if (inviteName.isNotBlank()) {
+                                        createdInvite = viewModel.createInvite(inviteName)
+                                    }
+                                },
+                                enabled = inviteName.isNotBlank(),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                            ) {
+                                Text("Generate", color = Color.Black, fontWeight = FontWeight.Bold)
+                            }
+                        } else {
+                            Button(
+                                onClick = { 
+                                    showInviteDialog = false 
+                                    createdInvite = null
+                                    inviteName = ""
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                            ) {
+                                Text("Done", color = Color.Black, fontWeight = FontWeight.Bold)
+                            }
                         }
                     } else {
                         Button(
-                            onClick = { 
-                                showInviteDialog = false 
-                                createdInvite = null
-                                inviteName = ""
+                            onClick = {
+                                if (inviteInput.isNotBlank()) {
+                                    isConnecting = true
+                                    claimErrorMessage = null
+                                    viewModel.claimInvite(inviteInput.trim()) { success, msg ->
+                                        isConnecting = false
+                                        if (success) {
+                                            Toast.makeText(context, "Successfully connected to peer!", Toast.LENGTH_LONG).show()
+                                            showInviteDialog = false
+                                            inviteInput = ""
+                                        } else {
+                                            claimErrorMessage = msg
+                                        }
+                                    }
+                                }
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                            enabled = inviteInput.isNotBlank() && !isConnecting,
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                            shape = RoundedCornerShape(8.dp)
                         ) {
-                            Text("Done", color = Color.Black, fontWeight = FontWeight.Bold)
+                            Text("Claim & Connect", color = Color.Black, fontWeight = FontWeight.Bold)
                         }
                     }
                 },
                 dismissButton = {
-                    if (createdInvite == null) {
-                        TextButton(onClick = { showInviteDialog = false }) {
+                    if (!isConnecting && (selectedDialogTab == 1 || createdInvite == null)) {
+                        TextButton(onClick = { 
+                            showInviteDialog = false 
+                            createdInvite = null
+                            inviteName = ""
+                            inviteInput = ""
+                            claimErrorMessage = null
+                        }) {
                             Text("Cancel", color = Color.Gray)
                         }
                     }
@@ -955,12 +1126,16 @@ fun ApprovalsTab(
     pendingRequests: List<ClientRequest>,
     allRequests: List<ClientRequest>,
     activeInvites: List<Invite>,
+    allowDirectCalls: Boolean = false,
+    onToggleDirectCalls: (Boolean) -> Unit = {},
     onApprove: (ClientRequest) -> Unit,
     onReject: (ClientRequest) -> Unit,
     onDelete: (ClientRequest) -> Unit,
     onRename: (ClientRequest, String) -> Unit = { _, _ -> },
     onDeleteInvite: (Invite) -> Unit = {},
-    onToggleAutoAccept: (ClientRequest, Boolean) -> Unit = { _, _ -> }
+    onToggleAutoAccept: (ClientRequest, Boolean) -> Unit = { _, _ -> },
+    onChat: (String) -> Unit = {},
+    onCall: (String, String) -> Unit = { _, _ -> }
 ) {
     var editingRequest by remember { mutableStateOf<ClientRequest?>(null) }
     var renameInputText by remember { mutableStateOf("") }
@@ -974,6 +1149,55 @@ fun ApprovalsTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Direct Calls (Pre-Approval) Setting Card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)),
+                border = BorderStroke(1.dp, if (allowDirectCalls) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f) else Color.Gray.copy(alpha = 0.2f))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("⚡", fontSize = 20.sp)
+                        Column {
+                            Text(
+                                text = "Allow Direct Calls (Pre-Approval)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "Permit web visitors to call immediately before access approval by stating their reason (10s timeout).",
+                                fontSize = 10.sp,
+                                color = Color.Gray,
+                                lineHeight = 13.sp
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = allowDirectCalls,
+                        onCheckedChange = onToggleDirectCalls,
+                        modifier = Modifier.scale(0.85f).testTag("direct_calls_toggle_switch"),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Black,
+                            checkedTrackColor = MaterialTheme.colorScheme.primary,
+                            uncheckedThumbColor = Color.LightGray,
+                            uncheckedTrackColor = Color(0xFF374151)
+                        )
+                    )
+                }
+            }
+        }
         // Companion Mobile App Queue (if any)
         if (mobilePending.isNotEmpty()) {
             item {
@@ -1257,7 +1481,7 @@ fun ApprovalsTab(
         item {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "APPROVED CALLERS & DEVICES",
+                text = "APPROVED CALLERS & PEER CONTACTS",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.Gray,
@@ -1269,7 +1493,7 @@ fun ApprovalsTab(
         if (approved.isEmpty()) {
             item {
                 Text(
-                    text = "No approved guests yet. Allow a caller request above to start chatting and calling.",
+                    text = "No approved contacts yet. Connect to a mobile app or allow a visitor request to start chatting and calling.",
                     fontSize = 11.sp,
                     color = Color.Gray,
                     textAlign = TextAlign.Center,
@@ -1278,16 +1502,25 @@ fun ApprovalsTab(
             }
         } else {
             items(approved) { request ->
-                val isMobileApp = request.status == "MOBILE_APPROVED"
+                val isMobileApp = request.status == "MOBILE_APPROVED" || request.clientType == "MOBILE"
+                val isRemote = request.serverAddress.isNotBlank() && request.serverAddress != "local"
+                val serverDisplay = if (isRemote) request.serverAddress else "local"
+
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = if (isMobileApp) Color(0xFF1E1B4B).copy(alpha = 0.4f) else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)),
-                    border = BorderStroke(1.dp, if (isMobileApp) Color(0xFF8B5CF6).copy(alpha = 0.5f) else Color.Gray.copy(alpha = 0.2f))
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isMobileApp) Color(0xFF1E1B4B).copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)
+                    ),
+                    border = BorderStroke(
+                        1.dp,
+                        if (isMobileApp) Color(0xFF8B5CF6).copy(alpha = 0.6f) else Color.Gray.copy(alpha = 0.25f)
+                    )
                 ) {
                     Column(
                         modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        // Header row with Name, Badges, and Action Icons
                         Row(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
@@ -1300,128 +1533,212 @@ fun ApprovalsTab(
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(8.dp)
+                                        .size(10.dp)
                                         .background(if (request.isOnline) Color(0xFF10B981) else Color(0xFFEF4444), CircleShape)
                                 )
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = request.name,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (isMobileApp) {
-                                        Surface(
-                                            color = Color(0xFF8B5CF6).copy(alpha = 0.25f),
-                                            shape = RoundedCornerShape(4.dp)
-                                        ) {
-                                            Text(
-                                                text = "📱 APP",
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color(0xFFA78BFA),
-                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                            )
-                                        }
-                                    }
-                                    IconButton(
-                                        onClick = {
-                                            editingRequest = request
-                                            renameInputText = request.name
-                                        },
-                                        modifier = Modifier.size(24.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Edit,
-                                            contentDescription = "Rename",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                }
+                                Text(
+                                    text = request.name,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
 
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                if (!isMobileApp) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        Text(
-                                            text = "Auto-accept",
-                                            fontSize = 11.sp,
-                                            fontWeight = if (request.autoAcceptCall) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (request.autoAcceptCall) MaterialTheme.colorScheme.primary else Color.Gray
-                                        )
-                                        Switch(
-                                            checked = request.autoAcceptCall,
-                                            onCheckedChange = { isChecked ->
-                                                onToggleAutoAccept(request, isChecked)
-                                            },
-                                            modifier = Modifier
-                                                .scale(0.75f)
-                                                .testTag("auto_accept_switch_${request.uuid}"),
-                                            colors = SwitchDefaults.colors(
-                                                checkedThumbColor = Color.Black,
-                                                checkedTrackColor = MaterialTheme.colorScheme.primary,
-                                                uncheckedThumbColor = Color.LightGray,
-                                                uncheckedTrackColor = Color(0xFF374151)
-                                            )
-                                        )
-                                    }
+                                IconButton(
+                                    onClick = {
+                                        editingRequest = request
+                                        renameInputText = request.name
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = "Rename",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(15.dp)
+                                    )
                                 }
 
                                 IconButton(
                                     onClick = { onDelete(request) },
-                                    modifier = Modifier.size(24.dp)
+                                    modifier = Modifier.size(28.dp)
                                 ) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete",
+                                        tint = Color.Gray,
+                                        modifier = Modifier.size(16.dp)
+                                    )
                                 }
                             }
                         }
 
+                        // Badges Row: App Type & Home Server Address
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            // Peer type badge
+                            Surface(
+                                color = if (isMobileApp) Color(0xFF8B5CF6).copy(alpha = 0.25f) else Color(0xFF3B82F6).copy(alpha = 0.25f),
+                                shape = RoundedCornerShape(4.dp),
+                                border = BorderStroke(1.dp, if (isMobileApp) Color(0xFF8B5CF6).copy(alpha = 0.5f) else Color(0xFF3B82F6).copy(alpha = 0.5f))
+                            ) {
+                                Text(
+                                    text = if (isMobileApp) "📱 MOBILE APP" else "💻 WEB / CLI",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isMobileApp) Color(0xFFA78BFA) else Color(0xFF93C5FD),
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+
+                            // Home Server location badge (shown for all mobile apps; omitted for local web/cli clients)
+                            if (isMobileApp) {
+                                Surface(
+                                    color = if (isRemote) Color(0xFF1E3A8A).copy(alpha = 0.6f) else Color(0xFF064E3B).copy(alpha = 0.6f),
+                                    shape = RoundedCornerShape(4.dp),
+                                    border = BorderStroke(1.dp, if (isRemote) Color(0xFF3B82F6).copy(alpha = 0.6f) else Color(0xFF10B981).copy(alpha = 0.6f))
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = if (isRemote) "🌐 $serverDisplay" else "🏠 local",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isRemote) Color(0xFF93C5FD) else Color(0xFF6EE7B7),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Online status pill
+                            Text(
+                                text = if (request.isOnline) "● Online" else "○ Offline",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (request.isOnline) Color(0xFF10B981) else Color.Gray,
+                                modifier = Modifier.padding(start = 2.dp)
+                            )
+                        }
+
+                        // Detailed identifier and server info box
                         SelectionContainer {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-                                    .padding(8.dp)
+                                    .background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                                    .padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
                             ) {
+                                if (isMobileApp) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "HOME SERVER:",
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color.Gray
+                                        )
+                                        Text(
+                                            text = if (isRemote) serverDisplay else "local (Same Home Server)",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isRemote) Color(0xFF93C5FD) else Color(0xFF6EE7B7)
+                                        )
+                                    }
+                                }
+
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = if (isMobileApp) "PAIRED DEVICE UUID:" else "GUEST ACCESS PASS:",
+                                        text = if (isMobileApp) "PEER UUID:" else "GUEST PASS:",
                                         fontSize = 8.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = Color.Gray
                                     )
-                                    if (request.autoAcceptCall && !isMobileApp) {
-                                        Text(
-                                            text = "📹 IP CAMERA AUTO-ACCEPT",
-                                            fontSize = 8.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
+                                    Text(
+                                        text = if (isMobileApp) request.uuid else request.token,
+                                        fontSize = 9.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = if (isMobileApp) Color(0xFFA78BFA) else MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
+                            }
+                        }
+
+                        // Action buttons row: Direct Chat, Call, and Auto Accept Switch
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedButton(
+                                onClick = { onChat(request.uuid) },
+                                modifier = Modifier.weight(1f).height(36.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.Email, contentDescription = "Chat", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Chat", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            Button(
+                                onClick = { onCall(request.uuid, request.name) },
+                                modifier = Modifier.weight(1f).height(36.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.Call, contentDescription = "Call", tint = Color.Black, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Call", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
                                 Text(
-                                    text = if (isMobileApp) request.uuid else request.token,
-                                    fontSize = 11.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = if (isMobileApp) Color(0xFFA78BFA) else MaterialTheme.colorScheme.primary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    text = "Auto Accept",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (request.autoAcceptCall) MaterialTheme.colorScheme.primary else Color.Gray
+                                )
+                                Switch(
+                                    checked = request.autoAcceptCall,
+                                    onCheckedChange = { isChecked ->
+                                        onToggleAutoAccept(request, isChecked)
+                                    },
+                                    modifier = Modifier
+                                        .scale(0.7f)
+                                        .testTag("auto_accept_switch_${request.uuid}"),
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.Black,
+                                        checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                        uncheckedThumbColor = Color.LightGray,
+                                        uncheckedTrackColor = Color(0xFF374151)
+                                    )
                                 )
                             }
                         }
@@ -1433,7 +1750,7 @@ fun ApprovalsTab(
         item {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "ACTIVE GUEST INVITES",
+                text = "ACTIVE GUEST & PEER INVITES",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.Gray,
@@ -1620,6 +1937,8 @@ fun ChatTab(
                 divider = {}
             ) {
                 approvedRequests.forEach { client ->
+                    val isMobile = client.status == "MOBILE_APPROVED" || client.clientType == "MOBILE"
+                    val isRemote = client.serverAddress.isNotBlank() && client.serverAddress != "local"
                     Tab(
                         selected = selectedClient?.uuid == client.uuid,
                         onClick = {
@@ -1632,7 +1951,14 @@ fun ChatTab(
                                 modifier = Modifier.padding(vertical = 4.dp)
                             ) {
                                 Box(modifier = Modifier.size(6.dp).background(if (client.isOnline) Color(0xFF10B981) else Color(0xFFEF4444), CircleShape))
-                                Text(client.name, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = if (isMobile) "📱 ${client.name}" else client.name,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (isRemote) {
+                                    Text("🌐", fontSize = 10.sp)
+                                }
                             }
                         }
                     )
@@ -1644,6 +1970,9 @@ fun ChatTab(
 
             selectedClient?.let { client ->
                 val clientMsgs = messages.filter { it.clientUuid == client.uuid }.sortedBy { it.timestamp }
+                val isMobile = client.status == "MOBILE_APPROVED" || client.clientType == "MOBILE"
+                val isRemote = client.serverAddress.isNotBlank() && client.serverAddress != "local"
+                val serverDisplay = if (isRemote) client.serverAddress else "local"
 
                 // Sub-header for the individual active conversation
                 Row(
@@ -1654,35 +1983,72 @@ fun ChatTab(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.weight(1f, fill = false)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .background(if (client.isOnline) Color(0xFF10B981) else Color(0xFFEF4444), CircleShape)
-                        )
-                        Text(
-                            text = client.name,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                            letterSpacing = 0.5.sp
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(if (client.isOnline) Color(0xFF10B981) else Color(0xFFEF4444), CircleShape)
+                            )
+                            Text(
+                                text = client.name,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                letterSpacing = 0.5.sp
+                            )
+                        }
+
+                        // Badges Row
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Surface(
+                                color = if (isMobile) Color(0xFF8B5CF6).copy(alpha = 0.25f) else Color(0xFF3B82F6).copy(alpha = 0.25f),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = if (isMobile) "📱 Mobile App" else "💻 Web Client",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isMobile) Color(0xFFA78BFA) else Color(0xFF93C5FD),
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                )
+                            }
+
+                            Surface(
+                                color = if (isRemote) Color(0xFF1E3A8A).copy(alpha = 0.5f) else Color(0xFF064E3B).copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = if (isRemote) "🌐 $serverDisplay" else "🏠 local",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isRemote) Color(0xFF93C5FD) else Color(0xFF6EE7B7),
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
                     }
                     
                     IconButton(
                         onClick = { onRedial(client.uuid, client.name) },
                         modifier = Modifier
-                            .size(28.dp)
+                            .size(32.dp)
                             .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.2f), CircleShape)
                     ) {
                         Icon(
                             Icons.Default.Call,
                             contentDescription = "Call Client",
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
@@ -2132,13 +2498,37 @@ fun CallScreenOverlay(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.padding(top = 64.dp)
                     ) {
-                        Text(
-                            text = "SECURE TUNNEL CALL INCOMING",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                            letterSpacing = 2.sp
-                        )
+                        if (callState.isDirectCall) {
+                            Surface(
+                                color = Color(0xFFD97706).copy(alpha = 0.25f),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, Color(0xFFF59E0B))
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                ) {
+                                    Text("⚡", fontSize = 14.sp)
+                                    Text(
+                                        text = "PRE-APPROVAL DIRECT CALL",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFFBBF24),
+                                        letterSpacing = 1.sp
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(8.dp))
+                        } else {
+                            Text(
+                                text = "SECURE TUNNEL CALL INCOMING",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                letterSpacing = 2.sp
+                            )
+                        }
                         Text(
                             text = if (callState.isVideo) "VIDEO ROUTE REQ" else "VOICE LINE REQ",
                             fontSize = 10.sp,
@@ -2155,37 +2545,76 @@ fun CallScreenOverlay(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .scale(pulseScale)
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = pulseAlpha), CircleShape)
+                                .background(
+                                    (if (callState.isDirectCall) Color(0xFFF59E0B) else MaterialTheme.colorScheme.primary).copy(alpha = pulseAlpha),
+                                    CircleShape
+                                )
                         )
                         Box(
                             modifier = Modifier
                                 .size(100.dp)
                                 .background(MaterialTheme.colorScheme.surface, CircleShape)
-                                .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape),
+                                .border(2.dp, if (callState.isDirectCall) Color(0xFFF59E0B) else MaterialTheme.colorScheme.primary, CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = "⚡",
                                 fontSize = 42.sp,
-                                color = MaterialTheme.colorScheme.primary
+                                color = if (callState.isDirectCall) Color(0xFFF59E0B) else MaterialTheme.colorScheme.primary
                             )
                         }
                     }
 
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = callState.clientName,
-                            fontSize = 28.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
-                        )
-                        Text(
-                            text = "UUID: ${callState.clientUuid}",
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = Color.Gray,
-                            modifier = Modifier.padding(top = 6.dp)
-                        )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = callState.clientName,
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "UUID: ${callState.clientUuid}",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color.Gray,
+                                modifier = Modifier.padding(top = 6.dp)
+                            )
+                        }
+
+                        if (callState.isDirectCall && callState.reason.isNotBlank()) {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1B4B).copy(alpha = 0.85f)),
+                                border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.6f)),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = "VISITOR'S REASON FOR CALLING:",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFFBBF24),
+                                        letterSpacing = 0.5.sp
+                                    )
+                                    Text(
+                                        text = callState.reason,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = Color.White,
+                                        lineHeight = 18.sp
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     Row(

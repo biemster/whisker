@@ -13,6 +13,7 @@ Whether you want a hassle-free personal communication system for external visito
 - **Fully Self-Hosted**: Retain complete ownership of your data, messages, and media by running your server on your own hardware or private cloud instance.
 - **Zero-App Visitor Access**: Anyone can message or call you simply by opening your Home Server URL in a web browser—no user accounts or app downloads required.
 - **Direct Mobile Alerting & WebRTC Calls**: Receive live audio/video calls, text messages, and visitor notifications directly on your Android phone with low-latency peer-to-peer WebRTC streaming.
+- **Mobile-to-Mobile Messaging & Calling**: Full communication between mobile apps on the same Home Server (`local`) and across different Home Servers (cross-server federation) using invite links and direct signaling.
 - **Mobile File & Photo Backup**: Easily back up photos, media, and files from your mobile devices directly to your user-owned home server storage, eliminating third-party cloud dependency.
 - **Multi-Device Pairing & Management**: Pair multiple mobile apps with a single home server, complete with admin approvals, username recognition, and targeted message/call routing.
 - **Responsive & Interactive Web Client**: Features active call video layout expansion, an interactive system status indicator with detailed connectivity breakdown modal, instant messaging thread, and local media fallback controls.
@@ -27,10 +28,11 @@ Whether you want a hassle-free personal communication system for external visito
 ## Project Roadmap
 
 ### Current State (Operational)
-- **Architecture**: Single Home Server paired with Android Mobile Application, Web Visitor Portal, and CLI clients.
+- **Architecture**: Home Server paired with Android Mobile Applications, Web Visitor Portals, and CLI clients.
 - **Messaging**: Real-time bidirectional text chat with automatic historical message chain sync (`previous_message_id`).
 - **WebRTC Calling**: Full peer-to-peer audio and video calling operational with adaptive camera/mic permissions, candidate signaling, and synthetic fallback stream generation.
 - **Multi-Device Pairing**: Support for multiple mobile host applications paired with a single home server, featuring admin approval controls, custom usernames, invite code generation, and multi-device routing for messages and calls.
+- **Mobile-to-Mobile Communication**: Real-time messaging and WebRTC calling between mobile apps on the same Home Server (`local`) and across different Home Servers (`serverAddress`), unified by invite pairing and direct signaling.
 - **File & Media Transfer**: Secure attachment and file transfer directly between web visitors/mobile clients and the home server.
 - **Web Client UI**: Responsive fluid layout with auto-expanding video on active calls, interactive header status indicator with connectivity modal, and mobile-optimized columnar view.
 - **Push Notifications**: FCM HTTP v1 push notification tickle integration complete with low-power battery optimization.
@@ -39,7 +41,6 @@ Whether you want a hassle-free personal communication system for external visito
 - **iOS Mobile Application**: Native iOS client app built with Swift / SwiftUI, featuring WebRTC P2P calling, background APNs (Apple Push Notification service) push tickle support, and call notification alerts.
 - **Automated Background Photo Backup**: Scheduled automatic background synchronization of camera roll photos and media folders to home server storage.
 - **Multi-Server Mobile Client**: Support for connecting a single mobile application to multiple home servers simultaneously, featuring independent controls to disconnect or mute specific servers (e.g. managing family, work, and community servers in one app).
-- **Cross-Server Calling**: Direct audio/video calling between mobile applications registered across different home servers.
 
 ---
 

@@ -51,7 +51,14 @@ data class WebRtcSignal(
 
 sealed class CallState {
     object Idle : CallState()
-    data class Incoming(val clientUuid: String, val clientName: String, val isVideo: Boolean, val sdp: String = "") : CallState()
+    data class Incoming(
+        val clientUuid: String,
+        val clientName: String,
+        val isVideo: Boolean,
+        val sdp: String = "",
+        val isDirectCall: Boolean = false,
+        val reason: String = ""
+    ) : CallState()
     data class Outgoing(val clientUuid: String, val clientName: String, val isVideo: Boolean = false) : CallState()
     data class Active(val clientUuid: String, val clientName: String, val isVideo: Boolean = false, var durationSeconds: Int = 0, val sdp: String = "") : CallState()
 }
@@ -102,6 +109,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
     val apiKey = MutableStateFlow("")
     val hostUsername = MutableStateFlow("")
     val autoApproveAllowed = MutableStateFlow(false)
+    val allowDirectCalls = MutableStateFlow(false)
     val pushToken = MutableStateFlow("Fetching FCM push token...")
     val serverReachable = MutableStateFlow(false)
     val activeChatClientId = MutableStateFlow<String?>(null)
@@ -165,6 +173,10 @@ class GatewayNetworkManager(private val context: Context, private val repository
             prefs.edit().putString("host_username", defaultName).apply()
         }
 
+        // Restore allowDirectCalls
+        val savedAllowDirectCalls = prefs.getBoolean("allow_direct_calls", false)
+        allowDirectCalls.value = savedAllowDirectCalls
+
         createNotificationChannel()
         registerFcmToken()
         
@@ -172,6 +184,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
             if (storedServerUrl.isNotEmpty() && storedServerUrl.startsWith("http")) {
                 fetchFcmConfigFromServer(storedServerUrl, storedApiKey)
                 registerPushTokenOnServer(storedServerUrl, storedApiKey, pushToken.value)
+                updateDirectCallsAllowed(savedAllowDirectCalls)
             }
         }
 
@@ -325,12 +338,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 val serverStatus = serverObj.optString("req_status", existing.status)
                                 val serverToken = serverObj.optString("token", existing.token)
                                 val serverName = serverObj.optString("name", existing.name)
-                                if (existing.isOnline != serverHasOnline || existing.status != serverStatus || existing.token != serverToken || existing.name != serverName) {
+                                val serverClientType = serverObj.optString("client_type", if (serverObj.optBoolean("is_mobile_host", false) || serverStatus.startsWith("MOBILE_")) "MOBILE" else existing.clientType)
+                                val serverAddressVal = serverObj.optString("server_address", existing.serverAddress)
+                                if (existing.isOnline != serverHasOnline || existing.status != serverStatus || existing.token != serverToken || existing.name != serverName || existing.clientType != serverClientType || existing.serverAddress != serverAddressVal) {
                                     repository.updateRequest(existing.copy(
                                         isOnline = serverHasOnline,
                                         status = serverStatus,
                                         token = serverToken,
                                         name = serverName,
+                                        clientType = serverClientType,
+                                        serverAddress = serverAddressVal,
                                         lastSeen = System.currentTimeMillis()
                                     ))
                                 }
@@ -349,6 +366,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 val token = clientObj.optString("token", "")
                                 val createdAt = clientObj.optLong("created_at", System.currentTimeMillis())
                                 val isOnline = onlineUuids.contains(uuid)
+                                val clientType = clientObj.optString("client_type", if (clientObj.optBoolean("is_mobile_host", false) || reqStatus.startsWith("MOBILE_")) "MOBILE" else "WEB")
+                                val serverAddressVal = clientObj.optString("server_address", "local")
                                 val newRequest = ClientRequest(
                                     uuid = uuid,
                                     name = name,
@@ -357,9 +376,37 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                     token = token,
                                     timestamp = createdAt,
                                     lastSeen = System.currentTimeMillis(),
-                                    isOnline = isOnline
+                                    isOnline = isOnline,
+                                    clientType = clientType,
+                                    serverAddress = serverAddressVal
                                 )
                                 repository.insertRequest(newRequest)
+                            }
+                        }
+
+                        // 3. Poll remote peers (other home servers) for incoming messages/signals/calls
+                        for (remotePeer in localClients.filter { it.serverAddress != "local" && it.status == "APPROVED" && it.token.isNotEmpty() }) {
+                            try {
+                                val remoteUrl = remotePeer.serverAddress.trimEnd('/')
+                                val remoteReq = Request.Builder()
+                                    .url("$remoteUrl/api/guest/events?uuid=${remotePeer.uuid}&token=${remotePeer.token}")
+                                    .get()
+                                    .build()
+                                okHttpClient.newCall(remoteReq).execute().use { remoteResp ->
+                                    if (remoteResp.isSuccessful) {
+                                        val remoteBody = remoteResp.body?.string() ?: "[]"
+                                        val remoteEvents = JSONArray(remoteBody)
+                                        for (j in 0 until remoteEvents.length()) {
+                                            val rEvt = remoteEvents.getJSONObject(j)
+                                            val payload = if (rEvt.has("payload")) JSONObject(rEvt.getString("payload")) else rEvt
+                                            payload.put("server_address", remoteUrl)
+                                            payload.put("client_type", "MOBILE")
+                                            processIncomingPayload(payload.toString(), fromServerPoll = true)
+                                        }
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.d("GatewayNetworkManager", "Remote peer poll skipped (${remotePeer.name}): ${e.message}")
                             }
                         }
                     }
@@ -698,13 +745,15 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val name = json.optString("name", "Caller")
                     val isVideo = json.optBoolean("video", true)
                     val sdp = json.optString("sdp", "")
+                    val isDirectCall = json.optBoolean("is_direct_call", false)
+                    val reason = json.optString("reason", "")
 
                     scope.launch {
                         val existing = repository.getRequestByUuid(uuid)
                         val callerName = if (!existing?.name.isNullOrEmpty() && existing?.name != "Guest") existing!!.name else name
-                        val isAutoAccept = existing?.autoAcceptCall == true
+                        val isAutoAccept = if (!isDirectCall) (existing?.autoAcceptCall == true) else false
 
-                        if (existing == null) {
+                        if (existing == null && !isDirectCall) {
                             repository.insertRequest(
                                 ClientRequest(
                                     uuid = uuid,
@@ -718,7 +767,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                     autoAcceptCall = false
                                 )
                             )
-                        } else if (existing.status != "APPROVED" || (token.isNotEmpty() && existing.token != token)) {
+                        } else if (existing != null && (existing.status != "APPROVED" || (token.isNotEmpty() && existing.token != token)) && !isDirectCall) {
                             repository.updateRequest(
                                 existing.copy(
                                     status = "APPROVED",
@@ -729,7 +778,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                             )
                         }
 
-                        setIncomingCallState(uuid, callerName, isVideo, sdp)
+                        setIncomingCallState(uuid, callerName, isVideo, sdp, isDirectCall, reason)
 
                         if (isAutoAccept) {
                             Log.d("GatewayNetworkManager", "Auto-accepting incoming call from $callerName ($uuid)")
@@ -905,6 +954,46 @@ class GatewayNetworkManager(private val context: Context, private val repository
             try {
                 payload.put("clientUuid", clientUuid)
 
+                val peer = repository.getRequestByUuid(clientUuid)
+                if (peer != null && peer.serverAddress != "local" && peer.serverAddress.startsWith("http")) {
+                    val remoteUrl = peer.serverAddress.trimEnd('/')
+                    val pType = payload.optString("type", payload.optString("event", ""))
+                    val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+
+                    val targetEndpoint = when {
+                        pType in listOf("chat_message", "message") -> "$remoteUrl/api/message"
+                        pType in listOf("webrtc_call_initiate", "call") -> "$remoteUrl/api/call"
+                        pType in listOf("webrtc_call_hangup", "call_ended", "hangup") -> "$remoteUrl/api/hangup"
+                        else -> "$remoteUrl/api/signal"
+                    }
+
+                    val remotePayload = JSONObject().apply {
+                        put("uuid", peer.uuid)
+                        put("token", peer.token)
+                        put("type", pType)
+                        put("event", payload.optString("event", pType))
+                        if (payload.has("sdp")) put("sdp", payload.getString("sdp"))
+                        if (payload.has("candidate")) put("candidate", payload.opt("candidate"))
+                        if (payload.has("text")) put("text", payload.optString("text"))
+                        if (payload.has("file")) put("file", payload.optString("file"))
+                        if (payload.has("filePath")) put("filePath", payload.optString("filePath"))
+                        put("name", hostUsername.value)
+                        put("video", payload.optBoolean("video", true))
+                    }
+
+                    val request = Request.Builder()
+                        .url(targetEndpoint)
+                        .post(RequestBody.create(mediaType, remotePayload.toString()))
+                        .build()
+
+                    okHttpClient.newCall(request).execute().use { resp ->
+                        if (!resp.isSuccessful) {
+                            Log.w("GatewayNetworkManager", "Remote endpoint $targetEndpoint error: ${resp.code}")
+                        }
+                    }
+                    return@launch
+                }
+
                 val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
                 val requestBody = RequestBody.create(mediaType, payload.toString())
                 val cleanUrl = getCleanServerUrl()
@@ -928,6 +1017,123 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 } else {
                     Log.e("GatewayNetworkManager", "Error publishing to client", e)
                 }
+            }
+        }
+    }
+
+    fun claimInviteUrl(inviteUrl: String, onResult: (Boolean, String) -> Unit) {
+        scope.launch(Dispatchers.IO) {
+            val cleanInvite = inviteUrl.trim()
+            if (cleanInvite.isEmpty()) {
+                withContext(Dispatchers.Main) { onResult(false, "Please enter an invite URL or code") }
+                return@launch
+            }
+
+            val cleanUrl = getCleanServerUrl()
+            val pinVal = apiKey.value
+
+            // 1. Try local home server remote invite claim API first if connected
+            if (cleanUrl.isNotEmpty() && pinVal.isNotEmpty()) {
+                try {
+                    val json = JSONObject().apply {
+                        put("invite_url", cleanInvite)
+                        put("my_name", hostUsername.value)
+                    }
+                    val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+                    val req = Request.Builder()
+                        .url("$cleanUrl/api/host/claim_remote_invite")
+                        .header("Authorization", "Bearer $pinVal")
+                        .post(RequestBody.create(mediaType, json.toString()))
+                        .build()
+
+                    okHttpClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val respBody = JSONObject(resp.body?.string() ?: "{}")
+                            if (respBody.optBoolean("success", false)) {
+                                val peerUuid = respBody.getString("uuid")
+                                val peerName = respBody.optString("name", "Mobile App")
+                                val peerToken = respBody.getString("token")
+                                val peerServer = respBody.optString("server_address", "local")
+
+                                repository.insertRequest(
+                                    ClientRequest(
+                                        uuid = peerUuid,
+                                        name = peerName,
+                                        message = "Connected via invite ($peerServer)",
+                                        status = "APPROVED",
+                                        token = peerToken,
+                                        clientType = "MOBILE",
+                                        serverAddress = peerServer,
+                                        isOnline = true
+                                    )
+                                )
+                                withContext(Dispatchers.Main) {
+                                    onResult(true, "Connected to $peerName ($peerServer)")
+                                }
+                                return@launch
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.d("GatewayNetworkManager", "Server-side remote invite claim fallback: ${e.message}")
+                }
+            }
+
+            // 2. Direct client-side claim fallback
+            try {
+                var targetBase = cleanUrl
+                var code = cleanInvite
+                if (cleanInvite.contains("/invite/")) {
+                    val parts = cleanInvite.split("/invite/")
+                    targetBase = parts[0].trimEnd('/')
+                    code = parts[1].substringBefore('?').substringBefore('#').trim()
+                }
+
+                val json = JSONObject().apply {
+                    put("code", code)
+                    put("name", hostUsername.value)
+                }
+                val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+                val req = Request.Builder()
+                    .url("$targetBase/api/claim_invite")
+                    .post(RequestBody.create(mediaType, json.toString()))
+                    .build()
+
+                okHttpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val respBody = JSONObject(resp.body?.string() ?: "{}")
+                        if (respBody.optBoolean("success", false)) {
+                            val peerUuid = respBody.getString("uuid")
+                            val peerName = respBody.optString("host_name", respBody.optString("name", "Mobile App"))
+                            val peerToken = respBody.getString("token")
+                            val isLocal = targetBase == cleanUrl || targetBase.isEmpty()
+                            val serverAddressStr = if (isLocal) "local" else targetBase
+
+                            val newReq = ClientRequest(
+                                uuid = peerUuid,
+                                name = peerName,
+                                message = "Connected via invite ($serverAddressStr)",
+                                status = "APPROVED",
+                                token = peerToken,
+                                clientType = "MOBILE",
+                                serverAddress = serverAddressStr,
+                                isOnline = true
+                            )
+                            repository.insertRequest(newReq)
+                            withContext(Dispatchers.Main) {
+                                onResult(true, "Connected to $peerName ($serverAddressStr)")
+                            }
+                            return@launch
+                        } else {
+                            val err = respBody.optString("error", "Invite claim failed")
+                            withContext(Dispatchers.Main) { onResult(false, err) }
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) { onResult(false, "Server returned HTTP ${resp.code}") }
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { onResult(false, "Error: ${e.localizedMessage ?: e.message}") }
             }
         }
     }
@@ -1346,13 +1552,46 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    fun setIncomingCallState(clientUuid: String, clientName: String, isVideo: Boolean = true, sdp: String = "") {
+    fun updateDirectCallsAllowed(allowed: Boolean) {
+        allowDirectCalls.value = allowed
+        val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("allow_direct_calls", allowed).apply()
+        val cleanUrl = getCleanServerUrl()
+        val pinVal = apiKey.value
+        if (cleanUrl.isNotEmpty() && cleanUrl.startsWith("http")) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val payload = JSONObject().apply {
+                        put("allow_direct_calls", allowed)
+                    }
+                    val body = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), payload.toString())
+                    val request = Request.Builder()
+                        .url("$cleanUrl/api/host/direct_calls")
+                        .header("Authorization", "Bearer $pinVal")
+                        .post(body)
+                        .build()
+                    okHttpClient.newCall(request).execute().close()
+                } catch (e: Exception) {
+                    Log.e("GatewayNetworkManager", "Error updating direct calls setting on Home Server", e)
+                }
+            }
+        }
+    }
+
+    fun setIncomingCallState(
+        clientUuid: String,
+        clientName: String,
+        isVideo: Boolean = true,
+        sdp: String = "",
+        isDirectCall: Boolean = false,
+        reason: String = ""
+    ) {
         val current = _activeCall.value
         if (current is CallState.Idle) {
-            _activeCall.value = CallState.Incoming(clientUuid, clientName, isVideo, sdp)
+            _activeCall.value = CallState.Incoming(clientUuid, clientName, isVideo, sdp, isDirectCall, reason)
         } else if (current is CallState.Incoming && current.clientUuid == clientUuid) {
             val updatedSdp = if (sdp.isNotEmpty()) sdp else current.sdp
-            _activeCall.value = CallState.Incoming(clientUuid, clientName, isVideo, updatedSdp)
+            _activeCall.value = CallState.Incoming(clientUuid, clientName, isVideo, updatedSdp, isDirectCall, reason)
         }
     }
 
