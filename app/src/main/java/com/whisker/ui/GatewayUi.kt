@@ -6,6 +6,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.util.Log
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
@@ -2642,80 +2643,7 @@ fun CallScreenOverlay(
                 }
             }
 
-            is CallState.Outgoing -> {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.padding(top = 64.dp)
-                    ) {
-                        Text(
-                            text = "HANDSHAKING WEBRTC GATEWAY",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.secondary,
-                            letterSpacing = 2.sp
-                        )
-                    }
-
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier.size(160.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .scale(pulseScale)
-                                .background(MaterialTheme.colorScheme.secondary.copy(alpha = pulseAlpha), CircleShape)
-                        )
-                        Box(
-                            modifier = Modifier
-                                .size(100.dp)
-                                .background(MaterialTheme.colorScheme.surface, CircleShape)
-                                .border(2.dp, MaterialTheme.colorScheme.secondary, CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "🌀",
-                                fontSize = 42.sp,
-                                modifier = Modifier.scale(if (pulseScale > 1f) 1.2f else 1f)
-                            )
-                        }
-                    }
-
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = callState.clientName,
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                        Text(
-                            text = "Ringing...",
-                            fontSize = 12.sp,
-                            color = Color.Gray,
-                            modifier = Modifier.padding(top = 8.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = onHangup,
-                        modifier = Modifier
-                            .padding(bottom = 64.dp)
-                            .size(64.dp)
-                            .background(Color.Red, CircleShape)
-                    ) {
-                        Icon(Icons.Default.Close, contentDescription = "Cancel Dialing", tint = Color.White)
-                    }
-                }
-            }
-
-            is CallState.Active -> {
+            is CallState.Outgoing, is CallState.Active -> {
                 Box(modifier = Modifier.fillMaxSize()) {
                     // LIVE WEBRTC CAMERA & PEER VIDEO STREAM ENGINE
                     WebRtcCallContainer(
@@ -2724,103 +2652,177 @@ fun CallScreenOverlay(
                         modifier = Modifier.fillMaxSize()
                     )
 
-                    // TOP OVERLAY: Peer info & Timer Duration
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 40.dp, start = 16.dp, end = 16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
+                    if (callState is CallState.Outgoing) {
+                        Column(
                             modifier = Modifier
-                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(12.dp))
-                                .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.85f))
+                                .padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Column {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(top = 64.dp)
+                            ) {
+                                Text(
+                                    text = "HANDSHAKING WEBRTC GATEWAY",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.secondary,
+                                    letterSpacing = 2.sp
+                                )
+                            }
+
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.size(160.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .scale(pulseScale)
+                                        .background(MaterialTheme.colorScheme.secondary.copy(alpha = pulseAlpha), CircleShape)
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(100.dp)
+                                        .background(MaterialTheme.colorScheme.surface, CircleShape)
+                                        .border(2.dp, MaterialTheme.colorScheme.secondary, CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "🌀",
+                                        fontSize = 42.sp,
+                                        modifier = Modifier.scale(if (pulseScale > 1f) 1.2f else 1f)
+                                    )
+                                }
+                            }
+
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(
                                     text = callState.clientName,
-                                    fontSize = 14.sp,
+                                    fontSize = 24.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color.White
                                 )
                                 Text(
-                                    text = "SECURE WEBRTC SESSION",
-                                    fontSize = 8.sp,
-                                    color = MaterialTheme.colorScheme.primary
+                                    text = "Ringing...",
+                                    fontSize = 12.sp,
+                                    color = Color.Gray,
+                                    modifier = Modifier.padding(top = 8.dp)
+                                )
+                            }
+
+                            IconButton(
+                                onClick = onHangup,
+                                modifier = Modifier
+                                    .padding(bottom = 64.dp)
+                                    .size(64.dp)
+                                    .background(Color.Red, CircleShape)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Cancel Dialing", tint = Color.White)
+                            }
+                        }
+                    } else if (callState is CallState.Active) {
+                        // TOP OVERLAY: Peer info & Timer Duration
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 40.dp, start = 16.dp, end = 16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(12.dp))
+                                    .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Column {
+                                    Text(
+                                        text = callState.clientName,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "SECURE WEBRTC SESSION",
+                                        fontSize = 8.sp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+
+                            val minutes = callState.durationSeconds / 60
+                            val seconds = callState.durationSeconds % 60
+                            Box(
+                                modifier = Modifier
+                                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = String.format("%02d:%02d", minutes, seconds),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.Black
                                 )
                             }
                         }
 
-                        val minutes = callState.durationSeconds / 60
-                        val seconds = callState.durationSeconds % 60
-                        Box(
+                        // BOTTOM OVERLAY: Call Controls Bar
+                        Row(
                             modifier = Modifier
-                                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp))
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .background(Color.Black.copy(alpha = 0.85f))
+                                .padding(vertical = 20.dp, horizontal = 24.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = String.format("%02d:%02d", minutes, seconds),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.Black
-                            )
-                        }
-                    }
+                            var isMuted by remember { mutableStateOf(false) }
+                            IconButton(
+                                onClick = { isMuted = !isMuted },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(if (isMuted) Color.Red else Color.Gray.copy(alpha = 0.3f), CircleShape)
+                            ) {
+                                Text(
+                                    text = if (isMuted) "MUTED" else "MIC ON",
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
 
-                    // BOTTOM OVERLAY: Call Controls Bar
-                    Row(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth()
-                            .background(Color.Black.copy(alpha = 0.85f))
-                            .padding(vertical = 20.dp, horizontal = 24.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        var isMuted by remember { mutableStateOf(false) }
-                        IconButton(
-                            onClick = { isMuted = !isMuted },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .background(if (isMuted) Color.Red else Color.Gray.copy(alpha = 0.3f), CircleShape)
-                        ) {
-                            Text(
-                                text = if (isMuted) "MUTED" else "MIC ON",
-                                color = Color.White,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                            IconButton(
+                                onClick = onHangup,
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .background(Color.Red, CircleShape)
+                            ) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "End Call",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
 
-                        IconButton(
-                            onClick = onHangup,
-                            modifier = Modifier
-                                .size(64.dp)
-                                .background(Color.Red, CircleShape)
-                        ) {
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = "End Call",
-                                tint = Color.White,
-                                modifier = Modifier.size(28.dp)
-                            )
-                        }
-
-                        var camEnabled by remember { mutableStateOf(true) }
-                        IconButton(
-                            onClick = { camEnabled = !camEnabled },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .background(if (!camEnabled) Color.Red else Color.Gray.copy(alpha = 0.3f), CircleShape)
-                        ) {
-                            Text(
-                                text = if (camEnabled) "CAM ON" else "CAM OFF",
-                                color = Color.White,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            var camEnabled by remember { mutableStateOf(true) }
+                            IconButton(
+                                onClick = { camEnabled = !camEnabled },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(if (!camEnabled) Color.Red else Color.Gray.copy(alpha = 0.3f), CircleShape)
+                            ) {
+                                Text(
+                                    text = if (camEnabled) "CAM ON" else "CAM OFF",
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
@@ -2841,10 +2843,27 @@ fun WebRtcCallContainer(
     var isWebViewReady by remember { mutableStateOf(false) }
     val pendingSignals = remember { mutableListOf<WebRtcSignal>() }
 
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                webViewRef?.evaluateJavascript("if (typeof closeCall === 'function') closeCall();", null)
+                webViewRef?.stopLoading()
+                webViewRef?.loadUrl("about:blank")
+                webViewRef?.clearHistory()
+                webViewRef?.removeAllViews()
+                webViewRef?.destroy()
+                webViewRef = null
+                isWebViewReady = false
+            } catch (e: Exception) {
+                Log.e("GatewayUi", "Error cleaning up WebRtcCallContainer WebView", e)
+            }
+        }
+    }
+
     fun processSignal(wv: WebView, signal: WebRtcSignal) {
-        if (signal.type == "webrtc_call_answer" && signal.sdp.isNotEmpty()) {
+        if ((signal.type == "webrtc_call_answer" || signal.type == "call_answered") && signal.sdp.isNotEmpty()) {
             wv.evaluateJavascript("setRemoteAnswer(${JSONObject.quote(signal.sdp)});", null)
-        } else if (signal.type == "webrtc_ice_candidate" && signal.candidateJson.isNotEmpty()) {
+        } else if ((signal.type == "webrtc_ice_candidate" || signal.type == "ice_candidate") && signal.candidateJson.isNotEmpty()) {
             wv.evaluateJavascript("addRemoteIceCandidate(${JSONObject.quote(signal.candidateJson)});", null)
         }
     }
@@ -2875,7 +2894,8 @@ fun WebRtcCallContainer(
         networkManager.incomingSignal.collect { signal ->
             val active = callState as? CallState.Active
             val outgoing = callState as? CallState.Outgoing
-            val currentUuid = active?.clientUuid ?: outgoing?.clientUuid
+            val incoming = callState as? CallState.Incoming
+            val currentUuid = active?.clientUuid ?: outgoing?.clientUuid ?: incoming?.clientUuid
             if (currentUuid != null && signal.clientUuid == currentUuid) {
                 val wv = webViewRef
                 if (wv != null && isWebViewReady) {
@@ -2902,15 +2922,22 @@ fun WebRtcCallContainer(
 
                 webChromeClient = object : WebChromeClient() {
                     override fun onPermissionRequest(request: PermissionRequest) {
-                        val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                        val hasMic = androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                        if (!hasCam || !hasMic) {
-                            (ctx as? android.app.Activity)?.requestPermissions(
-                                arrayOf(android.Manifest.permission.CAMERA, android.Manifest.permission.RECORD_AUDIO),
-                                101
-                            )
+                        (ctx as? android.app.Activity)?.runOnUiThread {
+                            try {
+                                val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                val hasMic = androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                if (!hasCam || !hasMic) {
+                                    (ctx as? android.app.Activity)?.requestPermissions(
+                                        arrayOf(android.Manifest.permission.CAMERA, android.Manifest.permission.RECORD_AUDIO),
+                                        101
+                                    )
+                                }
+                                request.grant(request.resources)
+                            } catch (e: Exception) {
+                                Log.e("GatewayUi", "Error granting WebChromeClient permissions", e)
+                                request.grant(request.resources)
+                            }
                         }
-                        request.grant(request.resources)
                     }
                 }
 
@@ -2987,6 +3014,7 @@ private const val WEBRTC_HTML_CONTENT = """
   let pc = null;
   let localStream = null;
   let initialized = false;
+  let pendingRemoteCandidates = [];
 
   const rtcConfig = {
     iceServers: [
@@ -3038,19 +3066,61 @@ private const val WEBRTC_HTML_CONTENT = """
     return stream;
   }
 
+  async function flushPendingCandidates() {
+    if (!pc || !pc.remoteDescription) return;
+    while (pendingRemoteCandidates.length > 0) {
+      const cand = pendingRemoteCandidates.shift();
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(cand));
+      } catch (e) {
+        console.error("Error flushing queued candidate", e);
+      }
+    }
+  }
+
   async function initWebRtc(isVideo, remoteOfferSdp) {
     if (initialized) return;
     initialized = true;
 
+    // Stop and release any existing tracks prior to requesting a new stream
+    if (localStream) {
+      localStream.getTracks().forEach(t => {
+        try { t.stop(); } catch(e) {}
+      });
+      localStream = null;
+    }
+
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true });
-      } catch(e) {
-        console.error("Camera/Mic capture error", e);
+      if (isVideo) {
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, 
+            audio: true 
+          });
+        } catch(e) {
+          console.warn("Front cam getUserMedia failed, retrying with simple video: true", e);
+          try {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          } catch(e2) {
+            console.warn("Retrying video after small delay in case hardware was releasing...", e2);
+            await new Promise(r => setTimeout(r, 350));
+            try {
+              localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            } catch(e3) {
+              console.error("Camera acquisition failed, falling back to audio only", e3);
+              try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+              } catch(e4) {
+                console.error("Audio capture fallback error", e4);
+              }
+            }
+          }
+        }
+      } else {
         try {
           localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
-        } catch(e2) {
-          console.error("Audio capture fallback error", e2);
+        } catch(e) {
+          console.error("Audio capture error", e);
         }
       }
     }
@@ -3060,7 +3130,10 @@ private const val WEBRTC_HTML_CONTENT = """
     }
 
     const localVid = document.getElementById('localVideo');
-    if (localVid) localVid.srcObject = localStream;
+    if (localVid) {
+      localVid.srcObject = localStream;
+      localVid.play().catch(e => console.warn("localVid play error", e));
+    }
 
     pc = new RTCPeerConnection(rtcConfig);
 
@@ -3069,9 +3142,16 @@ private const val WEBRTC_HTML_CONTENT = """
     }
 
     pc.ontrack = (event) => {
-      if (event.streams && event.streams[0]) {
-        const remoteVid = document.getElementById('remoteVideo');
-        if (remoteVid) remoteVid.srcObject = event.streams[0];
+      const remoteVid = document.getElementById('remoteVideo');
+      if (remoteVid) {
+        if (event.streams && event.streams[0]) {
+          remoteVid.srcObject = event.streams[0];
+        } else if (event.track) {
+          if (!remoteVid.srcObject) {
+            remoteVid.srcObject = new MediaStream();
+          }
+          remoteVid.srcObject.addTrack(event.track);
+        }
         document.getElementById('statusText').innerHTML = '<div class="pulse-dot"></div> LIVE STREAM ACTIVE';
       }
     };
@@ -3084,6 +3164,7 @@ private const val WEBRTC_HTML_CONTENT = """
 
     if (remoteOfferSdp) {
       await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: remoteOfferSdp }));
+      await flushPendingCandidates();
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       if (window.AndroidWebRTCBridge) {
@@ -3101,31 +3182,67 @@ private const val WEBRTC_HTML_CONTENT = """
   function setRemoteAnswer(sdp) {
     if (pc && sdp) {
       pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: sdp }))
+        .then(() => flushPendingCandidates())
         .catch(e => console.error("Error setting remote answer SDP", e));
     }
   }
 
   function addRemoteIceCandidate(candidateJsonStr) {
-    if (pc && candidateJsonStr) {
-      try {
-        const cand = typeof candidateJsonStr === 'string' ? JSON.parse(candidateJsonStr) : candidateJsonStr;
+    if (!candidateJsonStr) return;
+    try {
+      const cand = typeof candidateJsonStr === 'string' ? JSON.parse(candidateJsonStr) : candidateJsonStr;
+      if (pc && pc.remoteDescription) {
         pc.addIceCandidate(new RTCIceCandidate(cand))
-          .catch(e => console.error("Error adding remote ICE candidate", e));
-      } catch(e) {
-        console.error("Candidate parse error", e);
+          .catch(e => {
+            console.warn("ICE candidate add retry queued", e);
+            pendingRemoteCandidates.push(cand);
+          });
+      } else {
+        pendingRemoteCandidates.push(cand);
       }
+    } catch(e) {
+      console.error("Candidate parse error", e);
+    }
+  }
+
+  function toggleMic(enabled) {
+    if (localStream) {
+      localStream.getAudioTracks().forEach(t => t.enabled = enabled);
+    }
+  }
+
+  function toggleCam(enabled) {
+    if (localStream) {
+      localStream.getVideoTracks().forEach(t => t.enabled = enabled);
     }
   }
 
   function closeCall() {
+    pendingRemoteCandidates = [];
+    initialized = false;
     if (localStream) {
-      localStream.getTracks().forEach(t => t.stop());
+      localStream.getTracks().forEach(t => {
+        try { t.stop(); } catch(e) {}
+      });
+      localStream = null;
     }
     if (pc) {
-      pc.close();
+      try { pc.close(); } catch(e) {}
       pc = null;
     }
+    const localVid = document.getElementById('localVideo');
+    if (localVid) {
+      localVid.srcObject = null;
+    }
+    const remoteVid = document.getElementById('remoteVideo');
+    if (remoteVid) {
+      remoteVid.srcObject = null;
+    }
   }
+
+  window.addEventListener('beforeunload', closeCall);
+  window.addEventListener('unload', closeCall);
+  window.addEventListener('pagehide', closeCall);
 </script>
 </body>
 </html>

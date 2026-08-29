@@ -119,6 +119,32 @@
         </div>
     </div>
 
+    <!-- INCOMING CALL POPUP MODAL -->
+    <div id="incomingCallModal" class="hidden fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+        <div class="bg-gray-900 border-2 border-cyan-500/80 p-6 md:p-8 rounded-3xl max-w-sm w-full space-y-6 shadow-2xl text-center relative glow-ring">
+            <div class="w-20 h-20 rounded-full bg-cyan-500/20 border-2 border-cyan-400 flex items-center justify-center mx-auto animate-bounce">
+                <span id="incomingCallIcon" class="text-4xl">📞</span>
+            </div>
+            <div>
+                <p class="text-xs font-mono font-bold text-cyan-400 uppercase tracking-widest mb-1">Incoming Call</p>
+                <h3 id="incomingCallerName" class="text-2xl font-black text-white truncate">Mobile Phone</h3>
+                <p id="incomingCallType" class="text-xs text-gray-400 mt-1">Audio &amp; Video Session</p>
+            </div>
+            <div class="grid grid-cols-2 gap-4 pt-2">
+                <button type="button" onclick="declineIncomingCall()" 
+                        class="bg-red-600 hover:bg-red-500 text-white font-bold py-3 px-4 rounded-2xl flex items-center justify-center space-x-2 transition shadow-lg shadow-red-600/30 active:scale-95 cursor-pointer">
+                    <span>🛑</span>
+                    <span>Decline</span>
+                </button>
+                <button type="button" onclick="acceptIncomingCall()" 
+                        class="bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-3 px-4 rounded-2xl flex items-center justify-center space-x-2 transition shadow-lg shadow-emerald-500/30 active:scale-95 animate-pulse cursor-pointer">
+                    <span>📞</span>
+                    <span>Accept</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
     <main class="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-center">
 
         <!-- STEP 1: CHOOSE NAME & REASON FLUID WINDOW -->
@@ -991,19 +1017,31 @@
                 setCallLayoutActive(true);
                 if (window.pc && payload.sdp) {
                     window.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }))
+                        .then(() => flushPendingCandidates())
                         .catch(err => console.error("Error setting remote answer SDP", err));
                 }
             } else if (payload.type === "webrtc_ice_candidate" || payload.event === "ice_candidate") {
-                if (window.pc && payload.candidate) {
+                if (payload.candidate) {
                     try {
                         const cand = typeof payload.candidate === 'string' ? JSON.parse(payload.candidate) : payload.candidate;
-                        window.pc.addIceCandidate(new RTCIceCandidate(cand))
-                            .catch(err => console.error("Error adding remote ICE candidate", err));
+                        if (window.pc && window.pc.remoteDescription) {
+                            window.pc.addIceCandidate(new RTCIceCandidate(cand))
+                                .catch(err => {
+                                    console.warn("ICE candidate add retry queued", err);
+                                    pendingCandidates.push(cand);
+                                });
+                        } else {
+                            pendingCandidates.push(cand);
+                        }
                     } catch (e) {
                         console.error("Error parsing ICE candidate", e);
                     }
                 }
             } else if (payload.type === "webrtc_call_hangup" || payload.event === "call_ended") {
+                stopRingtone();
+                const incModal = document.getElementById('incomingCallModal');
+                if (incModal) incModal.classList.add('hidden');
+                pendingIncomingCallOffer = null;
                 hangUpCall(true);
             }
         }
@@ -1448,14 +1486,123 @@
             }
         }
 
-        async function handleIncomingCallOffer(payload) {
+        let ringtoneAudioCtx = null;
+        let ringtoneInterval = null;
+        let pendingIncomingCallOffer = null;
+        let pendingCandidates = [];
+
+        function playRingtone() {
+            stopRingtone();
+            try {
+                const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtxClass) return;
+                ringtoneAudioCtx = new AudioCtxClass();
+                const playBeep = () => {
+                    if (!ringtoneAudioCtx || ringtoneAudioCtx.state === 'closed') return;
+                    const osc = ringtoneAudioCtx.createOscillator();
+                    const gain = ringtoneAudioCtx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(440, ringtoneAudioCtx.currentTime);
+                    osc.frequency.setValueAtTime(480, ringtoneAudioCtx.currentTime + 0.1);
+                    gain.gain.setValueAtTime(0.12, ringtoneAudioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.001, ringtoneAudioCtx.currentTime + 0.85);
+                    osc.connect(gain);
+                    gain.connect(ringtoneAudioCtx.destination);
+                    osc.start();
+                    osc.stop(ringtoneAudioCtx.currentTime + 0.85);
+                };
+                playBeep();
+                ringtoneInterval = setInterval(playBeep, 2000);
+            } catch (e) {
+                console.warn("Could not play ringtone audio", e);
+            }
+        }
+
+        function stopRingtone() {
+            if (ringtoneInterval) {
+                clearInterval(ringtoneInterval);
+                ringtoneInterval = null;
+            }
+            if (ringtoneAudioCtx) {
+                try {
+                    ringtoneAudioCtx.close();
+                } catch (e) {}
+                ringtoneAudioCtx = null;
+            }
+        }
+
+        async function flushPendingCandidates() {
+            if (!window.pc || !window.pc.remoteDescription) return;
+            while (pendingCandidates.length > 0) {
+                const cand = pendingCandidates.shift();
+                try {
+                    await window.pc.addIceCandidate(new RTCIceCandidate(cand));
+                } catch (e) {
+                    console.error("Error flushing queued ICE candidate", e);
+                }
+            }
+        }
+
+        function handleIncomingCallOffer(payload) {
+            if (isCallActive && window.pc) return;
+            pendingIncomingCallOffer = payload;
+            pendingCandidates = [];
+
+            const callerName = payload.name || hostName || "Mobile Phone";
+            const isVideo = payload.video !== false;
+
+            const nameEl = document.getElementById('incomingCallerName');
+            const typeEl = document.getElementById('incomingCallType');
+            const iconEl = document.getElementById('incomingCallIcon');
+            const modalEl = document.getElementById('incomingCallModal');
+
+            if (nameEl) nameEl.innerText = callerName;
+            if (typeEl) typeEl.innerText = isVideo ? "📹 Direct Video & Voice Call" : "📞 Direct Voice Call";
+            if (iconEl) iconEl.innerText = isVideo ? "📹" : "📞";
+            if (modalEl) modalEl.classList.remove('hidden');
+
+            playRingtone();
+        }
+
+        function declineIncomingCall() {
+            stopRingtone();
+            const modalEl = document.getElementById('incomingCallModal');
+            if (modalEl) modalEl.classList.add('hidden');
+            if (pendingIncomingCallOffer) {
+                fetch(HOME_SERVER_URL + "/api/signal", {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        event: "signal",
+                        type: "webrtc_call_hangup",
+                        uuid: clientUuid,
+                        token: clientToken || "",
+                        host_uuid: hostUuid || ""
+                    })
+                }).catch(e => console.error("Error declining call", e));
+                pendingIncomingCallOffer = null;
+            }
+        }
+
+        async function acceptIncomingCall() {
+            stopRingtone();
+            const modalEl = document.getElementById('incomingCallModal');
+            if (modalEl) modalEl.classList.add('hidden');
+            if (!pendingIncomingCallOffer) return;
+            const payload = pendingIncomingCallOffer;
+            pendingIncomingCallOffer = null;
+
+            await executeAcceptCall(payload);
+        }
+
+        async function executeAcceptCall(payload) {
             if (isCallActive && window.pc) return;
             isCallActive = true;
             setCallLayoutActive(true);
             document.getElementById('audioCallBtn').disabled = true;
             document.getElementById('videoCallBtn').disabled = true;
             document.getElementById('hangUpBtn').disabled = false;
-            document.getElementById('callDuration').innerText = "INCOMING CALL...";
+            document.getElementById('callDuration').innerText = "CONNECTING...";
             document.getElementById('localVideo').classList.remove('hidden');
             document.getElementById('videoPlaceholder').classList.add('hidden');
 
@@ -1508,6 +1655,7 @@
 
             if (payload.sdp) {
                 await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: payload.sdp }));
+                await flushPendingCandidates();
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
 
@@ -1536,6 +1684,12 @@
 
         function hangUpCall(receivedFromPhone = false) {
             const wasDirect = isDirectCallMode;
+            stopRingtone();
+            const modalEl = document.getElementById('incomingCallModal');
+            if (modalEl) modalEl.classList.add('hidden');
+            pendingIncomingCallOffer = null;
+            pendingCandidates = [];
+
             isCallActive = false;
             setCallLayoutActive(false);
             if (callTimer) {

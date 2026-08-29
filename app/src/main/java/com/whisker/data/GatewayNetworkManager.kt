@@ -796,6 +796,39 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val candidate = json.opt("candidate")?.toString() ?: ""
                     val sdp = json.optString("sdp", "")
                     _incomingSignal.tryEmit(WebRtcSignal(uuid, signalType, candidate, sdp))
+
+                    if (signalType in listOf("webrtc_call_answer", "call_answered")) {
+                        scope.launch {
+                            val current = _activeCall.value
+                            if (current is CallState.Outgoing && (current.clientUuid == uuid || uuid.isEmpty())) {
+                                _activeCall.value = CallState.Active(
+                                    clientUuid = current.clientUuid,
+                                    clientName = current.clientName,
+                                    isVideo = current.isVideo,
+                                    durationSeconds = 0,
+                                    sdp = sdp
+                                )
+                                updateAudioModeForCall(true)
+                            }
+                        }
+                    }
+                }
+                "call_answered" -> {
+                    val sdp = json.optString("sdp", "")
+                    _incomingSignal.tryEmit(WebRtcSignal(uuid, "webrtc_call_answer", "", sdp))
+                    scope.launch {
+                        val current = _activeCall.value
+                        if (current is CallState.Outgoing && (current.clientUuid == uuid || uuid.isEmpty())) {
+                            _activeCall.value = CallState.Active(
+                                clientUuid = current.clientUuid,
+                                clientName = current.clientName,
+                                isVideo = current.isVideo,
+                                durationSeconds = 0,
+                                sdp = sdp
+                            )
+                            updateAudioModeForCall(true)
+                        }
+                    }
                 }
                 "hangup" -> {
                     scope.launch {
@@ -1632,14 +1665,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
     fun publishOutgoingSdpOffer(clientUuid: String, offerSdp: String) {
         scope.launch {
+            val myName = hostUsername.value.ifEmpty { "Mobile App" }
             val payload = JSONObject().apply {
                 put("type", "webrtc_call_initiate")
                 put("event", "call")
                 put("clientUuid", clientUuid)
-                put("name", "Phone Portal")
+                put("name", myName)
                 put("video", true)
                 put("sdp", offerSdp)
             }
+            Log.d("GatewayNetworkManager", "Publishing outgoing SDP offer to client: $clientUuid, name: $myName, sdpLen: ${offerSdp.length}")
             publishToClient(clientUuid, payload)
         }
     }
@@ -1689,6 +1724,22 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     )
                 )
                 // Notify client of hangup / decline
+                val payload = JSONObject().apply {
+                    put("type", "webrtc_call_hangup")
+                    put("event", "call_ended")
+                    put("clientUuid", current.clientUuid)
+                }
+                publishToClient(current.clientUuid, payload)
+            } else if (current is CallState.Outgoing) {
+                repository.insertCallLog(
+                    CallLog(
+                        clientUuid = current.clientUuid,
+                        clientName = current.clientName,
+                        status = "CANCELLED",
+                        isIncoming = false
+                    )
+                )
+                // Notify client of hangup / cancel
                 val payload = JSONObject().apply {
                     put("type", "webrtc_call_hangup")
                     put("event", "call_ended")
@@ -1902,16 +1953,14 @@ class GatewayNetworkManager(private val context: Context, private val repository
             Log.e("GatewayNetworkManager", "Error acquiring full screen wake lock for incoming call", e)
         }
 
-        // For auto-accept: dispatch PendingIntent / direct startActivity to bring MainActivity up immediately
-        if (autoAccept) {
+        // Launch MainActivity directly so the incoming call screen displays immediately even when the app was closed
+        try {
+            context.startActivity(fullScreenIntent)
+        } catch (e: Exception) {
             try {
                 fullScreenPendingIntent.send()
-            } catch (e: Exception) {
-                try {
-                    context.startActivity(fullScreenIntent)
-                } catch (e2: Exception) {
-                    Log.d("GatewayNetworkManager", "PendingIntent dispatched via notification")
-                }
+            } catch (e2: Exception) {
+                Log.d("GatewayNetworkManager", "PendingIntent dispatched via notification")
             }
         }
     }

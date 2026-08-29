@@ -689,7 +689,11 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
 
             target_host = self.db.get_host(client_uuid)
             approved_clients = self.db.get_approved_clients_for_host(host_uuid)
-            is_approved = (target_host is not None) or any(c['uuid'] == client_uuid for c in approved_clients)
+            client_req = self.db.get_request(client_uuid)
+            is_req_approved = (client_req is not None and client_req.get('status') == 'APPROVED')
+            if is_req_approved:
+                self.db.add_client_host_approval(client_uuid, host_uuid)
+            is_approved = (target_host is not None) or is_req_approved or any(c['uuid'] == client_uuid for c in approved_clients)
 
             if not is_approved and resp_type not in ['registration_response', 'mobile_pairing_response']:
                 return self._send_json({"error": "Host not paired with this client"}, 403)
