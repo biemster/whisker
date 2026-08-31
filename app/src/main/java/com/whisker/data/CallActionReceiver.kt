@@ -13,6 +13,9 @@ class CallActionReceiver : BroadcastReceiver() {
         val networkManager = CompanionRegistry.getOrInitializeManager(context)
 
         when (action) {
+            "ACTION_DISMISS_NOTIFICATIONS_GROUP" -> {
+                networkManager.clearNotificationGroupSummary()
+            }
             "ACTION_DECLINE_CALL" -> {
                 networkManager.declineOrEndCall()
                 networkManager.cancelCallNotification()

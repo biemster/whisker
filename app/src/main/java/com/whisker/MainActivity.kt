@@ -73,6 +73,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         com.whisker.data.CompanionRegistry.isAppInForeground = true
+        networkManager.cancelAllMessageNotifications()
         networkManager.fetchPendingEventsFromServer()
         checkAndRequestAppPermissions()
     }

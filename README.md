@@ -33,14 +33,14 @@ Whether you want a hassle-free personal communication system for external visito
 - **WebRTC Calling**: Full peer-to-peer audio and video calling operational with adaptive camera/mic permissions, candidate signaling, and synthetic fallback stream generation.
 - **Multi-Device Pairing**: Support for multiple mobile host applications paired with a single home server, featuring admin approval controls, custom usernames, invite code generation, and multi-device routing for messages and calls.
 - **Mobile-to-Mobile Communication**: Real-time messaging and WebRTC calling between mobile apps on the same Home Server (`local`) and across different Home Servers (`serverAddress`), unified by invite pairing and direct signaling.
-- **File & Media Transfer**: Secure attachment and file transfer directly between web visitors/mobile clients and the home server.
 - **Web Client UI**: Responsive fluid layout with auto-expanding video on active calls, interactive header status indicator with connectivity modal, and mobile-optimized columnar view.
 - **Push Notifications**: FCM HTTP v1 push notification tickle integration complete with low-power battery optimization.
 
 ### In Development & Future Roadmap
-- **iOS Mobile Application**: Native iOS client app built with Swift / SwiftUI, featuring WebRTC P2P calling, background APNs (Apple Push Notification service) push tickle support, and call notification alerts.
+- **File & Media Transfer**: Secure attachment and file transfer directly between web visitors/mobile clients and the home server.
 - **Automated Background Photo Backup**: Scheduled automatic background synchronization of camera roll photos and media folders to home server storage.
 - **Multi-Server Mobile Client**: Support for connecting a single mobile application to multiple home servers simultaneously, featuring independent controls to disconnect or mute specific servers (e.g. managing family, work, and community servers in one app).
+- **iOS Mobile Application**: Native iOS client app built with Swift / SwiftUI, featuring WebRTC P2P calling, background APNs (Apple Push Notification service) push tickle support, and call notification alerts.
 
 ---
 

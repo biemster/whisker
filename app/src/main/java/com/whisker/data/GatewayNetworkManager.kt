@@ -121,6 +121,13 @@ class GatewayNetworkManager(private val context: Context, private val repository
     private val _activeCall = MutableStateFlow<CallState>(CallState.Idle)
     val activeCall: StateFlow<CallState> = _activeCall.asStateFlow()
 
+    private val _callDeclinedEvent = MutableStateFlow<String?>(null)
+    val callDeclinedEvent: StateFlow<String?> = _callDeclinedEvent.asStateFlow()
+
+    fun dismissCallDeclined() {
+        _callDeclinedEvent.value = null
+    }
+
     private val _onInviteClaimed = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val onInviteClaimed = _onInviteClaimed.asSharedFlow()
 
@@ -182,9 +189,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
         
         scope.launch(Dispatchers.IO) {
             if (storedServerUrl.isNotEmpty() && storedServerUrl.startsWith("http")) {
+                checkAndRegisterMobileStatus(storedServerUrl, storedApiKey)
                 fetchFcmConfigFromServer(storedServerUrl, storedApiKey)
                 registerPushTokenOnServer(storedServerUrl, storedApiKey, pushToken.value)
                 updateDirectCallsAllowed(savedAllowDirectCalls)
+                fetchPendingEventsFromServerSuspended()
             }
         }
 
@@ -293,11 +302,56 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         fetchFcmConfigFromServer(serverUrlVal, pinVal)
                         registerPushTokenOnServer(serverUrlVal, pinVal, pushToken.value)
                     } else {
-                        serverReachable.value = false
                         Log.e("GatewayNetworkManager", "Failed to fetch events from server: ${response.code}")
                         if (response.code == 401 || response.code == 403) {
-                            checkAndRegisterMobileStatus(serverUrlVal, pinVal)
+                            val registered = checkAndRegisterMobileStatus(serverUrlVal, pinVal)
+                            if (registered) {
+                                // Instantly retry fetching events with new authorization
+                                try {
+                                    val retryReq = Request.Builder()
+                                        .url("$serverUrlVal/api/host/events")
+                                        .header("Authorization", "Bearer $pinVal")
+                                        .get()
+                                        .build()
+                                    okHttpClient.newCall(retryReq).execute().use { retryResp ->
+                                        if (retryResp.isSuccessful) {
+                                            fetchSuccess = true
+                                            serverReachable.value = true
+                                            _connectionStatus.value = "Connected"
+                                            val retryBody = retryResp.body?.string() ?: ""
+                                            val retryEventsArray = JSONArray(retryBody)
+                                            for (i in 0 until retryEventsArray.length()) {
+                                                val eventObj = retryEventsArray.getJSONObject(i)
+                                                val id = eventObj.getString("id")
+                                                fetchedEventIds.add(id)
+                                                val type = eventObj.getString("type")
+                                                val payload = eventObj.getJSONObject("payload")
+                                                val alreadyProcessed = synchronized(processedEventIds) {
+                                                    if (processedEventIds.contains(id)) {
+                                                        true
+                                                    } else {
+                                                        processedEventIds.add(id)
+                                                        if (processedEventIds.size > 200) {
+                                                            val iterator = processedEventIds.iterator()
+                                                            if (iterator.hasNext()) { iterator.next(); iterator.remove() }
+                                                        }
+                                                        val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
+                                                        prefs.edit().putStringSet("processed_event_ids", processedEventIds.toSet()).apply()
+                                                        false
+                                                    }
+                                                }
+                                                if (!alreadyProcessed) {
+                                                    payload.put("event", type)
+                                                    processIncomingPayload(payload.toString(), fromServerPoll = true)
+                                                }
+                                                ackEventOnServer(serverUrlVal, pinVal, id)
+                                            }
+                                        }
+                                    }
+                                } catch (ignored: Exception) {}
+                            }
                         } else {
+                            serverReachable.value = false
                             _connectionStatus.value = "Connecting..."
                         }
                     }
@@ -330,7 +384,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         
                         val localClients = repository.getAllRequestsSync()
                         
-                        // Mark all existing clients appropriately
+                        // Mark all existing clients appropriately or remove if deleted from server
                         for (existing in localClients) {
                             val serverHasOnline = onlineUuids.contains(existing.uuid)
                             val serverObj = serverClients[existing.uuid]
@@ -351,8 +405,13 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                         lastSeen = System.currentTimeMillis()
                                     ))
                                 }
-                            } else if (existing.isOnline != serverHasOnline) {
-                                repository.updateRequest(existing.copy(isOnline = serverHasOnline, lastSeen = System.currentTimeMillis()))
+                            } else {
+                                // If this contact was registered locally on this home server and is no longer returned by the server, delete it from local repository
+                                if (existing.serverAddress == "local" && (existing.status == "APPROVED" || existing.status == "MOBILE_APPROVED" || existing.status == "MOBILE_REJECTED" || existing.status == "MOBILE_PENDING")) {
+                                    repository.deleteRequest(existing)
+                                } else if (existing.isOnline != serverHasOnline) {
+                                    repository.updateRequest(existing.copy(isOnline = serverHasOnline, lastSeen = System.currentTimeMillis()))
+                                }
                             }
                         }
                         
@@ -425,12 +484,17 @@ class GatewayNetworkManager(private val context: Context, private val repository
     }
 
     private fun tryProbeFallbackCandidates(pinVal: String) {
+        val current = serverUrl.value.removeSuffix("/")
+        val defaultUrls = setOf("http://10.0.2.2:3000", "http://10.0.2.2:8000", "http://localhost:3000", "http://localhost:8000")
+        if (!defaultUrls.contains(current)) {
+            // Never overwrite a user's configured custom domain / IP address
+            return
+        }
         val candidates = if (isEmulator()) {
             listOf("http://10.0.2.2:3000", "http://10.0.2.2:8000", "http://localhost:3000", "http://localhost:8000")
         } else {
             listOf("http://localhost:3000", "http://localhost:8000", "http://10.0.2.2:3000", "http://10.0.2.2:8000")
         }
-        val current = serverUrl.value.removeSuffix("/")
         for (candidate in candidates) {
             if (candidate == current) continue
             try {
@@ -795,6 +859,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val signalType = json.optString("type", "webrtc_ice_candidate")
                     val candidate = json.opt("candidate")?.toString() ?: ""
                     val sdp = json.optString("sdp", "")
+                    val status = json.optString("status", "")
+                    val reason = json.optString("reason", "")
                     _incomingSignal.tryEmit(WebRtcSignal(uuid, signalType, candidate, sdp))
 
                     if (signalType in listOf("webrtc_call_answer", "call_answered")) {
@@ -809,6 +875,21 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                     sdp = sdp
                                 )
                                 updateAudioModeForCall(true)
+                            }
+                        }
+                    } else if (signalType in listOf("webrtc_call_hangup", "call_ended", "call_declined", "call_rejected") || status == "declined" || reason == "declined") {
+                        scope.launch {
+                            val current = _activeCall.value
+                            if (current is CallState.Outgoing && (current.clientUuid == uuid || uuid.isEmpty())) {
+                                val peerName = current.clientName.ifEmpty { "The recipient" }
+                                _activeCall.value = CallState.Idle
+                                cancelCallNotification()
+                                updateAudioModeForCall(false)
+                                _callDeclinedEvent.value = "$peerName declined the call."
+                            } else if (current !is CallState.Idle) {
+                                _activeCall.value = CallState.Idle
+                                cancelCallNotification()
+                                updateAudioModeForCall(false)
                             }
                         }
                     }
@@ -830,9 +911,18 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         }
                     }
                 }
-                "hangup" -> {
+                "hangup", "call_declined", "call_rejected" -> {
+                    val status = json.optString("status", "")
+                    val reason = json.optString("reason", "")
                     scope.launch {
-                        if (_activeCall.value !is CallState.Idle) {
+                        val current = _activeCall.value
+                        if (current is CallState.Outgoing && (current.clientUuid == uuid || uuid.isEmpty())) {
+                            val peerName = current.clientName.ifEmpty { "The recipient" }
+                            _activeCall.value = CallState.Idle
+                            cancelCallNotification()
+                            updateAudioModeForCall(false)
+                            _callDeclinedEvent.value = "$peerName declined the call."
+                        } else if (current !is CallState.Idle) {
                             _activeCall.value = CallState.Idle
                             cancelCallNotification()
                             updateAudioModeForCall(false)
@@ -1364,8 +1454,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    suspend fun checkAndRegisterMobileStatus(serverUrlVal: String, pinVal: String) {
-        if (serverUrlVal.isEmpty() || !serverUrlVal.startsWith("http")) return
+    suspend fun checkAndRegisterMobileStatus(serverUrlVal: String, pinVal: String): Boolean {
+        if (serverUrlVal.isEmpty() || !serverUrlVal.startsWith("http")) return false
         try {
             fetchFcmConfigFromServer(serverUrlVal, pinVal)
             val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
@@ -1391,6 +1481,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         _connectionStatus.value = "Connected"
                         lastRegisteredServerUrl = serverUrlVal
                         lastRegisteredApiKey = pinVal
+                        return true
                     } else if (status == "PENDING") {
                         serverReachable.value = false
                         _connectionStatus.value = "Pairing pending admin approval..."
@@ -1403,6 +1494,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
         } catch (e: Exception) {
             Log.d("GatewayNetworkManager", "checkAndRegisterMobileStatus error: ${e.message}")
         }
+        return false
     }
 
     fun updateSettings(url: String, username: String) {
@@ -1576,7 +1668,39 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
+    suspend fun deleteClientOnServer(uuid: String) {
+        withContext(Dispatchers.IO) {
+            val serverUrlVal = serverUrl.value
+            val pinVal = apiKey.value
+            if (serverUrlVal.isEmpty() || pinVal.isEmpty()) return@withContext
+            try {
+                val body = JSONObject().apply {
+                    put("uuid", uuid)
+                    put("clientUuid", uuid)
+                }
+                val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), body.toString())
+                val request = Request.Builder()
+                    .url("$serverUrlVal/api/host/delete_client")
+                    .header("Authorization", "Bearer $pinVal")
+                    .post(requestBody)
+                    .build()
+                okHttpClient.newCall(request).execute().use { response ->
+                    Log.d("GatewayNetworkManager", "deleteClientOnServer response: ${response.code}")
+                }
+            } catch (e: Exception) {
+                if (e is java.io.IOException) {
+                    Log.w("GatewayNetworkManager", "Home Server not reachable to delete client: ${e.message}")
+                } else {
+                    Log.e("GatewayNetworkManager", "deleteClientOnServer error", e)
+                }
+            }
+        }
+    }
+
     companion object {
+        const val NOTIFICATION_GROUP_MESSAGES = "com.whisker.MESSAGES_GROUP"
+        const val NOTIFICATION_SUMMARY_ID = 9000
+
         private val processedEventIds = Collections.synchronizedSet(LinkedHashSet<String>())
         private val processedMessageIds = Collections.synchronizedSet(LinkedHashSet<String>())
 
@@ -1726,7 +1850,9 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 // Notify client of hangup / decline
                 val payload = JSONObject().apply {
                     put("type", "webrtc_call_hangup")
-                    put("event", "call_ended")
+                    put("event", "call_declined")
+                    put("status", "declined")
+                    put("reason", "declined")
                     put("clientUuid", current.clientUuid)
                 }
                 publishToClient(current.clientUuid, payload)
@@ -1997,6 +2123,20 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
+    private val recentNotificationLines = java.util.Collections.synchronizedList(mutableListOf<Pair<String, String>>())
+
+    fun clearNotificationGroupSummary() {
+        recentNotificationLines.clear()
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.cancel(NOTIFICATION_SUMMARY_ID)
+    }
+
+    fun cancelAllMessageNotifications() {
+        recentNotificationLines.clear()
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.cancel(NOTIFICATION_SUMMARY_ID)
+    }
+
     private fun showNotification(title: String, body: String, notificationId: Int, chatUuid: String? = null) {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
@@ -2019,7 +2159,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
             else RingtoneManager.TYPE_NOTIFICATION
         )
         
-        val uniqueNotificationId = if (isCall) notificationId else System.currentTimeMillis().toInt()
+        val uniqueNotificationId = if (isCall) notificationId else ((System.currentTimeMillis() % 1000000).toInt() + 100)
 
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(com.whisker.R.drawable.ic_launcher_foreground)
@@ -2035,10 +2175,56 @@ class GatewayNetworkManager(private val context: Context, private val repository
             builder.setCategory(NotificationCompat.CATEGORY_CALL)
         } else {
             builder.setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            builder.setGroup(NOTIFICATION_GROUP_MESSAGES)
         }
 
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(uniqueNotificationId, builder.build())
+
+        if (!isCall) {
+            // Manage combined incremental notification group
+            synchronized(recentNotificationLines) {
+                recentNotificationLines.add(Pair(title, body))
+                if (recentNotificationLines.size > 20) {
+                    recentNotificationLines.removeAt(0)
+                }
+            }
+
+            val dismissIntent = Intent(context, CallActionReceiver::class.java).apply {
+                action = "ACTION_DISMISS_NOTIFICATIONS_GROUP"
+            }
+            val dismissPendingIntent = PendingIntent.getBroadcast(
+                context,
+                9001,
+                dismissIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val count = recentNotificationLines.size
+            val inboxStyle = NotificationCompat.InboxStyle()
+                .setBigContentTitle("Whisker ($count new)")
+                .setSummaryText("Whisker")
+
+            synchronized(recentNotificationLines) {
+                for (item in recentNotificationLines.takeLast(7)) {
+                    inboxStyle.addLine("${item.first}: ${item.second}")
+                }
+            }
+
+            val summaryBuilder = NotificationCompat.Builder(context, "messages_channel")
+                .setSmallIcon(com.whisker.R.drawable.ic_launcher_foreground)
+                .setContentTitle("Whisker")
+                .setContentText("$count new notification${if (count > 1) "s" else ""}")
+                .setStyle(inboxStyle)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setContentIntent(pendingIntent)
+                .setDeleteIntent(dismissPendingIntent)
+                .setGroup(NOTIFICATION_GROUP_MESSAGES)
+                .setGroupSummary(true)
+                .setAutoCancel(true)
+
+            notificationManager.notify(NOTIFICATION_SUMMARY_ID, summaryBuilder.build())
+        }
 
         // Play sound programmatically to ensure immediate reaction in foreground as well!
         if (CompanionRegistry.isAppInForeground) {

@@ -55,6 +55,7 @@
             <intent-filter>
                 <action android:name="ACTION_DECLINE_CALL" />
                 <action android:name="ACTION_ANSWER_CALL" />
+                <action android:name="ACTION_DISMISS_NOTIFICATIONS_GROUP" />
             </intent-filter>
         </receiver>
 

@@ -70,30 +70,45 @@ The system consists of three primary components:
   - `host_events`: Event ID, event type (`visitor`, `message`, `call`, `invite_claimed`), JSON payload, timestamp.
   - `settings`: Key-value configuration pairs (including host access PIN and FCM push token).
 
-### 3.2 Host API Endpoints (`/api/host/*`)
-- `POST /api/host/register_push`: Registers the mobile app's FCM token with the Home Server. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `GET /api/host/fcm_config`: Retrieves FCM project configuration (Sender ID, Project ID) derived from `whisker-push-sa.json` for initial mobile app pairing. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+### 3.2 Host API Endpoints (`/api/host/*` and Host Management)
+- `POST /api/register_mobile`: Registers or pairs a mobile app with the Home Server (`username`, `pin_token`, `push_token`). The first paired device is automatically granted Admin status (`APPROVED`, `is_admin: 1`); subsequent mobile devices are registered as `PENDING` and enqueue a `mobile_pairing_request` host event for admin approval. [Access: Public / Host Pairing]
+- `POST /api/host/register_push`: Registers or updates the mobile app's FCM push token with the Home Server. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `GET /api/host/fcm_config`: Retrieves FCM project configuration (Project ID, Sender ID, App ID, API Key) derived from `whisker-push-sa.json` for initial mobile app pairing. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `POST /api/host/fcm_config`: Updates the FCM API key in the server settings. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `POST /api/host/direct_calls`: Enables or disables direct visitor calling without prior approval for this host (`allow_direct_calls: true/false`). [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
 - `GET /api/host/events`: Fetches pending `host_events` queued for the host upon FCM tickle notification. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/ack`: Acknowledges and clears processed host events from the server queue. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `GET /api/host/message`: Retrieves specific message details and `previousMessageId` chain references by message `id`. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/create_invite`: Generates single-use guest invite links/codes. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `GET /api/host/invites`: Retrieves list of active guest invite codes. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/delete_invite`: Revokes/deletes a guest invite code. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `GET /api/host/clients`: Retrieves registered guest clients and pending access requests. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/response`: Unified endpoint for host actions (sending WebRTC call answer/reject/hangup SDP, ICE candidates, host text replies, approving/rejecting guest requests). [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `GET /api/host/stream`: SSE stream for host event pushes. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)] [NOT USED - Deprecated/Unused by Mobile App in favor of pure FCM push tickles for battery efficiency]
+- `POST /api/host/ack`: Acknowledges and clears processed host events from the server queue by `eventId`. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `GET /api/host/message`: Retrieves specific message details and `previousMessageId` chain references by message `id` (`/api/host/message?id=<id>`). [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `POST /api/host/create_invite`: Generates single-use guest invite links/codes with optional reserved guest name. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `GET /api/host/invites`: Retrieves list of active guest invite codes created by the host. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `POST /api/host/delete_invite`: Revokes and deletes an active guest invite code by `code`. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `GET /api/host/clients`: Retrieves registered guest clients and companion mobile hosts with live online presence status. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `POST /api/host/delete_client`: Removes an approved caller or companion mobile host (aliases: `/api/host/remove_client`, `/api/host/remove_contact`, `/api/host/delete_host`). Purges database records, revokes host-client approvals, evicts active in-memory streams, and logs removal events. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `POST /api/host/claim_remote_invite`: Connects/federates to a remote Whisker Home Server by claiming an invite code from the remote server and establishing a paired client record. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+- `POST /api/host/response`: Unified endpoint for host actions:
+  - `registration_response`: Approves guest visitor access requests.
+  - `mobile_pairing_response`: Approves, rejects, or deletes companion mobile app pairing requests.
+  - `chat_message` / `message`: Sends text chat or media file messages to guest clients or companion mobile peers.
+  - `webrtc_call_initiate` / `call`: Initiates outgoing WebRTC call offers to companion mobile peers or guests.
+  - `webrtc_call_answer` / `webrtc_ice_candidate` / `signal`: Submits call answer SDP or ICE candidates.
+  - `webrtc_call_hangup` / `hangup`: Terminates or declines active WebRTC calls.
+  - `delete_client` / `remove_contact`: Removes client or mobile contact approval.
+  [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
 
 ### 3.3 Guest & Web Client API Endpoints (`/api/*`)
-- `POST /api/register`: Submits a visitor access request (creates a `PENDING` request record). [Access: Public Unauthenticated]
+- `GET /api/init-status`: Checks if the Home Server has been initialized with at least one paired mobile host. [Access: Public Unauthenticated]
+- `GET /api/info`: Returns Home Server health status, mobile app connectivity (`host_connected`, `host_reachable`), push configuration status, and direct calling availability (`allow_direct_calls`, `direct_call_hosts`). [Access: Public Unauthenticated]
+- `POST /api/register`: Submits a visitor access request (`uuid`, `name`, `reason`), creating a `PENDING` request record, enqueuing a `visitor` host event, and triggering an FCM tickle to hosts. [Access: Public Unauthenticated]
 - `POST /api/claim_invite`: Claims a single-use invite code and receives a valid guest `uuid`, `token`, `name`, `host_uuid`, and `host_name`. [Access: Public Unauthenticated (Requires valid Invite Code)]
-- `GET /api/messages`: Retrieves message history for an approved guest client. [Access: Guest Auth (`uuid` + `token` parameter verification)]
-- `POST /api/message`: Delivers a guest chat message to the host event queue. Supports optional `contact` / `host_uuid` parameter to route to a specific approved host. [Access: Guest Auth (`uuid` + `token` parameter verification)]
-- `POST /api/call`: Submits a WebRTC call offer SDP from a guest client. Supports optional `contact` / `host_uuid` parameter to route to a specific approved host. [Access: Guest Auth (`uuid` + `token` parameter verification)]
-- `POST /api/signal`: Submits WebRTC ICE candidate signals from a guest client. [Access: Guest Auth (`uuid` + `token` parameter verification)]
-- `POST /api/hangup`: Submits a hangup signal from a guest client. [Access: Guest Auth (`uuid` + `token` parameter verification)]
+- `GET /api/messages`: Retrieves message history for an approved guest client (`/api/messages?uuid=<uuid>&token=<token>`). [Access: Guest Auth (`uuid` + `token` parameter verification)]
+- `GET /api/message`: Retrieves specific message details by ID with previous message chain link (`/api/message?id=<id>&uuid=<uuid>&token=<token>`). [Access: Guest Auth (`uuid` + `token` parameter verification)]
+- `POST /api/message`: Delivers a guest chat message or media attachment to the host event queue. Supports optional `contact` / `host_uuid` parameter to route to a specific approved host. [Access: Guest Auth (`uuid` + `token` parameter verification)]
+- `POST /api/call`: Submits a WebRTC call offer SDP from a guest client. Supports direct calling without prior registration when direct calls are enabled on the host, or standard approved guest calling targeted via `contact` / `host_uuid`. [Access: Guest Auth or Public Direct Call]
+- `POST /api/signal`: Submits WebRTC ICE candidate signals from a guest client. [Access: Guest Auth or Public Direct Call]
+- `POST /api/hangup`: Submits a hangup signal from a guest client. [Access: Guest Auth or Public Direct Call]
 - `GET /api/events`: SSE stream for guest clients to receive real-time host replies (chat messages, call accept/reject SDPs, ICE candidates, hangup). [Access: Guest Subscriber (`uuid` parameter)]
-- `GET /api/info`: Returns Home Server health status, mobile app connectivity (`host_connected`, `host_reachable`), and push configuration status. [Access: Public Unauthenticated]
-- `GET /api/init-status`: Checks if the Home Server has been initialized with a host PIN. [Access: Public Unauthenticated]
+- `GET /api/guest/events`: Polling endpoint for guest/federated clients to fetch and clear pending events (alias: `/api/guest/pending_events`). [Access: Guest Auth (`uuid` + `token` parameter verification)]
+- `GET /api/client/hosts`: Retrieves list of approved hosts available for this guest client on the server (`/api/client/hosts?uuid=<uuid>&token=<token>`). [Access: Guest Auth (`uuid` + `token` parameter verification)]
 
 ---
 

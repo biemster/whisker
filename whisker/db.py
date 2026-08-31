@@ -153,22 +153,6 @@ class DatabaseManager:
                 except sqlite3.OperationalError:
                     pass
 
-                # Backfill unlinked approved requests with primary host
-                try:
-                    cursor.execute("SELECT uuid FROM hosts WHERE is_admin = 1 OR status = 'APPROVED' ORDER BY is_admin DESC, created_at ASC LIMIT 1")
-                    primary_host = cursor.fetchone()
-                    if primary_host:
-                        cursor.execute("""
-                            INSERT OR IGNORE INTO client_host_approvals (client_uuid, host_uuid)
-                            SELECT r.uuid, ? FROM requests r
-                            WHERE r.status = 'APPROVED'
-                            AND NOT EXISTS (
-                                SELECT 1 FROM client_host_approvals cha WHERE cha.client_uuid = r.uuid
-                            )
-                        """, (primary_host['uuid'],))
-                except Exception:
-                    pass
-
                 conn.commit()
             finally:
                 conn.close()
@@ -469,12 +453,6 @@ class DatabaseManager:
                     "INSERT INTO hosts (uuid, username, pin_token, push_token, is_admin, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (uuid, username, pin_token, push_token, is_admin, status, now)
                 )
-                if is_admin == 1:
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO client_host_approvals (client_uuid, host_uuid)
-                        SELECT r.uuid, ? FROM requests r
-                        WHERE r.status = 'APPROVED'
-                    """, (uuid,))
                 conn.commit()
             finally:
                 conn.close()
@@ -531,6 +509,9 @@ class DatabaseManager:
             try:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM hosts WHERE uuid = ?", (uuid,))
+                cursor.execute("DELETE FROM client_host_approvals WHERE host_uuid = ?", (uuid,))
+                cursor.execute("DELETE FROM host_events WHERE host_uuid = ?", (uuid,))
+                cursor.execute("DELETE FROM invites WHERE host_uuid = ?", (uuid,))
                 conn.commit()
             finally:
                 conn.close()
@@ -550,6 +531,45 @@ class DatabaseManager:
             finally:
                 conn.close()
 
+    def remove_client_approval(self, client_uuid, host_uuid):
+        if not client_uuid or not host_uuid: return
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM client_host_approvals WHERE client_uuid = ? AND host_uuid = ?",
+                    (client_uuid, host_uuid)
+                )
+                # Check if any other host still has this client approved
+                cursor.execute("SELECT 1 FROM client_host_approvals WHERE client_uuid = ? LIMIT 1", (client_uuid,))
+                remaining = cursor.fetchone()
+                if not remaining:
+                    cursor.execute("DELETE FROM requests WHERE uuid = ?", (client_uuid,))
+                    cursor.execute("DELETE FROM messages WHERE client_uuid = ?", (client_uuid,))
+                    cursor.execute("DELETE FROM guest_events WHERE client_uuid = ?", (client_uuid,))
+                    cursor.execute("DELETE FROM client_presence WHERE uuid = ?", (client_uuid,))
+                    cursor.execute("DELETE FROM client_status_logs WHERE uuid = ?", (client_uuid,))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def delete_client_completely(self, client_uuid):
+        if not client_uuid: return
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM client_host_approvals WHERE client_uuid = ?", (client_uuid,))
+                cursor.execute("DELETE FROM requests WHERE uuid = ?", (client_uuid,))
+                cursor.execute("DELETE FROM messages WHERE client_uuid = ?", (client_uuid,))
+                cursor.execute("DELETE FROM guest_events WHERE client_uuid = ?", (client_uuid,))
+                cursor.execute("DELETE FROM client_presence WHERE uuid = ?", (client_uuid,))
+                cursor.execute("DELETE FROM client_status_logs WHERE uuid = ?", (client_uuid,))
+                conn.commit()
+            finally:
+                conn.close()
+
     def get_approved_hosts_for_client(self, client_uuid):
         with self.lock:
             conn = self.get_connection()
@@ -561,20 +581,7 @@ class DatabaseManager:
                     WHERE c.client_uuid = ? AND h.status = 'APPROVED'
                     ORDER BY h.is_admin DESC, h.created_at ASC
                 """, (client_uuid,))
-                rows = [dict(row) for row in cursor.fetchall()]
-                if not rows:
-                    # Check if client has an approved request in requests table
-                    cursor.execute("SELECT * FROM requests WHERE uuid = ? AND status = 'APPROVED'", (client_uuid,))
-                    req = cursor.fetchone()
-                    if req:
-                        cursor.execute("SELECT * FROM hosts WHERE status = 'APPROVED' ORDER BY is_admin DESC, created_at ASC LIMIT 1")
-                        primary = cursor.fetchone()
-                        if primary:
-                            primary_dict = dict(primary)
-                            cursor.execute("INSERT OR IGNORE INTO client_host_approvals (client_uuid, host_uuid) VALUES (?, ?)", (client_uuid, primary_dict['uuid']))
-                            conn.commit()
-                            return [primary_dict]
-                return rows
+                return [dict(row) for row in cursor.fetchall()]
             finally:
                 conn.close()
 
@@ -590,30 +597,8 @@ class DatabaseManager:
                     FROM requests r
                     JOIN client_host_approvals cha ON r.uuid = cha.client_uuid
                     LEFT JOIN client_presence c ON r.uuid = c.uuid
-                    WHERE cha.host_uuid = ?
+                    WHERE cha.host_uuid = ? AND r.status = 'APPROVED'
                 """, (host_uuid,))
-                rows = [dict(row) for row in cursor.fetchall()]
-                if not rows:
-                    cursor.execute("SELECT is_admin FROM hosts WHERE uuid = ?", (host_uuid,))
-                    h_row = cursor.fetchone()
-                    if h_row and h_row['is_admin'] == 1:
-                        cursor.execute("""
-                            SELECT r.uuid, r.name, r.reason, r.status as req_status, r.token, r.created_at,
-                                   r.client_type, r.server_address,
-                                   c.is_online, c.last_seen
-                            FROM requests r
-                            LEFT JOIN client_presence c ON r.uuid = c.uuid
-                            WHERE r.status = 'APPROVED'
-                            AND NOT EXISTS (
-                                SELECT 1 FROM client_host_approvals cha WHERE cha.client_uuid = r.uuid
-                            )
-                        """)
-                        unlinked = [dict(r) for r in cursor.fetchall()]
-                        for u in unlinked:
-                            cursor.execute("INSERT OR IGNORE INTO client_host_approvals (client_uuid, host_uuid) VALUES (?, ?)", (u['uuid'], host_uuid))
-                        if unlinked:
-                            conn.commit()
-                            rows.extend(unlinked)
-                return rows
+                return [dict(row) for row in cursor.fetchall()]
             finally:
                 conn.close()

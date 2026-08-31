@@ -155,10 +155,16 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         hosts = self.db.get_hosts()
         return len(hosts) > 0 or bool(self.db.get_setting('host_pin_token'))
 
-    def _send_fcm_tickle(self, push_token, event_id=None, event_type="event", extra_status=None):
+    def _send_fcm_tickle(self, push_token, event_id=None, event_type="event", extra_status=None, username=None):
+        if not username and push_token and self.db:
+            hosts = self.db.get_hosts()
+            for h in hosts:
+                if h.get('push_token') == push_token:
+                    username = h.get('username') or f"Mobile Device ({h['uuid'][:6]})"
+                    break
         if push_token and self.fcm:
             try:
-                self.fcm.send_tickle_notification(push_token, event_id=event_id, event_type=event_type, extra_status=extra_status)
+                self.fcm.send_tickle_notification(push_token, event_id=event_id, event_type=event_type, extra_status=extra_status, username=username)
             except Exception as e:
                 print(f"[Whisker Server] FCM tickle notification error: {e}")
 
@@ -341,22 +347,24 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 u = c.get('uuid')
                 c['is_online'] = 1 if u in active_uuids else 0
 
-            # If the requesting host is an admin or multiple hosts exist, include companion mobile apps
+            # Include companion mobile apps
+            is_admin = (host.get("is_admin", 0) == 1)
             all_hosts = self.db.get_hosts()
             for h in all_hosts:
                 if h['uuid'] != host_uuid:
-                    h_online = 1 if (h['uuid'] in active_hosts or (now - WhiskerServerHandler.host_last_seen.get(h['uuid'], 0) < 35)) else 0
                     h_status = h.get('status', 'PENDING')
-                    clients.append({
-                        "uuid": h['uuid'],
-                        "name": h.get('username') or f"Mobile Device ({h['uuid'][:6]})",
-                        "reason": f"Companion Mobile App ({h.get('username', 'Mobile')})",
-                        "req_status": f"MOBILE_{h_status}",
-                        "token": h.get('pin_token', ''),
-                        "created_at": h.get('created_at', int(time.time() * 1000)),
-                        "is_online": h_online,
-                        "is_mobile_host": True
-                    })
+                    if is_admin or h_status == 'APPROVED':
+                        h_online = 1 if (h['uuid'] in active_hosts or (now - WhiskerServerHandler.host_last_seen.get(h['uuid'], 0) < 35)) else 0
+                        clients.append({
+                            "uuid": h['uuid'],
+                            "name": h.get('username') or f"Mobile Device ({h['uuid'][:6]})",
+                            "reason": f"Companion Mobile App ({h.get('username', 'Mobile')})",
+                            "req_status": f"MOBILE_{h_status}",
+                            "token": h.get('pin_token', ''),
+                            "created_at": h.get('created_at', int(time.time() * 1000)),
+                            "is_online": h_online,
+                            "is_mobile_host": True
+                        })
 
             return self._send_json(clients)
 
@@ -531,7 +539,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                     
                     admin_push = admin.get('push_token')
                     if admin_push:
-                        self._send_fcm_tickle(admin_push, event_id=event_id, event_type="mobile_pairing")
+                        self._send_fcm_tickle(admin_push, event_id=event_id, event_type="mobile_pairing", username=admin.get('username'))
 
             return self._send_json({
                 "status": status,
@@ -615,7 +623,49 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             code = body.get('code')
             if code:
                 self.db.delete_invite(code)
+                print(f"🎟️ [Whisker Server] Deleted invite code '{code}' by host '{host.get('username') or host_uuid}'")
             return self._send_json({"success": True})
+
+        if path in ['/api/host/delete_client', '/api/host/remove_client', '/api/host/remove_contact', '/api/host/delete_host']:
+            host = self._authorize_host()
+            if not host: return
+            host_uuid = host["uuid"]
+            target_uuid = body.get('uuid') or body.get('clientUuid') or body.get('target_uuid') or body.get('host_uuid')
+            if not target_uuid:
+                return self._send_json({"error": "Missing target uuid"}, 400)
+
+            is_admin = (host.get('is_admin', 0) == 1)
+            host_name = host.get('username') or f"Host ({host_uuid[:6]})"
+
+            # Check if target is a companion mobile app (hosts table)
+            target_host = self.db.get_host(target_uuid)
+            if target_host:
+                target_name = target_host.get('username') or f"Mobile Device ({target_uuid[:6]})"
+                if is_admin or target_uuid == host_uuid:
+                    self.db.delete_host(target_uuid)
+                    with WhiskerServerHandler.streams_lock:
+                        WhiskerServerHandler.host_streams.pop(target_uuid, None)
+                    WhiskerServerHandler.host_last_seen.pop(target_uuid, None)
+                    print(f"🗑️ [Whisker Server] Removed mobile contact '{target_name}' (UUID: {target_uuid}) by host '{host_name}' (UUID: {host_uuid})")
+                    return self._send_json({"success": True, "message": f"Mobile contact '{target_name}' removed"})
+                else:
+                    return self._send_json({"error": "Unauthorized to remove mobile host"}, 403)
+
+            # Check if target is a client / approved caller (requests table)
+            target_req = self.db.get_request(target_uuid)
+            target_name = target_req.get('name') if target_req else f"Caller ({target_uuid[:6]})"
+
+            if is_admin:
+                self.db.delete_client_completely(target_uuid)
+            else:
+                self.db.remove_client_approval(target_uuid, host_uuid)
+
+            with WhiskerServerHandler.streams_lock:
+                WhiskerServerHandler.guest_streams.pop(target_uuid, None)
+            WhiskerServerHandler.guest_last_seen.pop(target_uuid, None)
+
+            print(f"🗑️ [Whisker Server] Removed approved caller '{target_name}' (UUID: {target_uuid}) by host '{host_name}' (UUID: {host_uuid})")
+            return self._send_json({"success": True, "message": f"Approved caller '{target_name}' removed"})
 
         if path == '/api/host/claim_remote_invite':
             host = self._authorize_host()
@@ -691,14 +741,39 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             approved_clients = self.db.get_approved_clients_for_host(host_uuid)
             client_req = self.db.get_request(client_uuid)
             is_req_approved = (client_req is not None and client_req.get('status') == 'APPROVED')
-            if is_req_approved:
-                self.db.add_client_host_approval(client_uuid, host_uuid)
-            is_approved = (target_host is not None) or is_req_approved or any(c['uuid'] == client_uuid for c in approved_clients)
+            is_approved = (target_host is not None) or any(c['uuid'] == client_uuid for c in approved_clients)
 
-            if not is_approved and resp_type not in ['registration_response', 'mobile_pairing_response']:
+            if not is_approved and resp_type not in ['registration_response', 'mobile_pairing_response', 'delete_client', 'remove_contact']:
                 return self._send_json({"error": "Host not paired with this client"}, 403)
 
-            if resp_type == 'registration_response' and resp_event == 'approved':
+            if resp_type in ['delete_client', 'remove_contact']:
+                target_uuid = client_uuid
+                is_admin = (host.get('is_admin', 0) == 1)
+                host_name = host.get('username') or f"Host ({host_uuid[:6]})"
+                target_h = self.db.get_host(target_uuid)
+                if target_h:
+                    target_name = target_h.get('username') or f"Mobile Device ({target_uuid[:6]})"
+                    if is_admin or target_uuid == host_uuid:
+                        self.db.delete_host(target_uuid)
+                        with WhiskerServerHandler.streams_lock:
+                            WhiskerServerHandler.host_streams.pop(target_uuid, None)
+                        WhiskerServerHandler.host_last_seen.pop(target_uuid, None)
+                        print(f"🗑️ [Whisker Server] Removed mobile contact '{target_name}' (UUID: {target_uuid}) by host '{host_name}' (UUID: {host_uuid})")
+                        return self._send_json({"success": True, "message": f"Mobile contact '{target_name}' removed"})
+                else:
+                    target_r = self.db.get_request(target_uuid)
+                    target_name = target_r.get('name') if target_r else f"Caller ({target_uuid[:6]})"
+                    if is_admin:
+                        self.db.delete_client_completely(target_uuid)
+                    else:
+                        self.db.remove_client_approval(target_uuid, host_uuid)
+                    with WhiskerServerHandler.streams_lock:
+                        WhiskerServerHandler.guest_streams.pop(target_uuid, None)
+                    WhiskerServerHandler.guest_last_seen.pop(target_uuid, None)
+                    print(f"🗑️ [Whisker Server] Removed approved caller '{target_name}' (UUID: {target_uuid}) by host '{host_name}' (UUID: {host_uuid})")
+                    return self._send_json({"success": True, "message": f"Approved caller '{target_name}' removed"})
+
+            elif resp_type == 'registration_response' and resp_event == 'approved':
                 token = body.get('token')
                 if client_uuid and token:
                     self.db.approve_request(client_uuid, token)
@@ -712,15 +787,25 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                     self.db.update_host(target_host_uuid, status='APPROVED')
                     target_h = self.db.get_host(target_host_uuid)
                     if target_h and target_h.get('push_token'):
-                        self._send_fcm_tickle(target_h['push_token'], event_id=target_host_uuid, event_type="mobile_pairing", extra_status="approved")
+                        self._send_fcm_tickle(target_h['push_token'], event_id=target_host_uuid, event_type="mobile_pairing", extra_status="approved", username=target_h.get('username'))
+                    print(f"✅ [Whisker Server] Approved companion mobile app '{target_h.get('username') if target_h else target_host_uuid}' (UUID: {target_host_uuid}) by host '{host.get('username') or host_uuid}'")
                         
-            elif resp_type == 'mobile_pairing_response' and resp_event == 'rejected':
+            elif resp_type == 'mobile_pairing_response' and resp_event in ['rejected', 'delete', 'deleted', 'remove']:
                 target_host_uuid = body.get('uuid') or body.get('host_uuid')
                 if target_host_uuid:
-                    self.db.update_host(target_host_uuid, status='REJECTED')
                     target_h = self.db.get_host(target_host_uuid)
-                    if target_h and target_h.get('push_token'):
-                        self._send_fcm_tickle(target_h['push_token'], event_id=target_host_uuid, event_type="mobile_pairing", extra_status="rejected")
+                    target_name = target_h.get('username') if target_h else target_host_uuid
+                    if resp_event in ['delete', 'deleted', 'remove']:
+                        self.db.delete_host(target_host_uuid)
+                        with WhiskerServerHandler.streams_lock:
+                            WhiskerServerHandler.host_streams.pop(target_host_uuid, None)
+                        WhiskerServerHandler.host_last_seen.pop(target_host_uuid, None)
+                        print(f"🗑️ [Whisker Server] Deleted companion mobile app '{target_name}' (UUID: {target_host_uuid}) by host '{host.get('username') or host_uuid}'")
+                    else:
+                        self.db.update_host(target_host_uuid, status='REJECTED')
+                        if target_h and target_h.get('push_token'):
+                            self._send_fcm_tickle(target_h['push_token'], event_id=target_host_uuid, event_type="mobile_pairing", extra_status="rejected", username=target_h.get('username'))
+                        print(f"❌ [Whisker Server] Rejected companion mobile app '{target_name}' (UUID: {target_host_uuid}) by host '{host.get('username') or host_uuid}'")
                         
             elif resp_type in ['chat_message', 'message'] and (body.get('sender') == 'phone' or 'text' in body):
                 text = body.get('text', '')
@@ -751,7 +836,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                         self.db.add_host_event(target_host['uuid'], event_id, "message", payload)
                         self._notify_host_streams(target_host['uuid'], "message", payload)
                         if target_host.get('push_token'):
-                            self._send_fcm_tickle(target_host['push_token'], event_id=msg_id, event_type="message")
+                            self._send_fcm_tickle(target_host['push_token'], event_id=msg_id, event_type="message", username=target_host.get('username'))
                         return self._send_json({"message": "Message routed to companion mobile app", "messageId": msg_id})
 
             if target_host and (resp_type in ['webrtc_call_initiate', 'call'] or resp_event in ['call_initiate', 'call']):
@@ -769,7 +854,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 self.db.add_host_event(target_host['uuid'], event_id, "call", payload)
                 self._notify_host_streams(target_host['uuid'], "call", payload)
                 if target_host.get('push_token'):
-                    self._send_fcm_tickle(target_host['push_token'], event_id=event_id, event_type="call")
+                    self._send_fcm_tickle(target_host['push_token'], event_id=event_id, event_type="call", username=target_host.get('username'))
                 return self._send_json({"message": "Call routed to companion mobile app"})
 
             if target_host and (resp_type in ['webrtc_call_answer', 'webrtc_ice_candidate'] or resp_event in ['call_answered', 'ice_candidate']):
@@ -838,7 +923,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 self.db.add_host_event(host['uuid'], event_id, "visitor", payload)
                 self._notify_host_streams(host['uuid'], "visitor", payload)
                 if host.get('push_token'):
-                    self._send_fcm_tickle(host['push_token'], event_id=event_id, event_type="visitor")
+                    self._send_fcm_tickle(host['push_token'], event_id=event_id, event_type="visitor", username=host.get('username'))
 
             return self._send_json({"status": "queued", "eventId": event_id})
 
@@ -881,7 +966,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 self.db.add_host_event(invite_host_uuid, event_id, "invite_claimed", payload)
                 self._notify_host_streams(invite_host_uuid, "invite_claimed", payload)
                 if host and host.get('push_token'):
-                    self._send_fcm_tickle(host['push_token'], event_type="invite_claimed")
+                    self._send_fcm_tickle(host['push_token'], event_type="invite_claimed", username=host.get('username'))
 
             print(f"🎟️ [Whisker Invite Claimed] Code: '{code}' | Guest: '{client_name}' ({client_uuid}) | Host: '{host_name}' ({invite_host_uuid})")
 
@@ -935,7 +1020,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             self._notify_host_streams(host_uuid, "message", payload)
             
             if push_token:
-                self._send_fcm_tickle(push_token, event_id=msg_id, event_type="message")
+                self._send_fcm_tickle(push_token, event_id=msg_id, event_type="message", username=host.get('username'))
 
             return self._send_json({
                 "status": "delivered",
@@ -1000,7 +1085,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             self._notify_host_streams(host_uuid, "call", payload)
             
             if push_token:
-                self._send_fcm_tickle(push_token, event_id=event_id, event_type="call")
+                self._send_fcm_tickle(push_token, event_id=event_id, event_type="call", username=host.get('username'))
 
             return self._send_json({"status": "dialing", "eventId": event_id, "host_uuid": host_uuid})
 
@@ -1036,13 +1121,15 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 "event": "hangup",
                 "eventId": event_id,
                 "uuid": uuid,
-                "token": token or ""
+                "token": token or "",
+                "status": body.get("status", ""),
+                "reason": body.get("reason", "")
             }
             self.db.add_host_event(host_uuid, event_id, "hangup", payload)
             self._notify_host_streams(host_uuid, "hangup", payload)
             
             if push_token:
-                self._send_fcm_tickle(push_token, event_id=event_id, event_type="hangup")
+                self._send_fcm_tickle(push_token, event_id=event_id, event_type="hangup", username=host.get('username'))
 
             return self._send_json({"status": "hungup"})
 
@@ -1084,7 +1171,9 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 "token": token or "",
                 "type": sig_type,
                 "candidate": body.get('candidate'),
-                "sdp": body.get('sdp')
+                "sdp": body.get('sdp'),
+                "status": body.get("status", ""),
+                "reason": body.get("reason", "")
             }
             self.db.add_host_event(host_uuid, event_id, "signal", payload)
             self._notify_host_streams(host_uuid, "signal", payload)

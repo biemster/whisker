@@ -21,6 +21,24 @@
             0%, 100% { box-shadow: 0 0 10px rgba(6, 182, 212, 0.2); }
             50% { box-shadow: 0 0 25px rgba(6, 182, 212, 0.6); }
         }
+        .audio-wave-bar {
+            width: 4px;
+            background: linear-gradient(to top, #06b6d4, #10b981);
+            border-radius: 9999px;
+            animation: bounce-wave 1.2s ease-in-out infinite alternate;
+        }
+        @keyframes bounce-wave {
+            0% { height: 6px; opacity: 0.4; }
+            50% { height: 28px; opacity: 0.85; }
+            100% { height: 12px; opacity: 0.6; }
+        }
+        .pulse-ring-aura {
+            animation: aura-expand 2.2s cubic-bezier(0.25, 1, 0.5, 1) infinite;
+        }
+        @keyframes aura-expand {
+            0% { transform: scale(0.9); opacity: 0.8; }
+            100% { transform: scale(1.6); opacity: 0; }
+        }
     </style>
     <script>
         window.HOME_SERVER_URL = "";
@@ -145,6 +163,22 @@
         </div>
     </div>
 
+    <!-- CALL DECLINED / REJECTED INFO MODAL -->
+    <div id="callDeclinedModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+        <div class="bg-gray-900 border border-gray-800 rounded-3xl p-6 max-w-sm w-full space-y-4 text-center shadow-2xl">
+            <div class="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center mx-auto text-3xl text-red-400">
+                📵
+            </div>
+            <div>
+                <h3 class="text-lg font-bold text-white">Call Declined</h3>
+                <p id="callDeclinedModalDesc" class="text-xs text-gray-400 mt-1">The host or recipient declined the call.</p>
+            </div>
+            <button onclick="dismissCallDeclinedModal()" class="w-full bg-cyan-500 hover:bg-cyan-400 text-black font-bold py-3 rounded-2xl transition shadow-lg shadow-cyan-500/20 active:scale-95 text-sm">
+                OK
+            </button>
+        </div>
+    </div>
+
     <main class="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-center">
 
         <!-- STEP 1: CHOOSE NAME & REASON FLUID WINDOW -->
@@ -214,42 +248,118 @@
         <div id="provisionedView" class="hidden grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 transition-all duration-300">
             
             <!-- CALL PANEL -->
-            <div id="callCard" class="bg-gray-900 border border-gray-800 p-4 md:p-5 rounded-3xl space-y-3 transition-all duration-300 flex flex-col justify-between">
+            <div id="callCard" class="bg-gray-900/90 backdrop-blur-md border border-gray-800 p-4 md:p-5 rounded-3xl space-y-3.5 transition-all duration-300 flex flex-col justify-between shadow-xl">
                 <div class="flex justify-between items-center px-1">
-                    <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider">Session Active</span>
-                    <span id="approvedName" class="text-xs bg-cyan-950 text-cyan-400 border border-cyan-800 px-2 py-0.5 rounded-full font-mono">Guest</span>
+                    <div class="flex items-center space-x-2">
+                        <span id="liveCallIndicator" class="hidden flex items-center space-x-1.5 bg-emerald-500/15 border border-emerald-500/40 text-emerald-400 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full">
+                            <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                            <span>LIVE P2P</span>
+                        </span>
+                        <span id="sessionStatusBadge" class="text-xs text-gray-400 font-semibold uppercase tracking-wider">Session Active</span>
+                    </div>
+                    <span id="approvedName" class="text-xs bg-cyan-950/80 text-cyan-400 border border-cyan-800/80 px-2.5 py-0.5 rounded-full font-mono">Guest</span>
                 </div>
 
-                <!-- VIDEO CONTAINER -->
-                <div id="videoBoxContainer" class="relative bg-gray-950 border border-gray-850 rounded-2xl h-36 md:h-44 transition-all duration-300 overflow-hidden flex items-center justify-center">
+                <!-- VIDEO / AUDIO CALL CONTAINER -->
+                <div id="videoBoxContainer" class="relative bg-gray-950 border border-gray-800 rounded-2xl h-36 md:h-44 transition-all duration-300 overflow-hidden flex items-center justify-center shadow-inner">
+                    <!-- VIDEO STREAMS -->
                     <video id="remoteVideo" autoplay playsinline class="w-full h-full object-cover hidden"></video>
-                    <video id="localVideo" autoplay playsinline muted class="absolute bottom-2 right-2 w-20 h-16 bg-black rounded-lg border border-cyan-500 hidden object-cover z-10"></video>
-                    <div id="videoPlaceholder" class="text-center space-y-1.5 p-4">
-                        <span class="text-3xl">🎙️</span>
-                        <p class="text-xs text-gray-400">Ready to initiate call</p>
+                    <video id="localVideo" autoplay playsinline muted class="absolute bottom-2.5 right-2.5 w-24 h-18 bg-gray-900 rounded-xl border-2 border-cyan-400 shadow-xl hidden object-cover z-10 transition-all"></video>
+                    
+                    <!-- AUDIO-ONLY CALL VISUALIZER -->
+                    <div id="audioVisualizerContainer" class="hidden flex flex-col items-center justify-center p-4 w-full h-full space-y-3 z-10">
+                        <div class="relative flex items-center justify-center">
+                            <div class="absolute w-20 h-20 rounded-full bg-cyan-500/20 pulse-ring-aura"></div>
+                            <div class="absolute w-16 h-16 rounded-full bg-emerald-500/20 pulse-ring-aura" style="animation-delay: 0.8s;"></div>
+                            <div class="w-14 h-14 rounded-full bg-gradient-to-tr from-cyan-600 to-emerald-500 flex items-center justify-center text-xl font-bold text-white shadow-lg shadow-cyan-500/30 z-10">
+                                🎙️
+                            </div>
+                        </div>
+                        <div class="text-center">
+                            <h4 id="audioCallPeerName" class="text-xs font-bold text-white">Voice Call Connected</h4>
+                            <p class="text-[10px] text-cyan-400 font-mono">Live Audio Stream</p>
+                        </div>
+                        <!-- EQUALIZER SOUNDWAVE BARS -->
+                        <div class="flex items-center space-x-1 h-8 px-4 py-1">
+                            <div class="audio-wave-bar" style="animation-delay: 0.1s; height: 14px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.4s; height: 22px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.2s; height: 8px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.6s; height: 26px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.3s; height: 18px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.8s; height: 12px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.5s; height: 24px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.15s; height: 10px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.7s; height: 28px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.35s; height: 16px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.9s; height: 20px;"></div>
+                            <div class="audio-wave-bar" style="animation-delay: 0.25s; height: 14px;"></div>
+                        </div>
+                    </div>
+
+                    <!-- DYNAMIC INITIALIZING VIDEO PLACEHOLDER -->
+                    <div id="videoPlaceholder" class="text-center space-y-2 p-4 flex flex-col items-center justify-center w-full h-full">
+                        <div class="relative flex items-center justify-center">
+                            <div class="w-12 h-12 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center mx-auto text-xl text-cyan-400">
+                                📞
+                            </div>
+                        </div>
+                        <p class="text-xs font-medium text-gray-400">Ready to initiate secure call</p>
+                    </div>
+
+                    <!-- FLOATING CALL TIMER BADGE ON VIDEO/AUDIO CONTAINER -->
+                    <div id="floatingCallTimer" class="hidden absolute top-2.5 right-2.5 z-20 bg-gray-900/90 backdrop-blur border border-white/20 text-white text-xs font-mono font-bold px-2.5 py-1 rounded-xl shadow-lg flex items-center space-x-1.5">
+                        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                        <span id="floatingCallTimerText">00:00</span>
                     </div>
                 </div>
 
-                <!-- CONTROLS -->
-                <div class="grid grid-cols-3 gap-2">
+                <!-- IDLE CALL CONTROLS -->
+                <div id="idleCallControls" class="grid grid-cols-2 gap-2.5">
                     <button id="audioCallBtn" onclick="toggleCall(false)" 
-                            class="bg-gray-800 hover:bg-gray-700 text-cyan-400 p-2.5 md:p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700">
-                        <span>📞</span>
+                            class="bg-gray-800/80 hover:bg-gray-700 text-cyan-400 hover:text-white p-3 rounded-2xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700 shadow-md active:scale-95">
+                        <span class="text-base">📞</span>
                         <span>Audio Call</span>
                     </button>
                     <button id="videoCallBtn" onclick="toggleCall(true)" 
-                            class="bg-gray-800 hover:bg-gray-700 text-cyan-400 p-2.5 md:p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700">
-                        <span>📹</span>
+                            class="bg-cyan-500 hover:bg-cyan-400 text-black p-3 rounded-2xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold shadow-lg shadow-cyan-500/20 active:scale-95">
+                        <span class="text-base">📹</span>
                         <span>Video Call</span>
                     </button>
-                    <button id="hangUpBtn" onclick="hangUpCall()" disabled 
-                            class="bg-red-950 hover:bg-red-900 text-red-400 p-2.5 md:p-3 rounded-xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-red-800 opacity-50 cursor-not-allowed">
-                        <span>🛑</span>
-                        <span>End Call</span>
+                </div>
+
+                <!-- ACTIVE IN-CALL CONTROLS -->
+                <div id="inCallControls" class="hidden grid grid-cols-4 gap-2">
+                    <!-- MIC TOGGLE -->
+                    <button id="webMicBtn" type="button" onclick="toggleWebMic()" 
+                            class="bg-gray-800/90 hover:bg-gray-700 text-gray-200 p-2.5 rounded-2xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700">
+                        <span id="webMicIcon" class="text-sm">🎙️</span>
+                        <span id="webMicText" class="text-[10px]">Mute</span>
+                    </button>
+
+                    <!-- CAM TOGGLE -->
+                    <button id="webCamBtn" type="button" onclick="toggleWebCam()" 
+                            class="bg-gray-800/90 hover:bg-gray-700 text-gray-200 p-2.5 rounded-2xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700">
+                        <span id="webCamIcon" class="text-sm">📹</span>
+                        <span id="webCamText" class="text-[10px]">Camera</span>
+                    </button>
+
+                    <!-- EXPAND VIDEO -->
+                    <button id="webExpandBtn" type="button" onclick="toggleVideoExpand()" 
+                            class="bg-gray-800/90 hover:bg-gray-700 text-gray-200 p-2.5 rounded-2xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700" title="Expand video size">
+                        <span id="webExpandIcon" class="text-sm">⛶</span>
+                        <span id="webExpandText" class="text-[10px]">Expand</span>
+                    </button>
+
+                    <!-- END CALL -->
+                    <button id="hangUpBtn" type="button" onclick="hangUpCall()" 
+                            class="bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 text-white p-2.5 rounded-2xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold shadow-lg shadow-red-500/25 active:scale-95 border border-red-400/40">
+                        <span class="text-sm">🛑</span>
+                        <span class="text-[10px]">End</span>
                     </button>
                 </div>
-                <div class="flex justify-between items-center text-xs px-1 pt-1 border-t border-gray-850">
-                    <span id="callDuration" class="font-mono text-[11px] text-cyan-400">CALL IDLE</span>
+
+                <div class="flex justify-between items-center text-xs px-1 pt-1 border-t border-gray-800">
+                    <span id="callDuration" class="font-mono text-[11px] text-cyan-400 font-semibold">CALL IDLE</span>
                     <button onclick="resetCredentials()" class="text-[11px] text-gray-500 hover:text-red-400 transition">
                         Disconnect
                     </button>
@@ -319,6 +429,164 @@
         let e2eStatusInterval = null;
         let directCallTimeoutTimer = null;
         let isDirectCallMode = false;
+        let isWebMicMuted = false;
+        let isWebCamDisabled = false;
+        let isVideoExpanded = false;
+
+        function setCallLayoutActive(active, isVideo = true) {
+            const provView = document.getElementById('provisionedView');
+            const callCard = document.getElementById('callCard');
+            const videoBox = document.getElementById('videoBoxContainer');
+            const chatCard = document.getElementById('chatCard');
+            const idleControls = document.getElementById('idleCallControls');
+            const inCallControls = document.getElementById('inCallControls');
+            const liveIndicator = document.getElementById('liveCallIndicator');
+            const statusBadge = document.getElementById('sessionStatusBadge');
+            const floatingTimer = document.getElementById('floatingCallTimer');
+            const audioVis = document.getElementById('audioVisualizerContainer');
+            const remoteVid = document.getElementById('remoteVideo');
+            const localVid = document.getElementById('localVideo');
+            const placeholder = document.getElementById('videoPlaceholder');
+            const webCamBtn = document.getElementById('webCamBtn');
+            const webExpandBtn = document.getElementById('webExpandBtn');
+
+            if (active) {
+                if (provView) provView.className = "flex flex-col space-y-3 md:space-y-4 transition-all duration-300";
+                if (callCard) callCard.className = "w-full bg-gray-900/90 backdrop-blur-md border border-gray-800 p-4 md:p-6 rounded-3xl space-y-3.5 transition-all duration-300 shadow-2xl";
+                
+                if (videoBox) {
+                    if (isVideo) {
+                        videoBox.className = "relative bg-gray-950 border border-gray-800 rounded-2xl h-64 md:h-[420px] max-h-[60vh] md:max-h-[66vh] transition-all duration-300 overflow-hidden flex items-center justify-center w-full shadow-inner";
+                    } else {
+                        videoBox.className = "relative bg-gradient-to-b from-gray-900 to-gray-950 border border-cyan-500/20 rounded-2xl h-52 md:h-64 transition-all duration-300 overflow-hidden flex items-center justify-center w-full shadow-inner";
+                    }
+                }
+                if (chatCard) chatCard.className = "w-full bg-gray-900 border border-gray-800 rounded-3xl flex flex-col h-[360px] md:h-[420px] transition-all duration-300";
+
+                if (idleControls) idleControls.classList.add('hidden');
+                if (inCallControls) inCallControls.classList.remove('hidden');
+                if (floatingTimer) floatingTimer.classList.remove('hidden');
+                if (liveIndicator) liveIndicator.classList.remove('hidden');
+                if (statusBadge) statusBadge.classList.add('hidden');
+
+                if (isVideo) {
+                    if (audioVis) audioVis.classList.add('hidden');
+                    if (webCamBtn) webCamBtn.classList.remove('hidden');
+                    if (webExpandBtn) webExpandBtn.classList.remove('hidden');
+                } else {
+                    // Audio-only mode: hide video elements, show audio visualizer
+                    if (remoteVid) remoteVid.classList.add('hidden');
+                    if (localVid) localVid.classList.add('hidden');
+                    if (placeholder) placeholder.classList.add('hidden');
+                    if (audioVis) {
+                        audioVis.classList.remove('hidden');
+                        const peerNameEl = document.getElementById('audioCallPeerName');
+                        if (peerNameEl) peerNameEl.innerText = hostName ? ("Connected with " + hostName) : "Voice Call Connected";
+                    }
+                    if (webCamBtn) webCamBtn.classList.add('hidden');
+                    if (webExpandBtn) webExpandBtn.classList.add('hidden');
+                }
+
+                isWebMicMuted = false;
+                isWebCamDisabled = false;
+                updateWebInCallControlsUi();
+            } else {
+                if (provView) provView.className = "grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 transition-all duration-300";
+                if (callCard) callCard.className = "bg-gray-900/90 backdrop-blur-md border border-gray-800 p-4 md:p-5 rounded-3xl space-y-3.5 transition-all duration-300 flex flex-col justify-between shadow-xl";
+                if (videoBox) {
+                    videoBox.className = "relative bg-gray-950 border border-gray-800 rounded-2xl h-36 md:h-44 transition-all duration-300 overflow-hidden flex items-center justify-center shadow-inner";
+                }
+                if (chatCard) chatCard.className = "md:col-span-2 bg-gray-900 border border-gray-800 rounded-3xl flex flex-col h-[460px] md:h-[500px] transition-all duration-300";
+
+                if (idleControls) idleControls.classList.remove('hidden');
+                if (inCallControls) inCallControls.classList.add('hidden');
+                if (floatingTimer) floatingTimer.classList.add('hidden');
+                if (audioVis) audioVis.classList.add('hidden');
+                if (remoteVid) remoteVid.classList.add('hidden');
+                if (localVid) localVid.classList.add('hidden');
+                if (placeholder) placeholder.classList.remove('hidden');
+                if (liveIndicator) liveIndicator.classList.add('hidden');
+                if (statusBadge) statusBadge.classList.remove('hidden');
+                if (webCamBtn) webCamBtn.classList.remove('hidden');
+                if (webExpandBtn) webExpandBtn.classList.remove('hidden');
+
+                isVideoExpanded = false;
+                const expandText = document.getElementById('webExpandText');
+                if (expandText) expandText.innerText = "Expand";
+            }
+        }
+
+        function toggleWebMic() {
+            isWebMicMuted = !isWebMicMuted;
+            if (window.currentLocalStream) {
+                window.currentLocalStream.getAudioTracks().forEach(t => {
+                    t.enabled = !isWebMicMuted;
+                });
+            }
+            updateWebInCallControlsUi();
+        }
+
+        function toggleWebCam() {
+            isWebCamDisabled = !isWebCamDisabled;
+            if (window.currentLocalStream) {
+                window.currentLocalStream.getVideoTracks().forEach(t => {
+                    t.enabled = !isWebCamDisabled;
+                });
+            }
+            updateWebInCallControlsUi();
+        }
+
+        function toggleVideoExpand() {
+            isVideoExpanded = !isVideoExpanded;
+            const videoContainer = document.getElementById('videoBoxContainer');
+            const expandIcon = document.getElementById('webExpandIcon');
+            const expandText = document.getElementById('webExpandText');
+            if (videoContainer) {
+                if (isVideoExpanded) {
+                    videoContainer.classList.remove('h-36', 'md:h-44', 'h-64', 'md:h-80');
+                    videoContainer.classList.add('h-96', 'md:h-[460px]');
+                    if (expandIcon) expandIcon.innerText = "🗗";
+                    if (expandText) expandText.innerText = "Compact";
+                } else {
+                    videoContainer.classList.remove('h-96', 'md:h-[460px]');
+                    videoContainer.classList.add('h-64', 'md:h-80');
+                    if (expandIcon) expandIcon.innerText = "⛶";
+                    if (expandText) expandText.innerText = "Expand";
+                }
+            }
+        }
+
+        function updateWebInCallControlsUi() {
+            const micBtn = document.getElementById('webMicBtn');
+            const micIcon = document.getElementById('webMicIcon');
+            const micText = document.getElementById('webMicText');
+            if (micBtn) {
+                if (isWebMicMuted) {
+                    micBtn.className = "bg-red-600/90 hover:bg-red-600 text-white p-2.5 rounded-2xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-red-500 shadow-md shadow-red-500/20 active:scale-95";
+                    if (micIcon) micIcon.innerText = "🔇";
+                    if (micText) micText.innerText = "Muted";
+                } else {
+                    micBtn.className = "bg-gray-800/90 hover:bg-gray-700 text-gray-200 p-2.5 rounded-2xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700 active:scale-95";
+                    if (micIcon) micIcon.innerText = "🎙️";
+                    if (micText) micText.innerText = "Mute";
+                }
+            }
+
+            const camBtn = document.getElementById('webCamBtn');
+            const camIcon = document.getElementById('webCamIcon');
+            const camText = document.getElementById('webCamText');
+            if (camBtn) {
+                if (isWebCamDisabled) {
+                    camBtn.className = "bg-red-600/90 hover:bg-red-600 text-white p-2.5 rounded-2xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-red-500 shadow-md shadow-red-500/20 active:scale-95";
+                    if (camIcon) camIcon.innerText = "🚫";
+                    if (camText) camText.innerText = "Cam Off";
+                } else {
+                    camBtn.className = "bg-gray-800/90 hover:bg-gray-700 text-gray-200 p-2.5 rounded-2xl flex flex-col items-center justify-center space-y-1 transition text-xs font-bold border border-gray-700 active:scale-95";
+                    if (camIcon) camIcon.innerText = "📹";
+                    if (camText) camText.innerText = "Camera";
+                }
+            }
+        }
 
         function downloadChatHistory() {
             if (!chatLogs || chatLogs.length === 0) {
@@ -816,27 +1084,6 @@
                 });
         }
 
-        function setCallLayoutActive(active) {
-            const provView = document.getElementById('provisionedView');
-            const callCard = document.getElementById('callCard');
-            const videoBox = document.getElementById('videoBoxContainer');
-            const chatCard = document.getElementById('chatCard');
-
-            if (!provView || !callCard || !videoBox || !chatCard) return;
-
-            if (active) {
-                provView.className = "flex flex-col space-y-3 md:space-y-4 transition-all duration-300";
-                callCard.className = "w-full bg-gray-900 border border-gray-800 p-4 md:p-6 rounded-3xl space-y-3 transition-all duration-300";
-                videoBox.className = "relative bg-gray-950 border border-gray-850 rounded-2xl h-64 md:h-[420px] max-h-[60vh] md:max-h-[66vh] transition-all duration-300 overflow-hidden flex items-center justify-center w-full";
-                chatCard.className = "w-full bg-gray-900 border border-gray-800 rounded-3xl flex flex-col h-[360px] md:h-[420px] transition-all duration-300";
-            } else {
-                provView.className = "grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 transition-all duration-300";
-                callCard.className = "bg-gray-900 border border-gray-800 p-4 md:p-5 rounded-3xl space-y-3 transition-all duration-300 flex flex-col justify-between";
-                videoBox.className = "relative bg-gray-950 border border-gray-850 rounded-2xl h-36 md:h-44 transition-all duration-300 overflow-hidden flex items-center justify-center";
-                chatCard.className = "md:col-span-2 bg-gray-900 border border-gray-800 rounded-3xl flex flex-col h-[460px] md:h-[500px] transition-all duration-300";
-            }
-        }
-
         function initSession() {
             if (clientToken) {
                 document.getElementById('statusDot').className = "w-2.5 h-2.5 rounded-full bg-green-500";
@@ -1037,12 +1284,18 @@
                         console.error("Error parsing ICE candidate", e);
                     }
                 }
-            } else if (payload.type === "webrtc_call_hangup" || payload.event === "call_ended") {
+            } else if (payload.type === "webrtc_call_hangup" || payload.event === "call_ended" || payload.event === "call_declined" || payload.event === "hangup") {
                 stopRingtone();
                 const incModal = document.getElementById('incomingCallModal');
                 if (incModal) incModal.classList.add('hidden');
                 pendingIncomingCallOffer = null;
+                const isDecline = (payload.status === "declined" || payload.reason === "declined" || payload.event === "call_declined" || payload.type === "call_declined" || payload.type === "call_rejected" || (!isCallActive && callSeconds === 0));
+                
                 hangUpCall(true);
+                
+                if (isDecline) {
+                    showCallDeclinedModal(payload.name || hostName || "Host");
+                }
             }
         }
 
@@ -1311,23 +1564,44 @@
             canvas.width = 640;
             canvas.height = 480;
             const ctx = canvas.getContext('2d');
-            let angle = 0;
-            setInterval(() => {
-                angle = (angle + 0.08) % (Math.PI * 2);
-                ctx.fillStyle = '#0F172A';
-                ctx.fillRect(0, 0, 640, 480);
-                ctx.fillStyle = '#0284C7';
+            let t = 0;
+            const drawAnim = () => {
+                t += 0.05;
+                const w = canvas.width;
+                const h = canvas.height;
+                // Deep background gradient
+                const grad = ctx.createLinearGradient(0, 0, w, h);
+                grad.addColorStop(0, '#0a101f');
+                grad.addColorStop(1, '#020617');
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, w, h);
+
+                // Animated glowing circles
+                for (let i = 1; i <= 3; i++) {
+                    const radius = (Math.sin(t + i * 1.5) * 0.2 + 0.8) * (50 + i * 25);
+                    ctx.beginPath();
+                    ctx.arc(w / 2, h / 2, radius, 0, Math.PI * 2);
+                    ctx.strokeStyle = `rgba(6, 182, 212, ${0.35 / i})`;
+                    ctx.lineWidth = 2.5;
+                    ctx.stroke();
+                }
+
+                // Dynamic central core
                 ctx.beginPath();
-                ctx.arc(320, 200 + Math.sin(angle) * 15, 65, 0, Math.PI * 2);
+                ctx.arc(w / 2, h / 2, 28 + Math.sin(t * 2) * 5, 0, Math.PI * 2);
+                ctx.fillStyle = '#06b6d4';
+                ctx.shadowColor = '#38bdf8';
+                ctx.shadowBlur = 15;
                 ctx.fill();
-                ctx.fillStyle = '#E0F2FE';
-                ctx.font = 'bold 24px sans-serif';
+                ctx.shadowBlur = 0;
+
+                // Center icon / label
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 22px system-ui, sans-serif';
                 ctx.textAlign = 'center';
-                ctx.fillText(label || 'VIRTUAL STREAM', 320, 320);
-                ctx.fillStyle = '#38BDF8';
-                ctx.font = '16px monospace';
-                ctx.fillText("LIVE P2P WEBRTC SIGNAL", 320, 355);
-            }, 50);
+                ctx.fillText(label || 'Whisker Stream', w / 2, h / 2 + 65);
+            };
+            setInterval(drawAnim, 50);
 
             const stream = canvas.captureStream(30);
             try {
@@ -1347,14 +1621,20 @@
 
         async function toggleCall(isVideo, isDirectCall = false, directReason = '', targetHostUuid = '') {
             isCallActive = true;
-            setCallLayoutActive(true);
+            setCallLayoutActive(true, isVideo);
             document.getElementById('audioCallBtn').disabled = true;
             document.getElementById('videoCallBtn').disabled = true;
             document.getElementById('hangUpBtn').disabled = false;
             
-            document.getElementById('localVideo').classList.remove('hidden');
-            document.getElementById('videoPlaceholder').classList.add('hidden');
-            document.getElementById('callDuration').innerText = isDirectCall ? "DIRECT CALLING (10s)..." : "ROUTING CALL SIGNAL...";
+            if (isVideo) {
+                document.getElementById('localVideo').classList.remove('hidden');
+                document.getElementById('videoPlaceholder').classList.add('hidden');
+            } else {
+                document.getElementById('localVideo').classList.add('hidden');
+                document.getElementById('remoteVideo').classList.add('hidden');
+                document.getElementById('videoPlaceholder').classList.add('hidden');
+            }
+            document.getElementById('callDuration').innerText = isDirectCall ? "DIRECT CALLING (10s)..." : "CONNECTING...";
             
             let localStream;
             try {
@@ -1367,6 +1647,7 @@
                 }
                 return;
             }
+            window.currentLocalStream = localStream;
             const localVid = document.getElementById('localVideo');
             if (localVid) localVid.srcObject = localStream;
 
@@ -1477,11 +1758,14 @@
             } else {
                 callSeconds = 0;
                 if (callTimer) clearInterval(callTimer);
+                const timerEl = document.getElementById('floatingCallTimerText');
+                if (timerEl) timerEl.innerText = "00:00";
                 callTimer = setInterval(() => {
                     callSeconds++;
                     const mins = Math.floor(callSeconds / 60).toString().padStart(2, '0');
                     const secs = (callSeconds % 60).toString().padStart(2, '0');
                     document.getElementById('callDuration').innerText = "CALL ALIVE • " + mins + ":" + secs;
+                    if (timerEl) timerEl.innerText = mins + ":" + secs;
                 }, 1000);
             }
         }
@@ -1564,22 +1848,56 @@
             playRingtone();
         }
 
+        function showCallDeclinedModal(peerName) {
+            const modal = document.getElementById('callDeclinedModal');
+            const desc = document.getElementById('callDeclinedModalDesc');
+            if (desc) desc.innerText = (peerName ? peerName : "The recipient") + " declined the call.";
+            if (modal) modal.classList.remove('hidden');
+        }
+
+        function dismissCallDeclinedModal() {
+            const modal = document.getElementById('callDeclinedModal');
+            if (modal) modal.classList.add('hidden');
+            if (isDirectCallMode || clientUuid.startsWith('direct_')) {
+                clientUuid = '';
+                showView('unprovisionedView');
+                checkE2eStatus();
+            }
+        }
+
         function declineIncomingCall() {
             stopRingtone();
             const modalEl = document.getElementById('incomingCallModal');
             if (modalEl) modalEl.classList.add('hidden');
             if (pendingIncomingCallOffer) {
+                const payload = {
+                    event: "signal",
+                    type: "webrtc_call_hangup",
+                    status: "declined",
+                    reason: "declined",
+                    uuid: clientUuid,
+                    token: clientToken || "",
+                    host_uuid: hostUuid || ""
+                };
                 fetch(HOME_SERVER_URL + "/api/signal", {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                }).catch(e => console.error("Error declining call via signal", e));
+
+                fetch(HOME_SERVER_URL + "/api/hangup", {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        event: "signal",
-                        type: "webrtc_call_hangup",
+                        event: "hangup",
+                        status: "declined",
+                        reason: "declined",
                         uuid: clientUuid,
                         token: clientToken || "",
                         host_uuid: hostUuid || ""
                     })
-                }).catch(e => console.error("Error declining call", e));
+                }).catch(e => console.error("Error declining call via hangup", e));
+
                 pendingIncomingCallOffer = null;
             }
         }
@@ -1598,16 +1916,24 @@
         async function executeAcceptCall(payload) {
             if (isCallActive && window.pc) return;
             isCallActive = true;
-            setCallLayoutActive(true);
+            let isVideo = payload.video !== false;
+            setCallLayoutActive(true, isVideo);
             document.getElementById('audioCallBtn').disabled = true;
             document.getElementById('videoCallBtn').disabled = true;
             document.getElementById('hangUpBtn').disabled = false;
             document.getElementById('callDuration').innerText = "CONNECTING...";
-            document.getElementById('localVideo').classList.remove('hidden');
-            document.getElementById('videoPlaceholder').classList.add('hidden');
+            
+            if (isVideo) {
+                document.getElementById('localVideo').classList.remove('hidden');
+                document.getElementById('videoPlaceholder').classList.add('hidden');
+            } else {
+                document.getElementById('localVideo').classList.add('hidden');
+                document.getElementById('remoteVideo').classList.add('hidden');
+                document.getElementById('videoPlaceholder').classList.add('hidden');
+            }
 
-            let isVideo = payload.video !== false;
             let localStream = await acquireLocalMediaStream(isVideo, clientName || "Web Client");
+            window.currentLocalStream = localStream;
             const localVid = document.getElementById('localVideo');
             if (localVid) localVid.srcObject = localStream;
 
@@ -1674,11 +2000,14 @@
 
             callSeconds = 0;
             if (callTimer) clearInterval(callTimer);
+            const acceptTimerEl = document.getElementById('floatingCallTimerText');
+            if (acceptTimerEl) acceptTimerEl.innerText = "00:00";
             callTimer = setInterval(() => {
                 callSeconds++;
                 const mins = Math.floor(callSeconds / 60).toString().padStart(2, '0');
                 const secs = (callSeconds % 60).toString().padStart(2, '0');
                 document.getElementById('callDuration').innerText = "CALL ALIVE • " + mins + ":" + secs;
+                if (acceptTimerEl) acceptTimerEl.innerText = mins + ":" + secs;
             }, 1000);
         }
 
@@ -1709,6 +2038,12 @@
             if (localVid && localVid.srcObject) {
                 localVid.srcObject.getTracks().forEach(track => track.stop());
                 localVid.srcObject = null;
+            }
+            if (window.currentLocalStream) {
+                window.currentLocalStream.getTracks().forEach(track => {
+                    try { track.stop(); } catch(e) {}
+                });
+                window.currentLocalStream = null;
             }
             if (window.pc) {
                 window.pc.close();

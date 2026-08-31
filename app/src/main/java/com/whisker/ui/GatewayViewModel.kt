@@ -170,6 +170,7 @@ class GatewayViewModel(
     fun deleteClient(request: ClientRequest) {
         viewModelScope.launch {
             repository.deleteRequest(request)
+            networkManager.deleteClientOnServer(request.uuid)
         }
     }
 

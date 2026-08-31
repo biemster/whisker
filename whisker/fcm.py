@@ -98,14 +98,15 @@ class FCMManager:
             return self._cached_token
 
 
-    def send_tickle_notification(self, push_token, event_id=None, event_type=None, extra_status=None):
+    def send_tickle_notification(self, push_token, event_id=None, event_type=None, extra_status=None, username=None):
+        user_label = f" to user '{username}'" if username else ""
         if not push_token or push_token.startswith('device-push-token-') or push_token.startswith('mock-'):
-            print(f"[Push Notification] Skipping FCM tickle for event '{event_type}': No valid pushToken registered.")
+            print(f"[Push Notification] Skipping FCM tickle for event '{event_type}'{user_label}: No valid pushToken registered.")
             return False
 
         sa = get_service_account_file()
         if not sa:
-            print(f"[Push Notification] Skipping FCM tickle for event '{event_type}': Service account file not found.")
+            print(f"[Push Notification] Skipping FCM tickle for event '{event_type}'{user_label}: Service account file not found.")
             return False
 
         project_id = sa.get('project_id')
@@ -116,7 +117,7 @@ class FCMManager:
         try:
             access_token = self.get_fcm_access_token(sa)
         except Exception as e:
-            print(f"[Push Notification] Error generating OAuth access token: {e}")
+            print(f"[Push Notification] Error generating OAuth access token{user_label}: {e}")
             return False
 
         # Pure tickle payload
@@ -132,6 +133,8 @@ class FCMManager:
             data_payload["eventType"] = str(event_type)
         if extra_status:
             data_payload["status"] = str(extra_status)
+        if username:
+            data_payload["username"] = str(username)
 
         fcm_url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
         payload = {
@@ -154,8 +157,8 @@ class FCMManager:
                 }
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                print(f"[Push Notification] FCM tickle delivered for event '{event_type}' (id: {event_id}) -> HTTP {resp.status}")
+                print(f"[Push Notification] FCM tickle delivered{user_label} for event '{event_type}' (id: {event_id}) -> HTTP {resp.status}")
                 return True
         except Exception as e:
-            print(f"[Push Notification] FCM send failed for event '{event_type}': {e}")
+            print(f"[Push Notification] FCM send failed{user_label} for event '{event_type}': {e}")
             return False
