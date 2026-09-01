@@ -9,7 +9,10 @@ description = "Whisker Home Server & CLI Client"
 readme = "README.md"
 requires-python = ">=3.7"
 dependencies = [
-    "requests"
+    "requests",
+    "aiortc",
+    "pillow",
+    "av"
 ]
 
 [project.scripts]

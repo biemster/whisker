@@ -11,6 +11,9 @@ setup(
     },
     install_requires=[
         "requests",
+        "aiortc",
+        "pillow",
+        "av",
     ],
     entry_points={
         "console_scripts": [

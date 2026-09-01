@@ -46,7 +46,8 @@ data class WebRtcSignal(
     val clientUuid: String,
     val type: String,
     val candidateJson: String = "",
-    val sdp: String = ""
+    val sdp: String = "",
+    val callId: String = ""
 )
 
 sealed class CallState {
@@ -57,10 +58,23 @@ sealed class CallState {
         val isVideo: Boolean,
         val sdp: String = "",
         val isDirectCall: Boolean = false,
-        val reason: String = ""
+        val reason: String = "",
+        val callId: String = ""
     ) : CallState()
-    data class Outgoing(val clientUuid: String, val clientName: String, val isVideo: Boolean = false) : CallState()
-    data class Active(val clientUuid: String, val clientName: String, val isVideo: Boolean = false, var durationSeconds: Int = 0, val sdp: String = "") : CallState()
+    data class Outgoing(
+        val clientUuid: String,
+        val clientName: String,
+        val isVideo: Boolean = false,
+        val callId: String = ""
+    ) : CallState()
+    data class Active(
+        val clientUuid: String,
+        val clientName: String,
+        val isVideo: Boolean = false,
+        var durationSeconds: Int = 0,
+        val sdp: String = "",
+        val callId: String = ""
+    ) : CallState()
 }
 
 class GatewayNetworkManager(private val context: Context, private val repository: LinkRepository) {
@@ -811,6 +825,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val sdp = json.optString("sdp", "")
                     val isDirectCall = json.optBoolean("is_direct_call", false)
                     val reason = json.optString("reason", "")
+                    val callId = json.optString("call_id", json.optString("callId", ""))
 
                     scope.launch {
                         val existing = repository.getRequestByUuid(uuid)
@@ -842,13 +857,13 @@ class GatewayNetworkManager(private val context: Context, private val repository
                             )
                         }
 
-                        setIncomingCallState(uuid, callerName, isVideo, sdp, isDirectCall, reason)
+                        setIncomingCallState(uuid, callerName, isVideo, sdp, isDirectCall, reason, callId)
 
                         if (isAutoAccept) {
-                            Log.d("GatewayNetworkManager", "Auto-accepting incoming call from $callerName ($uuid)")
+                            Log.d("GatewayNetworkManager", "Auto-accepting incoming call from $callerName ($uuid), callId: $callId")
                             showIncomingCallNotification(uuid, callerName, isVideo, autoAccept = true)
                             if (CompanionRegistry.isAppInForeground) {
-                                acceptCall(uuid, callerName, isVideo, sdp)
+                                acceptCall(uuid, callerName, isVideo, sdp, callId)
                             }
                         } else {
                             showIncomingCallNotification(uuid, callerName, isVideo, autoAccept = false)
@@ -861,32 +876,43 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val sdp = json.optString("sdp", "")
                     val status = json.optString("status", "")
                     val reason = json.optString("reason", "")
-                    _incomingSignal.tryEmit(WebRtcSignal(uuid, signalType, candidate, sdp))
+                    val callId = json.optString("call_id", json.optString("callId", ""))
+                    _incomingSignal.tryEmit(WebRtcSignal(uuid, signalType, candidate, sdp, callId))
 
                     if (signalType in listOf("webrtc_call_answer", "call_answered")) {
                         scope.launch {
                             val current = _activeCall.value
                             if (current is CallState.Outgoing && (current.clientUuid == uuid || uuid.isEmpty())) {
-                                _activeCall.value = CallState.Active(
-                                    clientUuid = current.clientUuid,
-                                    clientName = current.clientName,
-                                    isVideo = current.isVideo,
-                                    durationSeconds = 0,
-                                    sdp = sdp
-                                )
-                                updateAudioModeForCall(true)
+                                if (callId.isEmpty() || current.callId.isEmpty() || current.callId == callId) {
+                                    _activeCall.value = CallState.Active(
+                                        clientUuid = current.clientUuid,
+                                        clientName = current.clientName,
+                                        isVideo = current.isVideo,
+                                        durationSeconds = 0,
+                                        sdp = sdp,
+                                        callId = if (callId.isNotEmpty()) callId else current.callId
+                                    )
+                                    updateAudioModeForCall(true)
+                                }
                             }
                         }
                     } else if (signalType in listOf("webrtc_call_hangup", "call_ended", "call_declined", "call_rejected") || status == "declined" || reason == "declined") {
                         scope.launch {
                             val current = _activeCall.value
-                            if (current is CallState.Outgoing && (current.clientUuid == uuid || uuid.isEmpty())) {
+                            val currentCallId = when (current) {
+                                is CallState.Outgoing -> current.callId
+                                is CallState.Active -> current.callId
+                                is CallState.Incoming -> current.callId
+                                else -> ""
+                            }
+                            val matchesCall = (callId.isEmpty() || currentCallId.isEmpty() || currentCallId == callId)
+                            if (current is CallState.Outgoing && (current.clientUuid == uuid || uuid.isEmpty()) && matchesCall) {
                                 val peerName = current.clientName.ifEmpty { "The recipient" }
                                 _activeCall.value = CallState.Idle
                                 cancelCallNotification()
                                 updateAudioModeForCall(false)
                                 _callDeclinedEvent.value = "$peerName declined the call."
-                            } else if (current !is CallState.Idle) {
+                            } else if (current !is CallState.Idle && matchesCall) {
                                 _activeCall.value = CallState.Idle
                                 cancelCallNotification()
                                 updateAudioModeForCall(false)
@@ -896,33 +922,45 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 }
                 "call_answered" -> {
                     val sdp = json.optString("sdp", "")
-                    _incomingSignal.tryEmit(WebRtcSignal(uuid, "webrtc_call_answer", "", sdp))
+                    val callId = json.optString("call_id", json.optString("callId", ""))
+                    _incomingSignal.tryEmit(WebRtcSignal(uuid, "webrtc_call_answer", "", sdp, callId))
                     scope.launch {
                         val current = _activeCall.value
                         if (current is CallState.Outgoing && (current.clientUuid == uuid || uuid.isEmpty())) {
-                            _activeCall.value = CallState.Active(
-                                clientUuid = current.clientUuid,
-                                clientName = current.clientName,
-                                isVideo = current.isVideo,
-                                durationSeconds = 0,
-                                sdp = sdp
-                            )
-                            updateAudioModeForCall(true)
+                            if (callId.isEmpty() || current.callId.isEmpty() || current.callId == callId) {
+                                _activeCall.value = CallState.Active(
+                                    clientUuid = current.clientUuid,
+                                    clientName = current.clientName,
+                                    isVideo = current.isVideo,
+                                    durationSeconds = 0,
+                                    sdp = sdp,
+                                    callId = if (callId.isNotEmpty()) callId else current.callId
+                                )
+                                updateAudioModeForCall(true)
+                            }
                         }
                     }
                 }
                 "hangup", "call_declined", "call_rejected" -> {
                     val status = json.optString("status", "")
                     val reason = json.optString("reason", "")
+                    val callId = json.optString("call_id", json.optString("callId", ""))
                     scope.launch {
                         val current = _activeCall.value
-                        if (current is CallState.Outgoing && (current.clientUuid == uuid || uuid.isEmpty())) {
+                        val currentCallId = when (current) {
+                            is CallState.Outgoing -> current.callId
+                            is CallState.Active -> current.callId
+                            is CallState.Incoming -> current.callId
+                            else -> ""
+                        }
+                        val matchesCall = (callId.isEmpty() || currentCallId.isEmpty() || currentCallId == callId)
+                        if (current is CallState.Outgoing && (current.clientUuid == uuid || uuid.isEmpty()) && matchesCall) {
                             val peerName = current.clientName.ifEmpty { "The recipient" }
                             _activeCall.value = CallState.Idle
                             cancelCallNotification()
                             updateAudioModeForCall(false)
                             _callDeclinedEvent.value = "$peerName declined the call."
-                        } else if (current !is CallState.Idle) {
+                        } else if (current !is CallState.Idle && matchesCall) {
                             _activeCall.value = CallState.Idle
                             cancelCallNotification()
                             updateAudioModeForCall(false)
@@ -1100,6 +1138,10 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         if (payload.has("text")) put("text", payload.optString("text"))
                         if (payload.has("file")) put("file", payload.optString("file"))
                         if (payload.has("filePath")) put("filePath", payload.optString("filePath"))
+                        if (payload.has("call_id")) put("call_id", payload.getString("call_id"))
+                        if (payload.has("callId")) put("callId", payload.getString("callId"))
+                        if (payload.has("status")) put("status", payload.getString("status"))
+                        if (payload.has("reason")) put("reason", payload.getString("reason"))
                         put("name", hostUsername.value)
                         put("video", payload.optBoolean("video", true))
                     }
@@ -1741,28 +1783,31 @@ class GatewayNetworkManager(private val context: Context, private val repository
         isVideo: Boolean = true,
         sdp: String = "",
         isDirectCall: Boolean = false,
-        reason: String = ""
+        reason: String = "",
+        callId: String = ""
     ) {
         val current = _activeCall.value
         if (current is CallState.Idle) {
-            _activeCall.value = CallState.Incoming(clientUuid, clientName, isVideo, sdp, isDirectCall, reason)
+            _activeCall.value = CallState.Incoming(clientUuid, clientName, isVideo, sdp, isDirectCall, reason, callId)
         } else if (current is CallState.Incoming && current.clientUuid == clientUuid) {
             val updatedSdp = if (sdp.isNotEmpty()) sdp else current.sdp
-            _activeCall.value = CallState.Incoming(clientUuid, clientName, isVideo, updatedSdp, isDirectCall, reason)
+            val effectiveCallId = if (callId.isNotEmpty()) callId else current.callId
+            _activeCall.value = CallState.Incoming(clientUuid, clientName, isVideo, updatedSdp, isDirectCall, reason, effectiveCallId)
         }
     }
 
-    fun acceptCall(clientUuid: String, clientName: String, isVideo: Boolean = true, sdpOffer: String = "") {
+    fun acceptCall(clientUuid: String, clientName: String, isVideo: Boolean = true, sdpOffer: String = "", callId: String = "") {
         val current = _activeCall.value
         if (current is CallState.Active && current.clientUuid == clientUuid) return
 
         val currentIncoming = current as? CallState.Incoming
         val effectiveSdpOffer = if (sdpOffer.isNotEmpty()) sdpOffer else (currentIncoming?.sdp ?: "")
         val effectiveIsVideo = if (currentIncoming != null) currentIncoming.isVideo else isVideo
+        val effectiveCallId = if (callId.isNotEmpty()) callId else (currentIncoming?.callId ?: "")
 
         cancelCallNotification()
         updateAudioModeForCall(true)
-        _activeCall.value = CallState.Active(clientUuid, clientName, effectiveIsVideo, 0, effectiveSdpOffer)
+        _activeCall.value = CallState.Active(clientUuid, clientName, effectiveIsVideo, 0, effectiveSdpOffer, effectiveCallId)
         scope.launch {
             repository.insertCallLog(
                 CallLog(
@@ -1775,21 +1820,42 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    fun publishSdpAnswer(clientUuid: String, answerSdp: String) {
+    fun publishSdpAnswer(clientUuid: String, answerSdp: String, callId: String = "") {
         scope.launch {
+            val current = _activeCall.value
+            val effectiveCallId = if (callId.isNotEmpty()) callId else {
+                when (current) {
+                    is CallState.Active -> current.callId
+                    is CallState.Incoming -> current.callId
+                    is CallState.Outgoing -> current.callId
+                    else -> ""
+                }
+            }
             val payload = JSONObject().apply {
                 put("type", "webrtc_call_answer")
                 put("event", "call_answered")
                 put("clientUuid", clientUuid)
                 put("sdp", answerSdp)
+                if (effectiveCallId.isNotEmpty()) {
+                    put("call_id", effectiveCallId)
+                    put("callId", effectiveCallId)
+                }
             }
             publishToClient(clientUuid, payload)
         }
     }
 
-    fun publishOutgoingSdpOffer(clientUuid: String, offerSdp: String) {
+    fun publishOutgoingSdpOffer(clientUuid: String, offerSdp: String, callId: String = "") {
         scope.launch {
             val myName = hostUsername.value.ifEmpty { "Mobile App" }
+            val current = _activeCall.value
+            val effectiveCallId = if (callId.isNotEmpty()) callId else {
+                when (current) {
+                    is CallState.Outgoing -> current.callId
+                    is CallState.Active -> current.callId
+                    else -> ""
+                }
+            }
             val payload = JSONObject().apply {
                 put("type", "webrtc_call_initiate")
                 put("event", "call")
@@ -1797,19 +1863,36 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 put("name", myName)
                 put("video", true)
                 put("sdp", offerSdp)
+                if (effectiveCallId.isNotEmpty()) {
+                    put("call_id", effectiveCallId)
+                    put("callId", effectiveCallId)
+                }
             }
-            Log.d("GatewayNetworkManager", "Publishing outgoing SDP offer to client: $clientUuid, name: $myName, sdpLen: ${offerSdp.length}")
+            Log.d("GatewayNetworkManager", "Publishing outgoing SDP offer to client: $clientUuid, name: $myName, callId: $effectiveCallId, sdpLen: ${offerSdp.length}")
             publishToClient(clientUuid, payload)
         }
     }
 
-    fun publishIceCandidate(clientUuid: String, candidateJson: String) {
+    fun publishIceCandidate(clientUuid: String, candidateJson: String, callId: String = "") {
         scope.launch {
+            val current = _activeCall.value
+            val effectiveCallId = if (callId.isNotEmpty()) callId else {
+                when (current) {
+                    is CallState.Active -> current.callId
+                    is CallState.Outgoing -> current.callId
+                    is CallState.Incoming -> current.callId
+                    else -> ""
+                }
+            }
             val payload = JSONObject().apply {
                 put("type", "webrtc_ice_candidate")
                 put("event", "ice_candidate")
                 put("clientUuid", clientUuid)
                 put("candidate", candidateJson)
+                if (effectiveCallId.isNotEmpty()) {
+                    put("call_id", effectiveCallId)
+                    put("callId", effectiveCallId)
+                }
             }
             publishToClient(clientUuid, payload)
         }
@@ -1836,6 +1919,10 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     put("type", "webrtc_call_hangup")
                     put("event", "call_ended")
                     put("clientUuid", current.clientUuid)
+                    if (current.callId.isNotEmpty()) {
+                        put("call_id", current.callId)
+                        put("callId", current.callId)
+                    }
                 }
                 publishToClient(current.clientUuid, payload)
             } else if (current is CallState.Incoming) {
@@ -1854,6 +1941,10 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     put("status", "declined")
                     put("reason", "declined")
                     put("clientUuid", current.clientUuid)
+                    if (current.callId.isNotEmpty()) {
+                        put("call_id", current.callId)
+                        put("callId", current.callId)
+                    }
                 }
                 publishToClient(current.clientUuid, payload)
             } else if (current is CallState.Outgoing) {
@@ -1870,16 +1961,21 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     put("type", "webrtc_call_hangup")
                     put("event", "call_ended")
                     put("clientUuid", current.clientUuid)
+                    if (current.callId.isNotEmpty()) {
+                        put("call_id", current.callId)
+                        put("callId", current.callId)
+                    }
                 }
                 publishToClient(current.clientUuid, payload)
             }
         }
     }
 
-    fun startOutgoingCall(clientUuid: String, clientName: String, isVideo: Boolean = true) {
+    fun startOutgoingCall(clientUuid: String, clientName: String, isVideo: Boolean = true, callId: String = "") {
         cancelCallNotification()
         updateAudioModeForCall(true)
-        _activeCall.value = CallState.Outgoing(clientUuid, clientName, isVideo)
+        val effectiveCallId = if (callId.isNotEmpty()) callId else "call_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
+        _activeCall.value = CallState.Outgoing(clientUuid, clientName, isVideo, effectiveCallId)
         scope.launch {
             repository.insertCallLog(
                 CallLog(
@@ -1925,12 +2021,24 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
+    private var incomingCallWakeLock: android.os.PowerManager.WakeLock? = null
+
     fun cancelCallNotification() {
         try {
             val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.cancel(1002)
         } catch (e: Exception) {
             Log.e("GatewayNetworkManager", "Error cancelling call notification", e)
+        }
+        try {
+            incomingCallWakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                }
+            }
+            incomingCallWakeLock = null
+        } catch (e: Exception) {
+            Log.e("GatewayNetworkManager", "Error releasing incoming call wake lock", e)
         }
     }
 
@@ -2074,7 +2182,9 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
                 "Whisker:IncomingCallWakeLock"
             )
-            wakeLock.acquire(20000)
+            wakeLock.acquire(25000)
+            incomingCallWakeLock?.let { if (it.isHeld) it.release() }
+            incomingCallWakeLock = wakeLock
         } catch (e: Exception) {
             Log.e("GatewayNetworkManager", "Error acquiring full screen wake lock for incoming call", e)
         }

@@ -253,3 +253,39 @@ Whisker supports full-duplex messaging, media transfer, and WebRTC audio/video c
   - **Inline Rename** to assign friendly custom contact names.
   - **Revoke / Disconnect** to permanently unpair the peer.
 
+---
+
+## 10. WebRTC Signaling Lifecycle & Call State Synchronization Protocol
+
+To ensure robust call state transitions and prevent desynchronized call states (e.g. ghost calls where one client remains connected after the peer hangs up, or race conditions where stale ICE candidates/hangup signals pollute subsequent sessions), all Whisker clients (**Mobile App**, **Web Portal**, and **Python CLI**) adhere to the unified **`call_id` State Synchronization Protocol**.
+
+### 10.1 `call_id` Session Lifecycle
+1. **Generation on Call Init**:
+   - Every outgoing call generates a unique session identifier: `call_<timestamp>_<random_hex>` (e.g., `call_1772442655000_a1b2c3`).
+   - The `call_id` is included in all signaling messages: initial offer (`call` / `webrtc_call_initiate`), answer (`webrtc_call_answer`), ICE candidates (`webrtc_ice_candidate`), and termination (`webrtc_call_hangup` / `call_declined` / `call_ended`).
+2. **State Scoping & Validation**:
+   - **Incoming Calls**: The callee registers the incoming `call_id`. If an incoming call is received while another call is already active or in progress, conflicting signals from older/unmatched `call_id` sessions are ignored.
+   - **Answer Processing**: An outgoing caller only transitions from `Outgoing` (ringing) to `Active` (connected) if the incoming `webrtc_call_answer` event matches the active session's `call_id`.
+   - **ICE Candidate Routing**: Candidates received for expired or mismatched `call_id` sessions are dropped to prevent stale network candidate routing.
+   - **Hangup & Decline Handling**: Hangup signals explicitly propagate the `call_id`. A client tearing down a call verifies that the hangup matches its current call session, ensuring that network jitter or duplicate hangup deliveries do not prematurely terminate subsequent new calls.
+
+### 10.2 Client-Specific Implementations
+
+1. **Python CLI Client (`whisker call` & `whisker listen`)**:
+   - **Automatic WebRTC Answering**: `whisker listen` handles incoming `call` offers asynchronously, captures camera/microphone or generates synthetic test streams, and automatically posts the SDP answer and ICE candidates carrying the session's `call_id`.
+   - **Tkinter Video Window & Headless Fallbacks**: When GUI libraries are present, incoming and outgoing video streams are rendered in a responsive Tkinter video frame; in headless environments, audio and synthetic pipelines operate seamlessly without raising unhandled GUI exceptions.
+   - **Async Coroutine & PeerConnection Cleanup**: Uses strict asynchronous task lifecycle management (`await pc.close()`, `await session.handle_remote_ice_candidate`) to eliminate pending unawaited coroutine warnings and ensure clean socket closure upon hangup or Ctrl+C.
+
+2. **Whisker Web Client (`whisker/index.html`)**:
+   - Maintains a scoped `currentCallId` in the global application state.
+   - Generates `call_id` in `initiateCall` and forwards it in the initial `POST /api/call` request.
+   - Filters SSE signaling events (`webrtc_call_answer`, `webrtc_ice_candidate`, `webrtc_call_hangup`) against `currentCallId`.
+   - Resets `currentCallId` and closes WebRTC tracks/peer connection on call hangup, decline, or window unload.
+
+3. **Android Mobile App (`GatewayNetworkManager.kt` & `GatewayUi.kt`)**:
+   - `CallState` hierarchy (`Incoming`, `Outgoing`, `Active`) tracks the associated `callId`.
+   - `WebRtcSignal` payload wrapper parses and carries `callId`.
+   - `processIncomingPayload` validates incoming answers and hangup signals against the current `CallState`'s `callId`.
+   - Outbound signaling helpers (`publishOutgoingSdpOffer`, `publishSdpAnswer`, `publishIceCandidate`, `declineOrEndCall`) attach `call_id` / `callId` to all outgoing payloads.
+   - `WebRtcCallContainer` WebView JS bridge filters incoming signals by `callId` and propagates `callId` back to native Android networking handlers.
+

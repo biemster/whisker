@@ -15,12 +15,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.whisker.data.AppDatabase
 import com.whisker.data.CallState
 import com.whisker.data.LinkRepository
 import com.whisker.ui.GatewayDashboard
 import com.whisker.ui.GatewayViewModel
 import com.whisker.ui.theme.MyApplicationTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     
@@ -32,18 +36,33 @@ class MainActivity : ComponentActivity() {
         GatewayViewModel.Factory(repository, networkManager)
     }
 
+    private var wasInCall = false
+    private var launchedForCall = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        turnScreenOnAndShowWhenLocked()
         checkAndRequestAppPermissions()
-        
         enableEdgeToEdge()
         
         com.whisker.data.CompanionRegistry.networkManager = networkManager
         networkManager.registerFcmToken()
         
         handleCallOrChatIntent(intent)
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.activeCallState.collect { callState ->
+                    if (callState !is CallState.Idle) {
+                        wasInCall = true
+                        turnScreenOnAndShowWhenLocked()
+                    } else if (wasInCall) {
+                        wasInCall = false
+                        handleCallEnded()
+                    }
+                }
+            }
+        }
 
         setContent {
             MyApplicationTheme {
@@ -66,7 +85,6 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        turnScreenOnAndShowWhenLocked()
         handleCallOrChatIntent(intent)
     }
 
@@ -81,6 +99,11 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         com.whisker.data.CompanionRegistry.isAppInForeground = false
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        turnScreenOffAndClearLockFlags()
     }
 
     private fun checkAndRequestAppPermissions() {
@@ -117,6 +140,34 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun turnScreenOffAndClearLockFlags() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
+        }
+        @Suppress("DEPRECATION")
+        window.clearFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        )
+    }
+
+    private fun handleCallEnded() {
+        networkManager.cancelCallNotification()
+        turnScreenOffAndClearLockFlags()
+
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val isLocked = keyguardManager?.isKeyguardLocked ?: false
+
+        if (isLocked || launchedForCall) {
+            // App was displayed over the lockscreen or launched specifically for this call session.
+            // Fully finish and remove task so device immediately sleeps / dozes and returns to lockscreen.
+            finishAndRemoveTask()
+        }
+    }
+
     private fun handleCallOrChatIntent(intent: Intent?) {
         if (intent == null) return
         
@@ -130,18 +181,24 @@ class MainActivity : ComponentActivity() {
         val isAnswer = intent.getBooleanExtra("action_answer_call", false)
         val isDecline = intent.getBooleanExtra("action_decline_call", false)
         val isIncomingCall = intent.getBooleanExtra("incoming_call", false)
-
         val isVideo = intent.getBooleanExtra("is_video", true)
 
+        if (isAnswer || isDecline || isIncomingCall || !clientUuid.isNullOrEmpty()) {
+            launchedForCall = true
+        }
+
         if (isAnswer && !clientUuid.isNullOrEmpty()) {
+            turnScreenOnAndShowWhenLocked()
             networkManager.acceptCall(clientUuid, clientName, isVideo = isVideo)
             networkManager.cancelCallNotification()
         } else if (isDecline && !clientUuid.isNullOrEmpty()) {
             networkManager.declineOrEndCall()
             networkManager.cancelCallNotification()
+            handleCallEnded()
         } else if ((isIncomingCall || !clientUuid.isNullOrEmpty()) && networkManager.activeCall.value is CallState.Idle) {
+            turnScreenOnAndShowWhenLocked()
             if (!clientUuid.isNullOrEmpty()) {
-                networkManager.setIncomingCallState(clientUuid, clientName, isVideo = intent.getBooleanExtra("is_video", true))
+                networkManager.setIncomingCallState(clientUuid, clientName, isVideo = isVideo)
             }
             networkManager.cancelCallNotification()
         } else if (isIncomingCall) {

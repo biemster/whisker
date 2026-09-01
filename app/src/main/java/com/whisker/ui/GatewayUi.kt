@@ -3746,7 +3746,9 @@ fun WebRtcCallContainer(
             val outgoing = callState as? CallState.Outgoing
             val incoming = callState as? CallState.Incoming
             val currentUuid = active?.clientUuid ?: outgoing?.clientUuid ?: incoming?.clientUuid
-            if (currentUuid != null && signal.clientUuid == currentUuid) {
+            val currentCallId = active?.callId ?: outgoing?.callId ?: incoming?.callId ?: ""
+            val matchesCallId = signal.callId.isEmpty() || currentCallId.isEmpty() || signal.callId == currentCallId
+            if (currentUuid != null && signal.clientUuid == currentUuid && matchesCallId) {
                 val wv = webViewRef
                 if (wv != null && isWebViewReady) {
                     processSignal(wv, signal)
@@ -3802,23 +3804,27 @@ fun WebRtcCallContainer(
 
                     @JavascriptInterface
                     fun onLocalSdpGenerated(sdp: String, isOffer: Boolean) {
-                        val clientUuid = (callState as? CallState.Active)?.clientUuid
-                            ?: (callState as? CallState.Outgoing)?.clientUuid ?: ""
+                        val active = callState as? CallState.Active
+                        val outgoing = callState as? CallState.Outgoing
+                        val clientUuid = active?.clientUuid ?: outgoing?.clientUuid ?: ""
+                        val callId = active?.callId ?: outgoing?.callId ?: ""
                         if (clientUuid.isNotEmpty()) {
                             if (isOffer) {
-                                networkManager.publishOutgoingSdpOffer(clientUuid, sdp)
+                                networkManager.publishOutgoingSdpOffer(clientUuid, sdp, callId)
                             } else {
-                                networkManager.publishSdpAnswer(clientUuid, sdp)
+                                networkManager.publishSdpAnswer(clientUuid, sdp, callId)
                             }
                         }
                     }
 
                     @JavascriptInterface
                     fun onLocalIceCandidateGenerated(candidateJson: String) {
-                        val clientUuid = (callState as? CallState.Active)?.clientUuid
-                            ?: (callState as? CallState.Outgoing)?.clientUuid ?: ""
+                        val active = callState as? CallState.Active
+                        val outgoing = callState as? CallState.Outgoing
+                        val clientUuid = active?.clientUuid ?: outgoing?.clientUuid ?: ""
+                        val callId = active?.callId ?: outgoing?.callId ?: ""
                         if (clientUuid.isNotEmpty()) {
-                            networkManager.publishIceCandidate(clientUuid, candidateJson)
+                            networkManager.publishIceCandidate(clientUuid, candidateJson, callId)
                         }
                     }
                 }, "AndroidWebRTCBridge")

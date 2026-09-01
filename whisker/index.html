@@ -423,6 +423,7 @@
         let hostName = '';
         let chatLogs = [];
         let isCallActive = false;
+        let currentCallId = '';
         let callTimer = null;
         let callSeconds = 0;
         let sseConnection = null;
@@ -1255,6 +1256,10 @@
             } else if (payload.type === "webrtc_call_initiate") {
                 handleIncomingCallOffer(payload);
             } else if (payload.type === "webrtc_call_answer" || payload.event === "call_answered") {
+                if (payload.call_id && currentCallId && payload.call_id !== currentCallId) {
+                    console.log("Ignoring answer for mismatched call_id", payload.call_id, currentCallId);
+                    return;
+                }
                 if (directCallTimeoutTimer) {
                     clearInterval(directCallTimeoutTimer);
                     directCallTimeoutTimer = null;
@@ -1268,6 +1273,9 @@
                         .catch(err => console.error("Error setting remote answer SDP", err));
                 }
             } else if (payload.type === "webrtc_ice_candidate" || payload.event === "ice_candidate") {
+                if (payload.call_id && currentCallId && payload.call_id !== currentCallId) {
+                    return;
+                }
                 if (payload.candidate) {
                     try {
                         const cand = typeof payload.candidate === 'string' ? JSON.parse(payload.candidate) : payload.candidate;
@@ -1285,6 +1293,10 @@
                     }
                 }
             } else if (payload.type === "webrtc_call_hangup" || payload.event === "call_ended" || payload.event === "call_declined" || payload.event === "hangup") {
+                if (payload.call_id && currentCallId && payload.call_id !== currentCallId) {
+                    console.log("Ignoring hangup for mismatched call_id", payload.call_id, currentCallId);
+                    return;
+                }
                 stopRingtone();
                 const incModal = document.getElementById('incomingCallModal');
                 if (incModal) incModal.classList.add('hidden');
@@ -1658,6 +1670,8 @@
                 ]
             };
 
+            currentCallId = "call_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6);
+
             const pc = new RTCPeerConnection(rtcConfig);
             window.pc = pc;
 
@@ -1671,6 +1685,7 @@
                             type: "webrtc_ice_candidate",
                             uuid: clientUuid,
                             token: clientToken || "",
+                            call_id: currentCallId,
                             is_direct_call: isDirectCall,
                             candidate: event.candidate.toJSON()
                         })
@@ -1702,6 +1717,7 @@
                 uuid: clientUuid,
                 token: clientToken || "",
                 name: clientName,
+                call_id: currentCallId,
                 video: isVideo,
                 host_uuid: targetHostUuid || hostUuid || null,
                 is_direct_call: isDirectCall,
@@ -1713,7 +1729,7 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
-            }).then(res => {
+            }).then(async res => {
                 if (res.status === 403) {
                     if (!isDirectCall) {
                         handleAuthorizationLost("Call 403");
@@ -1725,7 +1741,11 @@
                     }
                     throw new Error("403 Forbidden");
                 }
-                console.log("Call handshaking.");
+                const resData = await res.json().catch(() => ({}));
+                if (resData && resData.call_id) {
+                    currentCallId = resData.call_id;
+                }
+                console.log("Call handshaking (Call ID: " + currentCallId + ").");
             }).catch(e => {
                 console.error("Dial signal failure", e);
                 if (isDirectCall) {
@@ -1870,11 +1890,13 @@
             const modalEl = document.getElementById('incomingCallModal');
             if (modalEl) modalEl.classList.add('hidden');
             if (pendingIncomingCallOffer) {
+                const decCallId = pendingIncomingCallOffer.call_id || currentCallId || "";
                 const payload = {
                     event: "signal",
                     type: "webrtc_call_hangup",
                     status: "declined",
                     reason: "declined",
+                    call_id: decCallId,
                     uuid: clientUuid,
                     token: clientToken || "",
                     host_uuid: hostUuid || ""
@@ -1892,6 +1914,7 @@
                         event: "hangup",
                         status: "declined",
                         reason: "declined",
+                        call_id: decCallId,
                         uuid: clientUuid,
                         token: clientToken || "",
                         host_uuid: hostUuid || ""
@@ -1916,6 +1939,7 @@
         async function executeAcceptCall(payload) {
             if (isCallActive && window.pc) return;
             isCallActive = true;
+            currentCallId = payload.call_id || ("call_" + Date.now());
             let isVideo = payload.video !== false;
             setCallLayoutActive(true, isVideo);
             document.getElementById('audioCallBtn').disabled = true;
@@ -1957,6 +1981,7 @@
                             type: "webrtc_ice_candidate",
                             uuid: clientUuid,
                             token: clientToken || "",
+                            call_id: currentCallId,
                             candidate: event.candidate.toJSON()
                         })
                     }).catch(e => console.error("Error sending ICE candidate", e));
@@ -1993,6 +2018,7 @@
                         type: "webrtc_call_answer",
                         uuid: clientUuid,
                         token: clientToken || "",
+                        call_id: currentCallId,
                         sdp: answer.sdp
                     })
                 }).catch(e => console.error("Error sending call answer SDP", e));
@@ -2013,6 +2039,7 @@
 
         function hangUpCall(receivedFromPhone = false) {
             const wasDirect = isDirectCallMode;
+            const endedCallId = currentCallId;
             stopRingtone();
             const modalEl = document.getElementById('incomingCallModal');
             if (modalEl) modalEl.classList.add('hidden');
@@ -2020,6 +2047,7 @@
             pendingCandidates = [];
 
             isCallActive = false;
+            currentCallId = '';
             setCallLayoutActive(false);
             if (callTimer) {
                 clearInterval(callTimer);
@@ -2057,6 +2085,7 @@
                     event: "hangup",
                     uuid: clientUuid,
                     token: clientToken || "",
+                    call_id: endedCallId,
                     is_direct_call: wasDirect
                 };
                 fetch(HOME_SERVER_URL + "/api/hangup", {

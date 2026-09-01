@@ -101,7 +101,132 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
     guest_streams = {}  # uuid -> set of wfile objects
     host_last_seen = {}
     guest_last_seen = {}
+    active_calls = {}  # call_id -> {call_id, host_uuid, client_uuid, caller_name, status, created_at, updated_at, is_direct, video, initiator}
     streams_lock = threading.RLock()
+    calls_lock = threading.RLock()
+
+    @classmethod
+    def _prune_stale_calls(cls):
+        now = time.time()
+        with cls.calls_lock:
+            expired_ids = []
+            for cid, c in list(cls.active_calls.items()):
+                st = c.get('status', 'RINGING')
+                created = c.get('created_at', now)
+                updated = c.get('updated_at', now)
+                # Ringing timeout: 45 seconds max
+                if st == 'RINGING' and (now - created > 45):
+                    c['status'] = 'ENDED'
+                    c['reason'] = 'timeout'
+                    expired_ids.append((cid, c))
+                # Active timeout without update: 120 seconds max
+                elif st == 'ACTIVE' and (now - updated > 120):
+                    c['status'] = 'ENDED'
+                    c['reason'] = 'stale'
+                    expired_ids.append((cid, c))
+                elif st == 'ENDED' and (now - updated > 15):
+                    expired_ids.append((cid, None))
+
+            for cid, call_data in expired_ids:
+                if call_data is None:
+                    cls.active_calls.pop(cid, None)
+                else:
+                    # Notify endpoints that call expired
+                    cls._notify_call_ended(call_data)
+
+    @classmethod
+    def _notify_call_ended(cls, call_data):
+        cid = call_data.get('call_id')
+        host_uuid = call_data.get('host_uuid')
+        client_uuid = call_data.get('client_uuid')
+        reason = call_data.get('reason', 'ended')
+        hangup_payload = {
+            "event": "hangup",
+            "type": "webrtc_call_hangup",
+            "call_id": cid,
+            "uuid": client_uuid,
+            "status": "ended",
+            "reason": reason
+        }
+        if host_uuid:
+            event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
+            hangup_payload["eventId"] = event_id
+            if cls.db:
+                cls.db.add_host_event(host_uuid, event_id, "hangup", hangup_payload)
+            msg = json.dumps({"type": "hangup", "payload": hangup_payload})
+            msg_line = f"data: {msg}\n\n".encode('utf-8')
+            with cls.streams_lock:
+                for s in list(cls.host_streams.get(host_uuid, [])):
+                    try:
+                        s.write(msg_line)
+                        s.flush()
+                    except Exception:
+                        pass
+        if client_uuid:
+            guest_msg = f"data: {json.dumps(hangup_payload)}\n\n".encode('utf-8')
+            with cls.streams_lock:
+                for s in list(cls.guest_streams.get(client_uuid, set())):
+                    try:
+                        s.write(guest_msg)
+                        s.flush()
+                    except Exception:
+                        pass
+
+    @classmethod
+    def _register_call(cls, call_id, host_uuid, client_uuid, caller_name="Guest", initiator="guest", is_direct=False, video=True):
+        cls._prune_stale_calls()
+        now = time.time()
+        with cls.calls_lock:
+            # End any existing ringing/active call for this client or host
+            for cid, c in list(cls.active_calls.items()):
+                if (c.get('client_uuid') == client_uuid or (c.get('host_uuid') == host_uuid and c.get('client_uuid') == client_uuid)) and c.get('status') in ['RINGING', 'ACTIVE']:
+                    c['status'] = 'ENDED'
+                    c['updated_at'] = now
+                    c['reason'] = 'replaced'
+
+            cls.active_calls[call_id] = {
+                "call_id": call_id,
+                "host_uuid": host_uuid,
+                "client_uuid": client_uuid,
+                "caller_name": caller_name,
+                "status": "RINGING",
+                "initiator": initiator,
+                "is_direct": is_direct,
+                "video": video,
+                "created_at": now,
+                "updated_at": now
+            }
+        return cls.active_calls[call_id]
+
+    @classmethod
+    def _update_call_status(cls, call_id, new_status, client_uuid=None, host_uuid=None):
+        now = time.time()
+        with cls.calls_lock:
+            target = None
+            if call_id and call_id in cls.active_calls:
+                target = cls.active_calls[call_id]
+            else:
+                for cid, c in cls.active_calls.items():
+                    if (client_uuid and c.get('client_uuid') == client_uuid) or (host_uuid and c.get('host_uuid') == host_uuid):
+                        target = c
+                        break
+            if target:
+                target['status'] = new_status
+                target['updated_at'] = now
+                return target
+        return None
+
+    @classmethod
+    def _get_call_session(cls, call_id=None, uuid=None):
+        cls._prune_stale_calls()
+        with cls.calls_lock:
+            if call_id and call_id in cls.active_calls:
+                return dict(cls.active_calls[call_id])
+            if uuid:
+                for cid, c in cls.active_calls.items():
+                    if (c.get('client_uuid') == uuid or c.get('host_uuid') == uuid) and c.get('status') in ['RINGING', 'ACTIVE']:
+                        return dict(c)
+        return None
 
     def _send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -483,6 +608,23 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 "server_time": int(time.time() * 1000)
             })
 
+        if path in ['/api/call/status', '/api/call_status']:
+            call_id = qs.get('call_id', [''])[0] or qs.get('id', [''])[0]
+            uuid = qs.get('uuid', [''])[0] or qs.get('client_uuid', [''])[0]
+            session = self._get_call_session(call_id=call_id, uuid=uuid)
+            if session:
+                duration = int(time.time() - session.get('created_at', time.time()))
+                return self._send_json({
+                    "call_id": session.get('call_id'),
+                    "status": session.get('status'),
+                    "active": session.get('status') == 'ACTIVE',
+                    "is_direct": session.get('is_direct', False),
+                    "video": session.get('video', True),
+                    "duration_seconds": duration,
+                    "created_at": session.get('created_at')
+                })
+            return self._send_json({"status": "IDLE", "active": False, "call_id": None})
+
         return self._send_json({"error": "Endpoint not found"}, 404)
 
     def do_POST(self):
@@ -840,10 +982,13 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                         return self._send_json({"message": "Message routed to companion mobile app", "messageId": msg_id})
 
             if target_host and (resp_type in ['webrtc_call_initiate', 'call'] or resp_event in ['call_initiate', 'call']):
+                call_id = body.get('call_id') or f"call_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+                self._register_call(call_id, target_host['uuid'], host_uuid, caller_name=host.get('username') or 'Mobile App', initiator="host", is_direct=False, video=body.get('video', True))
                 event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
                 payload = {
                     "event": "call",
                     "eventId": event_id,
+                    "call_id": call_id,
                     "uuid": host_uuid,
                     "name": host.get('username') or 'Mobile App',
                     "sdp": body.get('sdp', ''),
@@ -855,13 +1000,17 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 self._notify_host_streams(target_host['uuid'], "call", payload)
                 if target_host.get('push_token'):
                     self._send_fcm_tickle(target_host['push_token'], event_id=event_id, event_type="call", username=target_host.get('username'))
-                return self._send_json({"message": "Call routed to companion mobile app"})
+                return self._send_json({"message": "Call routed to companion mobile app", "call_id": call_id})
 
             if target_host and (resp_type in ['webrtc_call_answer', 'webrtc_ice_candidate'] or resp_event in ['call_answered', 'ice_candidate']):
+                call_id = body.get('call_id')
+                if resp_type == 'webrtc_call_answer' or resp_event == 'call_answered':
+                    self._update_call_status(call_id, "ACTIVE", client_uuid=host_uuid, host_uuid=target_host['uuid'])
                 event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
                 payload = {
                     "event": "signal",
                     "eventId": event_id,
+                    "call_id": call_id,
                     "uuid": host_uuid,
                     "type": resp_type or resp_event,
                     "sdp": body.get('sdp', ''),
@@ -874,11 +1023,16 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 return self._send_json({"message": "Signal routed to companion mobile app"})
 
             if target_host and (resp_type in ['webrtc_call_hangup', 'call_declined', 'call_ended'] or resp_event in ['call_ended', 'hangup']):
+                call_id = body.get('call_id')
+                self._update_call_status(call_id, "ENDED", client_uuid=host_uuid, host_uuid=target_host['uuid'])
                 event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
                 payload = {
                     "event": "hangup",
                     "eventId": event_id,
-                    "uuid": host_uuid
+                    "call_id": call_id,
+                    "uuid": host_uuid,
+                    "status": body.get("status", "ended"),
+                    "reason": body.get("reason", "ended")
                 }
                 self.db.add_host_event(target_host['uuid'], event_id, "hangup", payload)
                 self._notify_host_streams(target_host['uuid'], "hangup", payload)
@@ -898,6 +1052,19 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 
                 track_info = f"Audio: {has_audio}, Video: {has_video}" if sdp_len > 0 else "No SDP"
                 print(f"📱 [WebRTC Host Reply] Host -> Guest '{client_uuid}' | Type: {resp_type or resp_event} | SDP Len: {sdp_len} ({track_info}){cand_type}")
+
+                call_id = body.get('call_id')
+                if resp_type == 'webrtc_call_answer' or resp_event == 'call_answered':
+                    self._update_call_status(call_id, "ACTIVE", client_uuid=client_uuid, host_uuid=host_uuid)
+                elif resp_type == 'webrtc_call_initiate' or resp_event == 'call_initiate':
+                    if not call_id:
+                        call_id = f"call_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+                        body['call_id'] = call_id
+                    self._register_call(call_id, host_uuid, client_uuid, caller_name=host.get('username') or 'Host', initiator="host", is_direct=False, video=body.get('video', True))
+
+            elif resp_type in ['webrtc_call_hangup', 'call_declined', 'call_ended'] or resp_event in ['call_ended', 'hangup', 'call_declined', 'call_rejected']:
+                call_id = body.get('call_id')
+                self._update_call_status(call_id, "ENDED", client_uuid=client_uuid, host_uuid=host_uuid)
 
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
             self.db.add_guest_event(host_uuid, event_id, client_uuid, resp_type or resp_event or 'response', body)
@@ -1061,6 +1228,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             host_uuid = host['uuid']
             push_token = host.get('push_token')
 
+            call_id = body.get('call_id') or f"call_{int(time.time()*1000)}_{random.randint(1000,9999)}"
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
             sdp_str = body.get('sdp', '')
             is_vid = body.get('video', False)
@@ -1068,11 +1236,14 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             has_audio = "m=audio" in sdp_str
             has_video = "m=video" in sdp_str
             reason_str = body.get('reason', '')
-            print(f"📞 [WebRTC Call] {'⚡ DIRECT CALL' if is_direct else 'Guest'} '{uuid}' ({body.get('name')}) initiated call | Host: '{host.get('username') or host_uuid}' | Video: {is_vid} | Reason: '{reason_str}' | SDP Len: {sdp_len}")
+            print(f"📞 [WebRTC Call] {'⚡ DIRECT CALL' if is_direct else 'Guest'} '{uuid}' ({body.get('name')}) initiated call | Call ID: {call_id} | Host: '{host.get('username') or host_uuid}' | Video: {is_vid} | Reason: '{reason_str}' | SDP Len: {sdp_len}")
+
+            self._register_call(call_id, host_uuid, uuid, caller_name=body.get('name', 'Guest'), initiator="guest", is_direct=is_direct, video=is_vid)
 
             payload = {
                 "event": "call",
                 "eventId": event_id,
+                "call_id": call_id,
                 "uuid": uuid,
                 "token": token or "",
                 "name": body.get('name', 'Guest'),
@@ -1087,11 +1258,12 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             if push_token:
                 self._send_fcm_tickle(push_token, event_id=event_id, event_type="call", username=host.get('username'))
 
-            return self._send_json({"status": "dialing", "eventId": event_id, "host_uuid": host_uuid})
+            return self._send_json({"status": "dialing", "eventId": event_id, "host_uuid": host_uuid, "call_id": call_id})
 
         if path == '/api/hangup':
             uuid = body.get('uuid')
             token = body.get('token')
+            call_id = body.get('call_id')
             is_direct = body.get('is_direct_call', False) or body.get('direct_call', False)
             host = None
             if is_direct or not token:
@@ -1115,15 +1287,18 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             host_uuid = host['uuid']
             push_token = host.get('push_token')
 
-            print(f"🛑 [WebRTC Hangup] Client '{uuid}' requested call hangup to host '{host.get('username') or host_uuid}'")
+            print(f"🛑 [WebRTC Hangup] Client '{uuid}' requested call hangup to host '{host.get('username') or host_uuid}' (Call ID: {call_id})")
+            self._update_call_status(call_id, "ENDED", client_uuid=uuid, host_uuid=host_uuid)
+
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
             payload = {
                 "event": "hangup",
                 "eventId": event_id,
+                "call_id": call_id,
                 "uuid": uuid,
                 "token": token or "",
-                "status": body.get("status", ""),
-                "reason": body.get("reason", "")
+                "status": body.get("status", "ended"),
+                "reason": body.get("reason", "ended")
             }
             self.db.add_host_event(host_uuid, event_id, "hangup", payload)
             self._notify_host_streams(host_uuid, "hangup", payload)
@@ -1131,11 +1306,12 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             if push_token:
                 self._send_fcm_tickle(push_token, event_id=event_id, event_type="hangup", username=host.get('username'))
 
-            return self._send_json({"status": "hungup"})
+            return self._send_json({"status": "hungup", "call_id": call_id})
 
         if path == '/api/signal':
             uuid = body.get('uuid')
             token = body.get('token')
+            call_id = body.get('call_id')
             is_direct = body.get('is_direct_call', False) or body.get('direct_call', False)
             host = None
             if is_direct or not token:
@@ -1163,10 +1339,16 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             has_sdp = bool(body.get('sdp'))
             print(f"📡 [WebRTC Signal] Client '{uuid}' sent signal '{sig_type}' to host '{host.get('username') or host_uuid}' | Candidate: {has_cand} | SDP: {has_sdp}")
 
+            if sig_type in ['webrtc_call_answer', 'call_answered']:
+                self._update_call_status(call_id, "ACTIVE", client_uuid=uuid, host_uuid=host_uuid)
+            elif sig_type in ['webrtc_call_hangup', 'call_ended', 'call_declined', 'call_rejected']:
+                self._update_call_status(call_id, "ENDED", client_uuid=uuid, host_uuid=host_uuid)
+
             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
             payload = {
                 "event": "signal",
                 "eventId": event_id,
+                "call_id": call_id,
                 "uuid": uuid,
                 "token": token or "",
                 "type": sig_type,
@@ -1177,7 +1359,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             }
             self.db.add_host_event(host_uuid, event_id, "signal", payload)
             self._notify_host_streams(host_uuid, "signal", payload)
-            return self._send_json({"status": "signaled", "eventId": event_id})
+            return self._send_json({"status": "signaled", "eventId": event_id, "call_id": call_id})
 
         return self._send_json({"error": "Endpoint not found"}, 404)
 
@@ -1226,9 +1408,13 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         try:
             # Deliver any pending stored events
             pending_events = self.db.get_guest_events(uuid)
+            now_ms = int(time.time() * 1000)
             for ev in pending_events:
                 payload = ev.get('payload', '')
                 if isinstance(payload, dict):
+                    ev_ts = payload.get('timestamp') or ev.get('created_at', 0)
+                    if ev_ts and (now_ms - ev_ts > 60000):
+                        continue
                     payload = json.dumps(payload)
                 msg_line = f"data: {payload}\n\n".encode('utf-8')
                 wfile.write(msg_line)

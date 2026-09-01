@@ -7,11 +7,16 @@ import urllib.request
 import urllib.parse
 import threading
 import time
+import asyncio
 
 if __package__ is None or __package__ == '':
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from whisker.server import run_server
+try:
+    from whisker.webrtc_manager import WhiskerWebRTCSession
+except Exception:
+    WhiskerWebRTCSession = None
 
 CLI_DB_FILE = 'whisker.db'
 
@@ -312,13 +317,14 @@ def do_remove_connection(identifier):
         conn.commit()
         print("No connections remaining.")
 
-def do_send(msg, contact=None):
+def do_send(msg, contact=None, username=None):
     if not os.path.exists(CLI_DB_FILE):
         print("Not initialized. Run 'whisker init <invite_url>' first.")
         sys.exit(1)
 
+    target_ident = username or contact
     conn = init_cli_db()
-    target = resolve_connection(conn, contact)
+    target = resolve_connection(conn, target_ident)
 
     server_url = target['server_url']
     uuid = target['uuid']
@@ -353,89 +359,304 @@ def do_send(msg, contact=None):
         print(f"Failed to send message to {host_name}: {e}")
         sys.exit(1)
 
-def do_call(contact=None):
+def do_call(contact=None, username=None, video_source=None, audio_source=None, save_streams=False):
     if not os.path.exists(CLI_DB_FILE):
         print("Not initialized. Run 'whisker init <invite_url>' first.")
         sys.exit(1)
 
+    if WhiskerWebRTCSession is None:
+        print("Error: WebRTC calling requires aiortc, pillow, and av. Please install with: pip install aiortc pillow av")
+        sys.exit(1)
+
+    target_ident = username or contact
     conn = init_cli_db()
-    target = resolve_connection(conn, contact)
+    target = resolve_connection(conn, target_ident)
 
     server_url = target['server_url']
     uuid = target['uuid']
     token = target['token']
+    name = target.get('name') or 'Whisker CLI'
     host_name = target.get('host_name') or 'Host'
     host_uuid = target.get('host_uuid') or ''
 
+    session = WhiskerWebRTCSession(
+        server_url=server_url,
+        client_uuid=uuid,
+        client_token=token,
+        client_name=name,
+        host_uuid=host_uuid,
+        host_name=host_name,
+        save_streams=save_streams,
+        on_hangup=lambda: stop_event.set()
+    )
+
+    loop = asyncio.new_event_loop()
+    session.loop = loop
+    stop_event = threading.Event()
+    call_start_timestamp = time.time()
+
+    def sse_worker():
+        query = urllib.parse.urlencode({'uuid': uuid, 'token': token})
+        url = f"{server_url}/api/events?{query}"
+        while not stop_event.is_set():
+            try:
+                req = urllib.request.Request(url, headers={'Accept': 'text/event-stream'})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    while not stop_event.is_set():
+                        line = resp.readline()
+                        if not line:
+                            break
+                        line_str = line.decode('utf-8').strip()
+                        if line_str.startswith('data:'):
+                            try:
+                                raw_data = json.loads(line_str[5:].strip())
+                                inner_payload = raw_data.get('payload') if isinstance(raw_data.get('payload'), dict) else raw_data
+                                evt = inner_payload.get('type') or inner_payload.get('event') or raw_data.get('type') or raw_data.get('event') or ''
+
+                                # Ignore old buffered events created prior to this call
+                                ev_ts = inner_payload.get('timestamp') or raw_data.get('timestamp')
+                                if ev_ts and (ev_ts / 1000.0) < (call_start_timestamp - 2.0):
+                                    continue
+
+                                # Validate call_id if present
+                                event_call_id = inner_payload.get('call_id') or inner_payload.get('callId') or raw_data.get('call_id') or raw_data.get('callId')
+                                if event_call_id and session.call_id and str(event_call_id).strip() != str(session.call_id).strip():
+                                    continue
+
+                                is_answer = evt in ['webrtc_call_answer', 'call_answered'] or (bool(inner_payload.get('sdp')) and 'answer' in str(inner_payload.get('sdp')).lower())
+                                is_candidate = (evt in ['webrtc_ice_candidate', 'ice_candidate'] or bool(inner_payload.get('candidate')) or bool(raw_data.get('candidate')))
+                                is_hangup = (
+                                    evt in ['webrtc_call_hangup', 'call_ended', 'call_declined', 'hangup', 'call_rejected', 'call_cancelled', 'call_timeout'] or
+                                    str(inner_payload.get('status')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'hungup'] or
+                                    str(raw_data.get('status')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'hungup'] or
+                                    str(inner_payload.get('reason')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'timeout', 'stale']
+                                )
+
+                                if is_answer:
+                                    sdp = inner_payload.get('sdp') or raw_data.get('sdp')
+                                    if sdp and session.is_active and loop.is_running():
+                                        asyncio.run_coroutine_threadsafe(session.handle_remote_answer(sdp), loop)
+                                elif is_candidate and session.is_active and loop.is_running():
+                                    cand = inner_payload.get('candidate') or raw_data.get('candidate')
+                                    if cand:
+                                        asyncio.run_coroutine_threadsafe(session.handle_remote_ice_candidate(cand), loop)
+                                elif is_hangup:
+                                    if session.is_active:
+                                        print(f"\n📴 [{host_name} Call] Remote party ended or declined the call.")
+                                        session.hangup(notify_server=False)
+                                    stop_event.set()
+                                    return
+                            except Exception:
+                                pass
+            except Exception:
+                if not stop_event.is_set():
+                    time.sleep(1.0)
+
+    sse_thread = threading.Thread(target=sse_worker, daemon=True)
+    sse_thread.start()
+
+    def status_poller_worker():
+        while not stop_event.is_set():
+            time.sleep(1.0)
+            if stop_event.is_set() or not session.is_active:
+                break
+            try:
+                q = urllib.parse.urlencode({'call_id': session.call_id, 'uuid': uuid})
+                s_url = f"{server_url}/api/call/status?{q}"
+                s_req = urllib.request.Request(s_url)
+                with urllib.request.urlopen(s_req, timeout=3) as s_resp:
+                    st_data = json.loads(s_resp.read().decode('utf-8'))
+                    st = (st_data.get('status') or '').upper()
+                    is_act = st_data.get('active', False)
+                    if st in ['ENDED', 'DECLINED', 'REJECTED', 'CANCELLED'] or (st == 'IDLE' and not is_act):
+                        if session.is_active:
+                            print(f"\n📴 [{host_name} Call] Remote party ended or declined the call.")
+                            session.hangup(notify_server=False)
+                        stop_event.set()
+                        break
+            except Exception:
+                pass
+
+    poller_thread = threading.Thread(target=status_poller_worker, daemon=True)
+    poller_thread.start()
+
+    async def run_call():
+        success = await session.start_outgoing_call(video_source=video_source, audio_source=audio_source)
+        if not success:
+            stop_event.set()
+            return
+        print(f"[{host_name} Call] Calling in progress... (Press Ctrl+C or end on Mobile App)")
+        while session.is_active and not stop_event.is_set():
+            await asyncio.sleep(0.1)
+
     try:
-        payload = {
-            "uuid": uuid,
-            "token": token,
-            "video": False,
-            "sdp": "python-cli-dummy-sdp-replace-with-webrtc-later"
-        }
-        if host_uuid:
-            payload["contact"] = host_uuid
-            payload["host_uuid"] = host_uuid
+        loop.run_until_complete(run_call())
+    except KeyboardInterrupt:
+        print(f"\n[{host_name} Call] Ending call...")
+    finally:
+        stop_event.set()
+        session.hangup(notify_server=True)
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+        except Exception:
+            pass
 
-        req_data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(f"{server_url}/api/call", data=req_data, headers={'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req) as response:
-            res_data = json.loads(response.read().decode('utf-8'))
-            if 'error' in res_data:
-                print(f"Error: {res_data['error']}")
-            else:
-                print(f"[{host_name}] Call initiated (stub).")
-    except Exception as e:
-        print(f"Failed to initiate call to {host_name}: {e}")
-        sys.exit(1)
-
-def _listen_stream_worker(target, label):
+def _listen_stream_worker(target, label, video_source=None, audio_source=None, save_streams=False):
     server_url = target['server_url']
     uuid = target['uuid']
     token = target['token']
     host_name = target.get('host_name') or label
+    name = target.get('name') or 'Whisker CLI'
 
     query = urllib.parse.urlencode({'uuid': uuid, 'token': token})
     url = f"{server_url}/api/events?{query}"
 
-    try:
-        req = urllib.request.Request(url, headers={'Accept': 'text/event-stream'})
-        with urllib.request.urlopen(req) as response:
-            while True:
-                line = response.readline()
-                if not line:
-                    break
+    active_call_session = None
+    call_loop = None
 
-                line_str = line.decode('utf-8').strip()
-                if line_str.startswith('data:'):
-                    data_str = line_str[5:].strip()
-                    try:
-                        data = json.loads(data_str)
-                        event_type = data.get('event') or data.get('type')
-                        if event_type in ['chat_message', 'message']:
-                            if data.get('sender') == 'phone':
-                                print(f"\n[{host_name}] {data.get('text')}")
-                        elif event_type == 'call_accepted':
-                            print(f"\n[{host_name} Call] Host accepted the call.")
-                        elif event_type == 'call_rejected':
-                            print(f"\n[{host_name} Call] Host rejected the call.")
-                        elif event_type == 'webrtc_call_initiate':
-                            print(f"\n[{host_name} Call] Incoming call from Host!")
-                        elif event_type in ['hangup', 'call_ended']:
-                            print(f"\n[{host_name} Call] Host hung up.")
-                        else:
-                            print(f"\n[{host_name} Event] {data}")
-                    except json.JSONDecodeError:
-                        print(f"\n[{host_name} Raw Event] {data_str}")
-    except Exception as e:
-        print(f"[{host_name}] Stream closed: {e}")
+    while True:
+        try:
+            req = urllib.request.Request(url, headers={'Accept': 'text/event-stream'})
+            with urllib.request.urlopen(req, timeout=30) as response:
+                while True:
+                    line = response.readline()
+                    if not line:
+                        break
 
-def do_listen(contact=None, listen_all=False):
+                    line_str = line.decode('utf-8').strip()
+                    if line_str.startswith('data:'):
+                        data_str = line_str[5:].strip()
+                        try:
+                            raw_data = json.loads(data_str)
+                            inner_payload = raw_data.get('payload') if isinstance(raw_data.get('payload'), dict) else raw_data
+                            event_type = inner_payload.get('event') or inner_payload.get('type') or raw_data.get('event') or raw_data.get('type') or ''
+
+                            is_incoming_call = (
+                                event_type in ['webrtc_call_initiate', 'call', 'call_initiate'] or
+                                raw_data.get('type') in ['webrtc_call_initiate', 'call', 'call_initiate'] or
+                                raw_data.get('event') in ['call', 'webrtc_call_initiate'] or
+                                (bool(inner_payload.get('sdp')) and ('offer' in str(inner_payload.get('sdp')).lower() or event_type == 'call'))
+                            )
+                            is_ice_candidate = (
+                                event_type in ['webrtc_ice_candidate', 'ice_candidate'] or
+                                bool(inner_payload.get('candidate')) or
+                                bool(raw_data.get('candidate'))
+                            ) and bool(inner_payload.get('candidate') or raw_data.get('candidate'))
+
+                            is_hangup = (
+                                event_type in ['hangup', 'call_ended', 'webrtc_call_hangup', 'call_declined', 'call_rejected', 'call_cancelled', 'call_timeout'] or
+                                str(inner_payload.get('status')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'hungup'] or
+                                str(raw_data.get('status')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'hungup'] or
+                                str(inner_payload.get('reason')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'timeout', 'stale']
+                            )
+
+                            if event_type in ['chat_message', 'message']:
+                                if (inner_payload.get('sender') or raw_data.get('sender')) == 'phone':
+                                    print(f"\n[{host_name}] {inner_payload.get('text') or raw_data.get('text')}")
+                            elif event_type == 'call_accepted':
+                                print(f"\n[{host_name} Call] Host accepted the call.")
+                            elif event_type == 'call_rejected':
+                                print(f"\n[{host_name} Call] Host rejected the call.")
+                            elif is_incoming_call:
+                                caller_name = inner_payload.get('name') or raw_data.get('name') or host_name
+                                caller_uuid = inner_payload.get('host_uuid') or raw_data.get('host_uuid') or target.get('host_uuid') or ''
+                                is_video = inner_payload.get('video') is not False and raw_data.get('video') is not False
+                                incoming_call_id = inner_payload.get('call_id') or inner_payload.get('callId') or raw_data.get('call_id') or raw_data.get('callId')
+
+                                if WhiskerWebRTCSession is None:
+                                    print(f"\n📞 [{caller_name} Call] Incoming Call received. (Install aiortc, pillow, and av to enable real-time WebRTC media rendering).")
+                                    continue
+
+                                print(f"\n📞 [{caller_name} Call] Incoming Audio+Video Call (ID: {incoming_call_id or 'new'})! Auto-accepting & opening live media...")
+
+                                if active_call_session and active_call_session.is_active:
+                                    active_call_session.hangup()
+
+                                active_call_session = WhiskerWebRTCSession(
+                                    server_url=server_url,
+                                    client_uuid=uuid,
+                                    client_token=token,
+                                    client_name=name,
+                                    host_uuid=caller_uuid,
+                                    host_name=caller_name,
+                                    call_id=incoming_call_id,
+                                    save_streams=save_streams
+                                )
+
+                                call_loop = asyncio.new_event_loop()
+                                active_call_session.loop = call_loop
+
+                                offer_sdp = inner_payload.get('sdp') or raw_data.get('sdp') or ''
+
+                                def start_incoming_call(sess, loop_inst, sdp, cname, is_vid, v_src, a_src, cid):
+                                    asyncio.set_event_loop(loop_inst)
+                                    try:
+                                        loop_inst.run_until_complete(
+                                            sess.accept_incoming_call(
+                                                offer_sdp=sdp,
+                                                peer_name=cname,
+                                                is_video=is_vid,
+                                                video_source=v_src,
+                                                audio_source=a_src,
+                                                call_id=cid
+                                            )
+                                        )
+                                        loop_inst.run_forever()
+                                    except Exception:
+                                        pass
+                                    finally:
+                                        try:
+                                            loop_inst.close()
+                                        except Exception:
+                                            pass
+
+                                t = threading.Thread(
+                                    target=start_incoming_call,
+                                    args=(active_call_session, call_loop, offer_sdp, caller_name, is_video, video_source, audio_source, incoming_call_id),
+                                    daemon=True
+                                )
+                                t.start()
+
+                            elif is_ice_candidate:
+                                event_cid = inner_payload.get('call_id') or inner_payload.get('callId') or raw_data.get('call_id') or raw_data.get('callId')
+                                if event_cid and active_call_session and active_call_session.call_id and str(event_cid).strip() != str(active_call_session.call_id).strip():
+                                    pass
+                                elif active_call_session and call_loop and active_call_session.is_active and call_loop.is_running():
+                                    cand = inner_payload.get('candidate') or raw_data.get('candidate')
+                                    asyncio.run_coroutine_threadsafe(
+                                        active_call_session.handle_remote_ice_candidate(cand),
+                                        call_loop
+                                    )
+                            elif is_hangup:
+                                event_cid = inner_payload.get('call_id') or inner_payload.get('callId') or raw_data.get('call_id') or raw_data.get('callId')
+                                if event_cid and active_call_session and active_call_session.call_id and str(event_cid).strip() != str(active_call_session.call_id).strip():
+                                    pass
+                                else:
+                                    print(f"\n📴 [{host_name} Call] Call ended by remote host.")
+                                    if active_call_session and active_call_session.is_active:
+                                        active_call_session.hangup()
+                                        active_call_session = None
+                            else:
+                                print(f"\n[{host_name} Event] {raw_data}")
+                        except json.JSONDecodeError:
+                            print(f"\n[{host_name} Raw Event] {data_str}")
+        except Exception as e:
+            time.sleep(1.0)
+        finally:
+            if active_call_session and active_call_session.is_active:
+                active_call_session.hangup()
+
+def do_listen(contact=None, username=None, listen_all=False, video_source=None, audio_source=None, save_streams=False):
     if not os.path.exists(CLI_DB_FILE):
         print("Not initialized. Run 'whisker init <invite_url>' first.")
         sys.exit(1)
 
+    target_ident = username or contact
     conn = init_cli_db()
 
     if listen_all:
@@ -447,7 +668,11 @@ def do_listen(contact=None, listen_all=False):
         print(f"Listening for events across all {len(connections)} paired connections (Press Ctrl+C to stop)...")
         threads = []
         for c in connections:
-            t = threading.Thread(target=_listen_stream_worker, args=(c, c.get('host_name') or f"#{c['id']}"), daemon=True)
+            t = threading.Thread(
+                target=_listen_stream_worker,
+                args=(c, c.get('host_name') or f"#{c['id']}", video_source, audio_source, save_streams),
+                daemon=True
+            )
             t.start()
             threads.append(t)
 
@@ -458,22 +683,23 @@ def do_listen(contact=None, listen_all=False):
             print("\nStopped listening.")
             return
 
-    target = resolve_connection(conn, contact)
+    target = resolve_connection(conn, target_ident)
     host_name = target.get('host_name') or 'Host'
     print(f"Listening for events from '{host_name}' ({target['server_url']}) (Press Ctrl+C to stop)...")
 
     try:
-        _listen_stream_worker(target, host_name)
+        _listen_stream_worker(target, host_name, video_source=video_source, audio_source=audio_source, save_streams=save_streams)
     except KeyboardInterrupt:
         print("\nStopped listening.")
 
-def do_info(contact=None):
+def do_info(contact=None, username=None):
     if not os.path.exists(CLI_DB_FILE):
         print("Not initialized. Run 'whisker init <invite_url>' first.")
         sys.exit(1)
 
+    target_ident = username or contact
     conn = init_cli_db()
-    target = resolve_connection(conn, contact)
+    target = resolve_connection(conn, target_ident)
 
     server_url = target['server_url']
     uuid = target['uuid']
@@ -517,17 +743,17 @@ def print_help():
     print("""Whisker Unified CLI & Home Server Package
 
 Usage:
-  whisker server [--port PORT] [--db DB_FILE]      Start Whisker Home Server
-  whisker init <invite_url>                        Initialize/pair with a host via invite URL
-  whisker connections (or: list, contacts)         List all configured paired host connections
-  whisker switch <id|name>                         Switch the active default host connection
-  whisker remove <id|name>                         Remove/disconnect a paired host connection
-  whisker send [-c CONTACT] <message>              Send message to active or targeted host
-  whisker call [-c CONTACT]                        Initiate voice/video call to active or targeted host
-  whisker listen [-c CONTACT] [--all]              Listen for realtime SSE events
-  whisker info [-c CONTACT]                        Print connection & server status
-  whisker setup-fcm                                Run Firebase / FCM OAuth2 setup tool
-  whisker help                                     Show this help menu
+  whisker server [--port PORT] [--db DB_FILE]                               Start Whisker Home Server
+  whisker init <invite_url>                                                 Initialize/pair with a host via invite URL
+  whisker connections (or: list, contacts)                                  List all configured paired host connections
+  whisker switch <id|name>                                                  Switch the active default host connection
+  whisker remove <id|name>                                                  Remove/disconnect a paired host connection
+  whisker send [-u USER] [-c CONTACT] <message>                             Send message to active or targeted host
+  whisker call [-u USER] [-c CONTACT] [-v DEV/FILE] [-a DEV/FILE] [--save-streams]  Initiate WebRTC call (A/V stream, records to <caller>.<callee>.<unixepoch>.mp4)
+  whisker listen [-u USER] [-c CONTACT] [-v DEV/FILE] [-a DEV/FILE] [--save-streams] [--all]  Listen for SSE events & auto-answer incoming WebRTC calls
+  whisker info [-u USER] [-c CONTACT]                                       Print connection & server status
+  whisker setup-fcm                                                         Run Firebase / FCM OAuth2 setup tool
+  whisker help                                                              Show this help menu
 """)
 
 def main():
@@ -569,29 +795,39 @@ def main():
 
     elif cmd == 'send':
         parser = argparse.ArgumentParser(description="Send message to Home Server host")
+        parser.add_argument('-u', '--username', type=str, default=None, help="Target specific host/user by username or contact")
         parser.add_argument('-c', '--contact', type=str, default=None, help="Target specific host by ID, name, or UUID")
         parser.add_argument('message', nargs='+', help="Message text to send")
         args = parser.parse_args(sys.argv[2:])
-        do_send(" ".join(args.message), contact=args.contact)
+        do_send(" ".join(args.message), contact=args.contact, username=args.username)
 
     elif cmd == 'call':
-        parser = argparse.ArgumentParser(description="Initiate call to Home Server host")
+        parser = argparse.ArgumentParser(description="Initiate WebRTC call to Home Server host")
+        parser.add_argument('-u', '--username', type=str, default=None, help="Target specific host/user by username or contact")
         parser.add_argument('-c', '--contact', type=str, default=None, help="Target specific host by ID, name, or UUID")
+        parser.add_argument('-v', '--video', type=str, default=None, help="Video source (e.g. Linux V4L2 device /dev/video0 or file)")
+        parser.add_argument('-a', '--audio', type=str, default=None, help="Audio source (e.g. Linux ALSA default, pulse, or file)")
+        parser.add_argument('--save-streams', action='store_true', help="Save incoming and outgoing audio+video streams to a single MP4 file (<caller>.<callee>.<unixepoch>.mp4)")
         args = parser.parse_args(sys.argv[2:])
-        do_call(contact=args.contact)
+        do_call(contact=args.contact, username=args.username, video_source=args.video, audio_source=args.audio, save_streams=args.save_streams)
 
     elif cmd == 'listen':
         parser = argparse.ArgumentParser(description="Listen for SSE events from Home Server")
+        parser.add_argument('-u', '--username', type=str, default=None, help="Target specific host/user by username or contact")
         parser.add_argument('-c', '--contact', type=str, default=None, help="Target specific host by ID, name, or UUID")
+        parser.add_argument('-v', '--video', type=str, default=None, help="Video source to stream if a call arrives (e.g. /dev/video0)")
+        parser.add_argument('-a', '--audio', type=str, default=None, help="Audio source to stream if a call arrives (e.g. default, pulse)")
+        parser.add_argument('--save-streams', action='store_true', help="Save incoming and outgoing audio+video streams to a single MP4 file (<caller>.<callee>.<unixepoch>.mp4)")
         parser.add_argument('--all', action='store_true', help="Listen to events across all paired connections simultaneously")
         args = parser.parse_args(sys.argv[2:])
-        do_listen(contact=args.contact, listen_all=args.all)
+        do_listen(contact=args.contact, username=args.username, listen_all=args.all, video_source=args.video, audio_source=args.audio, save_streams=args.save_streams)
 
     elif cmd == 'info':
         parser = argparse.ArgumentParser(description="Show client info and server status")
+        parser.add_argument('-u', '--username', type=str, default=None, help="Target specific host/user by username or contact")
         parser.add_argument('-c', '--contact', type=str, default=None, help="Target specific host by ID, name, or UUID")
         args = parser.parse_args(sys.argv[2:])
-        do_info(contact=args.contact)
+        do_info(contact=args.contact, username=args.username)
 
     elif cmd in ['setup-fcm', 'fcm-setup']:
         from whisker.setup_fcm import main as run_setup_fcm

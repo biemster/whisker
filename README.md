@@ -87,7 +87,7 @@ The server listens on `http://localhost:3000` (or your configured port via `--po
 
 ## AI Agent & CLI Integration (`whisker`)
 
-The `whisker` CLI enables AI harnesses (such as OpenClaw, AutoGPT, or LangChain agents) and automated scripts to pair with multiple host devices, send messages, initiate calls, or listen for events.
+The `whisker` CLI enables AI harnesses (such as OpenClaw, AutoGPT, or LangChain agents), headless Linux servers, and automated scripts to pair with multiple host devices, send messages, initiate WebRTC audio/video calls, and stream real-time events.
 
 ### Multi-Connection CLI Workflows:
 
@@ -107,40 +107,73 @@ The `whisker` CLI enables AI harnesses (such as OpenClaw, AutoGPT, or LangChain 
   # Or switch by connection ID or UUID:
   whisker switch 2
   ```
-- **Send a Message (to Active or Specific Host)**:
+- **Send a Message (to Active or Specific Host/Username)**:
   ```bash
-  # Send to active host
+  # Send to active host:
   whisker send "Hello from OpenClaw AI agent! Event processing complete."
 
-  # Target specific host by name or ID:
+  # Target specific host by username:
+  whisker send -u "Alice" "Hello Alice! Status update."
+
+  # Target specific host by name, ID, or UUID:
   whisker send -c "Office Tablet" "Alert: High CPU temperature detected."
   ```
-- **Initiate a Call**:
+- **Initiate a WebRTC Audio / Video Call**:
   ```bash
+  # Initiate audio+video call to active host:
   whisker call
-  # Or target specific host:
+
+  # Initiate call targeting specific username or contact:
+  whisker call -u "Alice"
   whisker call -c "Living Room Phone"
+
+  # Stream Linux camera (V4L2 device) & audio (ALSA/Pulse) during call:
+  whisker call -u "Alice" --video /dev/video0 --audio default
+
+  # Save incoming and outgoing media streams to disk (<caller>.<callee>.<unixepoch>.mp4):
+  whisker call -u "Alice" --save-streams
   ```
-- **Stream Events (SSE Listener)**:
+- **Stream Events (SSE Listener) & Auto-Answer Calls**:
   ```bash
-  # Listen to active host:
+  # Listen to active host (automatically renders incoming WebRTC calls with aspect-ratio-preserved GUI):
   whisker listen
 
-  # Listen to specific host:
+  # Listen to specific user or host:
+  whisker listen -u "Alice"
   whisker listen -c "Office Tablet"
+
+  # Listen with camera/mic configured for incoming calls:
+  whisker listen -u "Alice" --video /dev/video0 --audio default
+
+  # Listen and save all accepted calls to disk:
+  whisker listen -u "Alice" --save-streams
 
   # Listen to all paired connections simultaneously:
   whisker listen --all
   ```
+- **CLI WebRTC Calling & Media Features**:
+  - **Full Audio & Video Sessions**: Every call establishes a complete bidirectional audio and video session. If hardware sources are omitted, standard fallback tracks (48 kHz silence audio and dynamic video placeholder card) ensure full reciprocal mobile camera streaming.
+  - **Aspect-Ratio-Preserved Video Window**: Resizable GUI window (`480x720` portrait default) dynamically scales incoming portrait and landscape camera feeds while preserving their exact aspect ratio without distortion.
+  - **Stream Recording (`--save-streams` / Headless)**: Pass `--save-streams` to record the synchronized audio and video stream to `<caller>.<callee>.<unixepoch>.mp4`. When run in headless environments (without an active display server), calls automatically record to disk.
+  - **Robust Remote Hangup Handling**: Multi-layered hangup detection (SSE events, active call status polling, ICE state tracking) guarantees the CLI immediately returns to the shell when the mobile app hangs up.
 - **Check Connectivity & System Info**:
   ```bash
   whisker info
-  # Or check specific connection:
+  # Or check specific username or connection ID:
+  whisker info -u "Alice"
   whisker info -c 1
   ```
 - **Remove / Disconnect a Paired Device**:
   ```bash
   whisker remove "Old Phone"
+  ```
+- **Start Home Server with Custom DB / Port**:
+  ```bash
+  whisker server --port 3000 --db /path/to/whisker_server.db
+  ```
+- **Show Built-In Help**:
+  ```bash
+  whisker help
   ```
 
 ---
