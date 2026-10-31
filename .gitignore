@@ -42,6 +42,9 @@ whisker_server.db
 whisker_server.db-journal
 whisker_server.db-shm
 whisker_server.db-wal
+whisker_server_*.db*
+whisker_client*.db*
+.whisker_active_client
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

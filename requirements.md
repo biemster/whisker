@@ -212,27 +212,41 @@ As part of the roadmap for supporting multiple mobile apps on a single Home Serv
 4. **Admin Single Point of Failure**: If the sole Admin mobile app is uninstalled or disconnected permanently, the Home Server can be reset or a secondary host promoted via CLI.
 5. **FCM Payload Limits**: Rejection data sent in the FCM tickle is kept minimal to strictly adhere to FCM's 4KB data payload limits.
 
+### 8.6 Multi-Server Architecture, Server Naming & Admin Approval Scheme (Zero-PIN Pairing)
+- **Equal Status for All Home Servers**: Every registered Home Server operates on an equal status without any 'primary' server designation. During initial app setup, configuring the first server provides an unconfigured starting point, but once saved, all registered home servers maintain equal peer status.
+- **Server Name Attribution**: In addition to its host/IP address, each Home Server has a distinct name configured via the `--servername` (or `--server-name`) CLI argument on `whisker server`.
+- **Zero-PIN Admin Approval Scheme**:
+  - Home Server cards and server configuration dialogs in the mobile app do not require manual PIN entry.
+  - The initial pairing of the first mobile app to an unconfigured Home Server automatically approves that mobile app as the Admin connection (`is_admin: 1`, `status: APPROVED`).
+  - For all subsequent companion mobile app connections, pairing requests are registered as `PENDING` and enqueued as `mobile_pairing_request` events delivered directly to the Admin mobile app.
+  - The Admin mobile user reviews and approves or rejects companion pairing requests directly in the mobile app's Approvals interface. No manual PIN exchange or entry is required.
+- **Contact Server Attribution & Subtle Connection Indicators**:
+  - All approved contacts (Web, CLI, and Mobile) prominently display their Home Server name and address.
+  - Mobile app contacts never display `local (Same Server)`; they always display the server name and address like Web and CLI clients.
+  - Mobile app contact cards subtly indicate whether a connection is via a **Shared Home Server** (both peers connected through the same server) or **Indirect** (cross-server federation where peers are hosted on different home servers).
+  - CLI clients receive their own dedicated `CLI Client` badge across the application, distinct from `Web Client`.
+
 ---
 
 ## 9. Mobile-to-Mobile Messaging & Communication Specification
 
-Whisker supports full-duplex messaging, media transfer, and WebRTC audio/video calls directly between mobile apps—both on the **same Home Server** (local) and across **different Home Servers** (remote federation).
+Whisker supports full-duplex messaging, media transfer, and WebRTC audio/video calls directly between mobile apps—both on the **same Home Server** (shared server) and across **different Home Servers** (indirect remote federation).
 
 ### 9.1 Technical Architecture & Signaling Flow
 
-1. **Same Home Server (Local Mobile Peers)**:
-   - Mobile apps paired to the same Home Server communicate using the same internal event broker (`_notify_host_streams`) as web and CLI clients.
+1. **Shared Home Server (Both Peers on the Same Home Server)**:
+   - Mobile apps paired to the same Home Server communicate using the internal event broker (`_notify_host_streams`) as web and CLI clients.
    - Outgoing messages and WebRTC SDP offers/answers are posted to the Home Server's unified response/message endpoints with the target peer's `host_uuid`.
    - The Home Server enqueues the event, pushes an FCM tickle to the target mobile device, and delivers the event payload upon retrieval.
-   - **UI Representation**: The contact card and chat header display `📱 MOBILE APP` and an emerald `🏠 local` badge indicating the peer resides on the same Home Server instance.
+   - **UI Representation**: The contact card and chat header display `📱 Mobile App`, the Home Server name and address (e.g. `Living Room (http://192.168.1.50:3000)`), and a subtle `🔗 Shared Server` indicator.
 
-2. **Cross-Server (Remote Home Server Federation)**:
+2. **Cross-Server (Indirect / Remote Home Server Federation)**:
    - When connecting mobile apps across different Home Servers, Home Server A acts as a client on Home Server B and vice versa, establishing a symmetric bidirectional channel.
    - **Invite Mechanism**: Connection uses the same invite structure as standard visitors (`http://<remote-server-address>/invite/<invite-code>`).
    - **Claim Flow**: The local mobile app enters or scans the invite URL via the **Connect Peer via Invite** dialog (`/api/host/claim_remote_invite` or direct client claim). The local client claims the invite on the remote server, obtaining a guest `uuid` and `token` alongside the remote server's address.
    - **Outbound Signaling & Messaging**: When messaging or calling a remote mobile peer, the local app issues HTTP requests (`POST /api/message`, `POST /api/call`, `POST /api/signal`, `POST /api/hangup`) directly to the remote server's API endpoints using the claimed guest credentials.
    - **Inbound Event Polling & Push**: Remote events from the peer server are fetched via `/api/guest/events?uuid=<guest_uuid>` and synced into the local Room database.
-   - **UI Representation**: In both mobile apps, the contact card and chat header prominently display `📱 MOBILE APP` alongside a blue `🌐 <remote_server_address>` badge, making it immediately transparent which Home Server address the peer is hosted on.
+   - **UI Representation**: In both mobile apps, the contact card and chat header display `📱 Mobile App`, the remote Home Server name and address (e.g. `Office (http://100.64.0.5:3000)`), and a subtle `🔀 Indirect` indicator.
 
 ### 9.2 Zero Inter-Server Background Traffic & On-Demand Architecture
 - **Strictly Event-Driven / On-Demand**: Home Servers never continuously ping, poll, or broadcast to other Home Servers. There are zero background heartbeats, synchronization cycles, or gossip protocols between servers.

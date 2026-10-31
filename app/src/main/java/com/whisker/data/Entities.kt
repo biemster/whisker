@@ -51,3 +51,29 @@ data class Invite(
     val isUsed: Boolean = false,
     val createdTimestamp: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "home_servers")
+data class HomeServer(
+    @PrimaryKey val id: String = java.util.UUID.randomUUID().toString(),
+    val name: String,
+    val url: String,
+    val apiKey: String = "",
+    val isPrimary: Boolean = false,
+    val isEnabled: Boolean = true,
+    val fcmToken: String = "",
+    val senderId: String = "",
+    val projectId: String = "",
+    val appId: String = "",
+    val fcmApiKey: String = "",
+    val lastSeen: Long = 0L,
+    val isReachable: Boolean = false,
+    val statusMessage: String = "Disconnected",
+    val registeredUuid: String = "",
+    val clientIdentity: String = "",
+    val allowDirectCalls: Boolean = false,
+    val isAdmin: Boolean = false,
+    val serverRole: String = if (isAdmin) "ADMIN" else "COMPANION" // "ADMIN", "COMPANION", "MEMBER"
+) {
+    val isHost: Boolean get() = serverRole == "ADMIN" || serverRole == "COMPANION" || (serverRole.isEmpty() && isAdmin)
+    val isMember: Boolean get() = serverRole == "MEMBER"
+}

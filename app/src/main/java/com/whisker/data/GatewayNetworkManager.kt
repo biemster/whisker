@@ -115,11 +115,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
     }
 
     private fun getDefaultServerUrl(): String {
-        return if (isEmulator()) "http://10.0.2.2:3000" else "http://localhost:3000"
+        return ""
     }
 
     // Configuration Settings
-    val serverUrl = MutableStateFlow("http://10.0.2.2:3000")
+    val serverUrl = MutableStateFlow("")
     val apiKey = MutableStateFlow("")
     val hostUsername = MutableStateFlow("")
     val autoApproveAllowed = MutableStateFlow(false)
@@ -152,6 +152,9 @@ class GatewayNetworkManager(private val context: Context, private val repository
     private var lastRegisteredServerUrl: String? = null
     private var lastRegisteredApiKey: String? = null
 
+    val allHomeServers = repository.allHomeServers
+    val homeServers = MutableStateFlow<List<HomeServer>>(emptyList())
+
     private val fetchMutex = Mutex()
 
     fun getCleanServerUrl(): String = serverUrl.value.trim().removeSuffix("/")
@@ -161,13 +164,14 @@ class GatewayNetworkManager(private val context: Context, private val repository
         val savedEventIds = prefs.getStringSet("processed_event_ids", emptySet()) ?: emptySet()
         processedEventIds.addAll(savedEventIds)
         
-        // Restore serverUrl
-        var storedServerUrl = prefs.getString("server_url", "") ?: ""
-        if (storedServerUrl.isEmpty() || storedServerUrl == "https://whisker-tunnel.local") {
-            storedServerUrl = getDefaultServerUrl()
-            prefs.edit().putString("server_url", storedServerUrl).apply()
+        // Restore serverUrl (ignoring any legacy dummy localhost / 10.0.2.2 URLs)
+        val storedServerUrl = prefs.getString("server_url", "") ?: ""
+        if (storedServerUrl.contains("10.0.2.2") || storedServerUrl.contains("localhost")) {
+            prefs.edit().remove("server_url").apply()
+            serverUrl.value = ""
+        } else {
+            serverUrl.value = storedServerUrl
         }
-        serverUrl.value = storedServerUrl
 
         // Restore or Generate apiKey as UUID4
         var storedApiKey = prefs.getString("local_private_access_key", "") ?: ""
@@ -202,17 +206,56 @@ class GatewayNetworkManager(private val context: Context, private val repository
         registerFcmToken()
         
         scope.launch(Dispatchers.IO) {
-            if (storedServerUrl.isNotEmpty() && storedServerUrl.startsWith("http")) {
-                checkAndRegisterMobileStatus(storedServerUrl, storedApiKey)
-                fetchFcmConfigFromServer(storedServerUrl, storedApiKey)
-                registerPushTokenOnServer(storedServerUrl, storedApiKey, pushToken.value)
-                updateDirectCallsAllowed(savedAllowDirectCalls)
-                fetchPendingEventsFromServerSuspended()
+            val initialList = repository.getAllHomeServersSync()
+            for (s in initialList) {
+                val cleanUrl = s.url.trim().lowercase()
+                if (cleanUrl.isBlank() || cleanUrl.contains("10.0.2.2") || cleanUrl.contains("localhost") || cleanUrl == "http://" || cleanUrl == "https://" || !cleanUrl.startsWith("http")) {
+                    repository.deleteHomeServer(s)
+                }
+            }
+            repository.allHomeServers.collect { list ->
+                val validList = list.filter { s ->
+                    val u = s.url.trim().lowercase()
+                    u.isNotBlank() && (u.startsWith("http://") || u.startsWith("https://")) && !u.contains("10.0.2.2") && !u.contains("localhost") && u != "http://" && u != "https://"
+                }
+                for (s in list) {
+                    if (s !in validList) {
+                        repository.deleteHomeServer(s)
+                    }
+                }
+                homeServers.value = validList
+                val active = validList.firstOrNull { it.isEnabled } ?: validList.firstOrNull()
+                if (active != null) {
+                    serverUrl.value = active.url
+                    apiKey.value = active.apiKey
+                } else {
+                    serverUrl.value = ""
+                }
+                updateAggregateConnectionStatus(validList)
             }
         }
 
         fetchPendingEventsFromServer()
         startForegroundPollingLoop()
+    }
+
+    fun updateAggregateConnectionStatus(list: List<HomeServer>) {
+        val enabled = list.filter { it.isEnabled }
+        if (enabled.isEmpty()) {
+            serverReachable.value = false
+            _connectionStatus.value = if (list.isEmpty()) "Disconnected" else "All Servers Disabled"
+            return
+        }
+        val reachableCount = enabled.count { it.isReachable }
+        serverReachable.value = reachableCount > 0
+        if (reachableCount == enabled.size) {
+            _connectionStatus.value = if (enabled.size > 1) "$reachableCount/${enabled.size} Online" else "Connected"
+        } else if (reachableCount > 0) {
+            _connectionStatus.value = "$reachableCount/${enabled.size} Online"
+        } else {
+            val anyConnecting = enabled.any { it.statusMessage == "Connecting..." }
+            _connectionStatus.value = if (anyConnecting) "Connecting..." else "Disconnected"
+        }
     }
 
     @Volatile private var isPollingLoopRunning = false
@@ -227,8 +270,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
             while (true) {
                 try {
                     val inForeground = CompanionRegistry.isAppInForeground
-                    val serverUrlVal = serverUrl.value.removeSuffix("/")
-                    if (inForeground && serverUrlVal.isNotEmpty() && serverUrlVal.startsWith("http")) {
+                    if (inForeground) {
                         fetchPendingEventsFromServerSuspended()
                     }
                 } catch (e: Exception) {
@@ -245,256 +287,298 @@ class GatewayNetworkManager(private val context: Context, private val repository
         }
     }
 
-    suspend fun fetchPendingEventsFromServerSuspended() {
-        val serverUrlVal = serverUrl.value.removeSuffix("/")
-        val pinVal = apiKey.value
-        val pushTokenVal = pushToken.value
-
-        if (serverUrlVal.isEmpty() || !serverUrlVal.startsWith("http")) {
+    suspend fun fetchPendingEventsFromServerSuspended(tickleEventId: String? = null, targetServerUrl: String? = null) {
+        val servers = homeServers.value.ifEmpty {
+            repository.getAllHomeServersSync()
+        }
+        val enabledServers = servers.filter { it.isEnabled }
+        if (enabledServers.isEmpty()) {
             serverReachable.value = false
-            _connectionStatus.value = "Disconnected"
+            _connectionStatus.value = if (servers.isEmpty()) "Disconnected" else "All Servers Disabled"
             return
         }
 
-        var fetchSuccess = false
-        val fetchedEventIds = mutableSetOf<String>()
+        val sortedServers = if (!targetServerUrl.isNullOrEmpty()) {
+            val targetClean = targetServerUrl.trimEnd('/')
+            enabledServers.sortedByDescending { it.url.trimEnd('/') == targetClean }
+        } else {
+            enabledServers
+        }
 
         fetchMutex.withLock {
+            var anyReachable = false
+            for (server in sortedServers) {
+                val ok = syncServerEventsAndClients(server, tickleEventId)
+                if (ok) anyReachable = true
+            }
+
+            val updatedServers = repository.getAllHomeServersSync()
+            updateAggregateConnectionStatus(updatedServers)
+
+            // Remote peer federation polling
             try {
-                Log.d("GatewayNetworkManager", "Polling Home Server: $serverUrlVal/api/host/events")
-                // 1. Fetch pending host events immediately for fast FCM response
-                val request = Request.Builder()
-                    .url("$serverUrlVal/api/host/events")
-                    .header("Authorization", "Bearer $pinVal")
-                    .get()
-                    .build()
-
-                okHttpClient.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) {
-                        fetchSuccess = true
-                        serverReachable.value = true
-                        _connectionStatus.value = "Connected"
-                        Log.d("GatewayNetworkManager", "Successfully connected to Home Server ($serverUrlVal)")
-                        val body = response.body?.string() ?: ""
-                        val eventsArray = JSONArray(body)
-                        for (i in 0 until eventsArray.length()) {
-                            val eventObj = eventsArray.getJSONObject(i)
-                            val id = eventObj.getString("id")
-                            fetchedEventIds.add(id)
-                            val type = eventObj.getString("type")
-                            val payload = eventObj.getJSONObject("payload")
-
-                            val alreadyProcessed = synchronized(processedEventIds) {
-                                if (processedEventIds.contains(id)) {
-                                    true
-                                } else {
-                                    processedEventIds.add(id)
-                                    if (processedEventIds.size > 200) {
-                                        val iterator = processedEventIds.iterator()
-                                        if (iterator.hasNext()) {
-                                            iterator.next()
-                                            iterator.remove()
-                                        }
-                                    }
-                                    val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
-                                    prefs.edit().putStringSet("processed_event_ids", processedEventIds.toSet()).apply()
-                                    false
+                val localClients = repository.getAllRequestsSync()
+                for (remotePeer in localClients.filter { it.serverAddress != "local" && !servers.any { s -> s.url == it.serverAddress } && it.status == "APPROVED" && it.token.isNotEmpty() }) {
+                    try {
+                        val remoteUrl = remotePeer.serverAddress.trimEnd('/')
+                        val remoteReq = Request.Builder()
+                            .url("$remoteUrl/api/guest/events?uuid=${remotePeer.uuid}&token=${remotePeer.token}")
+                            .get()
+                            .build()
+                        okHttpClient.newCall(remoteReq).execute().use { remoteResp ->
+                            if (remoteResp.isSuccessful) {
+                                val remoteBody = remoteResp.body?.string() ?: "[]"
+                                val remoteEvents = JSONArray(remoteBody)
+                                for (j in 0 until remoteEvents.length()) {
+                                    val rEvt = remoteEvents.getJSONObject(j)
+                                    val payload = if (rEvt.has("payload")) JSONObject(rEvt.getString("payload")) else rEvt
+                                    payload.put("server_address", remoteUrl)
+                                    payload.put("client_type", "MOBILE")
+                                    processIncomingPayload(payload.toString(), fromServerPoll = true, originServerUrl = remoteUrl)
                                 }
                             }
-
-                            if (!alreadyProcessed) {
-                                // Adapts the server-fetched payload back to original processor format
-                                payload.put("event", type)
-                                processIncomingPayload(payload.toString(), fromServerPoll = true)
-                            }
-
-                            // Clear event queue item on server
-                            ackEventOnServer(serverUrlVal, pinVal, id)
                         }
-
-                        // Also sync FCM push config and register current FCM push token if connected
-                        fetchFcmConfigFromServer(serverUrlVal, pinVal)
-                        registerPushTokenOnServer(serverUrlVal, pinVal, pushToken.value)
-                    } else {
-                        Log.e("GatewayNetworkManager", "Failed to fetch events from server: ${response.code}")
-                        if (response.code == 401 || response.code == 403) {
-                            val registered = checkAndRegisterMobileStatus(serverUrlVal, pinVal)
-                            if (registered) {
-                                // Instantly retry fetching events with new authorization
-                                try {
-                                    val retryReq = Request.Builder()
-                                        .url("$serverUrlVal/api/host/events")
-                                        .header("Authorization", "Bearer $pinVal")
-                                        .get()
-                                        .build()
-                                    okHttpClient.newCall(retryReq).execute().use { retryResp ->
-                                        if (retryResp.isSuccessful) {
-                                            fetchSuccess = true
-                                            serverReachable.value = true
-                                            _connectionStatus.value = "Connected"
-                                            val retryBody = retryResp.body?.string() ?: ""
-                                            val retryEventsArray = JSONArray(retryBody)
-                                            for (i in 0 until retryEventsArray.length()) {
-                                                val eventObj = retryEventsArray.getJSONObject(i)
-                                                val id = eventObj.getString("id")
-                                                fetchedEventIds.add(id)
-                                                val type = eventObj.getString("type")
-                                                val payload = eventObj.getJSONObject("payload")
-                                                val alreadyProcessed = synchronized(processedEventIds) {
-                                                    if (processedEventIds.contains(id)) {
-                                                        true
-                                                    } else {
-                                                        processedEventIds.add(id)
-                                                        if (processedEventIds.size > 200) {
-                                                            val iterator = processedEventIds.iterator()
-                                                            if (iterator.hasNext()) { iterator.next(); iterator.remove() }
-                                                        }
-                                                        val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
-                                                        prefs.edit().putStringSet("processed_event_ids", processedEventIds.toSet()).apply()
-                                                        false
-                                                    }
-                                                }
-                                                if (!alreadyProcessed) {
-                                                    payload.put("event", type)
-                                                    processIncomingPayload(payload.toString(), fromServerPoll = true)
-                                                }
-                                                ackEventOnServer(serverUrlVal, pinVal, id)
-                                            }
-                                        }
-                                    }
-                                } catch (ignored: Exception) {}
-                            }
-                        } else {
-                            serverReachable.value = false
-                            _connectionStatus.value = "Connecting..."
-                        }
+                    } catch (e: Exception) {
+                        Log.d("GatewayNetworkManager", "Remote peer poll skipped (${remotePeer.name}): ${e.message}")
                     }
                 }
+            } catch (e: Exception) {
+                Log.d("GatewayNetworkManager", "Remote peer federation poll error: ${e.message}")
+            }
+        }
+    }
 
-                // 2. Sync client presences
-                val presenceReq = Request.Builder()
-                    .url("$serverUrlVal/api/host/clients")
-                    .header("Authorization", "Bearer $pinVal")
-                    .get()
-                    .build()
-                    
-                okHttpClient.newCall(presenceReq).execute().use { response ->
-                    if (response.isSuccessful) {
-                        serverReachable.value = true
-                        _connectionStatus.value = "Connected"
-                        val body = response.body?.string() ?: "[]"
-                        val clientsArray = JSONArray(body)
-                        
-                        val onlineUuids = mutableSetOf<String>()
-                        val serverClients = mutableMapOf<String, JSONObject>()
-                        
-                        for (i in 0 until clientsArray.length()) {
-                            val clientObj = clientsArray.getJSONObject(i)
-                            val uuid = clientObj.getString("uuid")
-                            serverClients[uuid] = clientObj
-                            val isOnline = clientObj.optBoolean("is_online", false) || clientObj.optInt("is_online", 0) == 1
-                            if (isOnline) onlineUuids.add(uuid)
-                        }
-                        
-                        val localClients = repository.getAllRequestsSync()
-                        
-                        // Mark all existing clients appropriately or remove if deleted from server
-                        for (existing in localClients) {
-                            val serverHasOnline = onlineUuids.contains(existing.uuid)
-                            val serverObj = serverClients[existing.uuid]
-                            if (serverObj != null) {
-                                val serverStatus = serverObj.optString("req_status", existing.status)
-                                val serverToken = serverObj.optString("token", existing.token)
-                                val serverName = serverObj.optString("name", existing.name)
-                                val serverClientType = serverObj.optString("client_type", if (serverObj.optBoolean("is_mobile_host", false) || serverStatus.startsWith("MOBILE_")) "MOBILE" else existing.clientType)
-                                val serverAddressVal = serverObj.optString("server_address", existing.serverAddress)
-                                if (existing.isOnline != serverHasOnline || existing.status != serverStatus || existing.token != serverToken || existing.name != serverName || existing.clientType != serverClientType || existing.serverAddress != serverAddressVal) {
-                                    repository.updateRequest(existing.copy(
-                                        isOnline = serverHasOnline,
-                                        status = serverStatus,
-                                        token = serverToken,
-                                        name = serverName,
-                                        clientType = serverClientType,
-                                        serverAddress = serverAddressVal,
-                                        lastSeen = System.currentTimeMillis()
-                                    ))
-                                }
+    suspend fun syncServerEventsAndClients(server: HomeServer, tickleEventId: String? = null): Boolean {
+        val cleanUrl = server.url.trim().removeSuffix("/")
+        val pinVal = server.apiKey
+
+        if (cleanUrl.isEmpty() || !cleanUrl.startsWith("http")) {
+            repository.updateHomeServer(server.copy(isReachable = false, statusMessage = "Invalid URL"))
+            return false
+        }
+
+        var currentServer = repository.getHomeServerById(server.id) ?: server
+        if (currentServer.isHost && currentServer.registeredUuid.isEmpty()) {
+            val (regOk, regUuid) = registerMobileWithServer(currentServer)
+            if (regUuid.isNotEmpty()) {
+                currentServer = repository.getHomeServerById(server.id) ?: currentServer.copy(registeredUuid = regUuid)
+            }
+        }
+
+        // Authoritative admin & identity check via /api/host/me
+        try {
+            val meReq = Request.Builder()
+                .url("$cleanUrl/api/host/me")
+                .header("Authorization", "Bearer $pinVal")
+                .get()
+                .build()
+            okHttpClient.newCall(meReq).execute().use { meResp ->
+                if (meResp.isSuccessful) {
+                    val meBody = meResp.body?.string() ?: ""
+                    val meJson = JSONObject(meBody)
+                    val meAdmin = meJson.optInt("is_admin", 0) == 1 || meJson.optBoolean("is_admin", false)
+                    val meRole = meJson.optString("role", if (meAdmin) "ADMIN" else (if (currentServer.isMember) "MEMBER" else "COMPANION"))
+                    val meUuid = meJson.optString("uuid", "")
+                    val sName = meJson.optString("server_name", meJson.optString("servername", "")).ifBlank { currentServer.name }
+                    val latest = repository.getHomeServerById(server.id) ?: currentServer
+                    if (latest.isAdmin != meAdmin || latest.serverRole != meRole || (meUuid.isNotEmpty() && latest.registeredUuid != meUuid) || latest.name != sName) {
+                        val updatedHost = latest.copy(
+                            registeredUuid = if (meUuid.isNotEmpty()) meUuid else latest.registeredUuid,
+                            isAdmin = meAdmin,
+                            serverRole = meRole,
+                            name = sName
+                        )
+                        repository.updateHomeServer(updatedHost)
+                        currentServer = updatedHost
+                    }
+                } else if (meResp.code == 401 && currentServer.isHost) {
+                    registerMobileWithServer(currentServer)
+                }
+            }
+        } catch (_: Exception) {}
+
+        var fetchSuccess = false
+
+        try {
+            val eventsUrl = if (!tickleEventId.isNullOrEmpty()) "$cleanUrl/api/host/events?eventId=$tickleEventId" else "$cleanUrl/api/host/events"
+            Log.d("GatewayNetworkManager", "Polling Home Server (${server.name}): $eventsUrl")
+            val request = Request.Builder()
+                .url(eventsUrl)
+                .header("Authorization", "Bearer $pinVal")
+                .get()
+                .build()
+
+            okHttpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    fetchSuccess = true
+
+                    val body = response.body?.string() ?: ""
+                    val eventsArray = JSONArray(body)
+                    for (i in 0 until eventsArray.length()) {
+                        val eventObj = eventsArray.getJSONObject(i)
+                        val id = eventObj.getString("id")
+                        val type = eventObj.getString("type")
+                        val payload = eventObj.getJSONObject("payload")
+
+                        val alreadyProcessed = synchronized(processedEventIds) {
+                            if (processedEventIds.contains(id)) {
+                                true
                             } else {
-                                // If this contact was registered locally on this home server and is no longer returned by the server, delete it from local repository
-                                if (existing.serverAddress == "local" && (existing.status == "APPROVED" || existing.status == "MOBILE_APPROVED" || existing.status == "MOBILE_REJECTED" || existing.status == "MOBILE_PENDING")) {
+                                processedEventIds.add(id)
+                                if (processedEventIds.size > 200) {
+                                    val iterator = processedEventIds.iterator()
+                                    if (iterator.hasNext()) {
+                                        iterator.next()
+                                        iterator.remove()
+                                    }
+                                }
+                                val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
+                                prefs.edit().putStringSet("processed_event_ids", processedEventIds.toSet()).apply()
+                                false
+                            }
+                        }
+
+                        if (!alreadyProcessed) {
+                            val normType = when (type) {
+                                "chat_message" -> "message"
+                                "webrtc_call_initiate", "call_initiate" -> "call"
+                                "webrtc_ice_candidate", "webrtc_call_answer", "webrtc_call_hangup" -> "signal"
+                                else -> if (payload.has("text") && !payload.has("sdp") && !payload.has("candidate")) "message" else type
+                            }
+                            payload.put("event", normType)
+                            if (!payload.has("server_address") || payload.optString("server_address").isEmpty()) {
+                                payload.put("server_address", cleanUrl)
+                            }
+                            processIncomingPayload(payload.toString(), fromServerPoll = true, originServerUrl = cleanUrl, originPin = pinVal)
+                        }
+
+                        ackEventOnServer(cleanUrl, pinVal, id)
+                    }
+
+                    syncFcmForServer(server)
+                } else if ((response.code == 401 || response.code == 403) && currentServer.isHost) {
+                    val (registered, regUuid) = registerMobileWithServer(currentServer)
+                    if (registered) {
+                        fetchSuccess = true
+                        syncFcmForServer(currentServer)
+                    }
+                }
+            }
+
+            // Sync client presences
+            val presenceReq = Request.Builder()
+                .url("$cleanUrl/api/host/clients")
+                .header("Authorization", "Bearer $pinVal")
+                .get()
+                .build()
+
+            okHttpClient.newCall(presenceReq).execute().use { response ->
+                if (response.isSuccessful) {
+                    fetchSuccess = true
+                    val body = response.body?.string() ?: "[]"
+                    val clientsArray = JSONArray(body)
+
+                    val onlineUuids = mutableSetOf<String>()
+                    val serverClients = mutableMapOf<String, JSONObject>()
+
+                    for (i in 0 until clientsArray.length()) {
+                        val clientObj = clientsArray.getJSONObject(i)
+                        val uuid = clientObj.getString("uuid")
+                        serverClients[uuid] = clientObj
+                        val isOnline = clientObj.optBoolean("is_online", false) || clientObj.optInt("is_online", 0) == 1
+                        if (isOnline) onlineUuids.add(uuid)
+                    }
+
+                    val localClients = repository.getAllRequestsSync()
+
+                    for (existing in localClients) {
+                        val serverHasOnline = onlineUuids.contains(existing.uuid)
+                        val serverObj = serverClients[existing.uuid]
+                        if (serverObj != null) {
+                            val serverStatus = serverObj.optString("req_status", existing.status)
+                            val serverToken = serverObj.optString("token", existing.token)
+                            val serverName = serverObj.optString("name", existing.name)
+                            val serverClientType = serverObj.optString("client_type", if (serverObj.optBoolean("is_mobile_host", false) || serverStatus.startsWith("MOBILE_")) "MOBILE" else existing.clientType)
+                            val srvAddrFromObj = serverObj.optString("server_address", "").trimEnd('/')
+                            val serverAddressVal = if (srvAddrFromObj.isNotEmpty() && srvAddrFromObj != "local") {
+                                srvAddrFromObj
+                            } else if (existing.serverAddress == "local" || existing.serverAddress.isEmpty()) {
+                                cleanUrl
+                            } else {
+                                existing.serverAddress
+                            }
+                            if (existing.isOnline != serverHasOnline || existing.status != serverStatus || existing.token != serverToken || existing.name != serverName || existing.clientType != serverClientType || existing.serverAddress != serverAddressVal) {
+                                repository.updateRequest(existing.copy(
+                                    isOnline = serverHasOnline,
+                                    status = serverStatus,
+                                    token = serverToken,
+                                    name = serverName,
+                                    clientType = serverClientType,
+                                    serverAddress = serverAddressVal,
+                                    lastSeen = System.currentTimeMillis()
+                                ))
+                            }
+                        } else {
+                            val belongsToThisServer = (existing.serverAddress == cleanUrl || (server.isPrimary && existing.serverAddress == "local"))
+                            if (belongsToThisServer) {
+                                if (existing.status == "APPROVED" || existing.status == "MOBILE_APPROVED" || existing.status == "MOBILE_REJECTED" || existing.status == "MOBILE_PENDING") {
                                     repository.deleteRequest(existing)
                                 } else if (existing.isOnline != serverHasOnline) {
                                     repository.updateRequest(existing.copy(isOnline = serverHasOnline, lastSeen = System.currentTimeMillis()))
                                 }
                             }
                         }
-                        
-                        // Add new clients that aren't in local DB yet
-                        val localUuids = localClients.map { it.uuid }.toSet()
-                        for ((uuid, clientObj) in serverClients) {
-                            if (!localUuids.contains(uuid)) {
-                                val reqStatus = clientObj.optString("req_status", "PENDING")
-                                val name = clientObj.optString("name", "Guest")
-                                val reason = clientObj.optString("reason", "")
-                                val token = clientObj.optString("token", "")
-                                val createdAt = clientObj.optLong("created_at", System.currentTimeMillis())
-                                val isOnline = onlineUuids.contains(uuid)
-                                val clientType = clientObj.optString("client_type", if (clientObj.optBoolean("is_mobile_host", false) || reqStatus.startsWith("MOBILE_")) "MOBILE" else "WEB")
-                                val serverAddressVal = clientObj.optString("server_address", "local")
-                                val newRequest = ClientRequest(
-                                    uuid = uuid,
-                                    name = name,
-                                    message = reason,
-                                    status = reqStatus,
-                                    token = token,
-                                    timestamp = createdAt,
-                                    lastSeen = System.currentTimeMillis(),
-                                    isOnline = isOnline,
-                                    clientType = clientType,
-                                    serverAddress = serverAddressVal
-                                )
-                                repository.insertRequest(newRequest)
-                            }
-                        }
+                    }
 
-                        // 3. Poll remote peers (other home servers) for incoming messages/signals/calls
-                        for (remotePeer in localClients.filter { it.serverAddress != "local" && it.status == "APPROVED" && it.token.isNotEmpty() }) {
-                            try {
-                                val remoteUrl = remotePeer.serverAddress.trimEnd('/')
-                                val remoteReq = Request.Builder()
-                                    .url("$remoteUrl/api/guest/events?uuid=${remotePeer.uuid}&token=${remotePeer.token}")
-                                    .get()
-                                    .build()
-                                okHttpClient.newCall(remoteReq).execute().use { remoteResp ->
-                                    if (remoteResp.isSuccessful) {
-                                        val remoteBody = remoteResp.body?.string() ?: "[]"
-                                        val remoteEvents = JSONArray(remoteBody)
-                                        for (j in 0 until remoteEvents.length()) {
-                                            val rEvt = remoteEvents.getJSONObject(j)
-                                            val payload = if (rEvt.has("payload")) JSONObject(rEvt.getString("payload")) else rEvt
-                                            payload.put("server_address", remoteUrl)
-                                            payload.put("client_type", "MOBILE")
-                                            processIncomingPayload(payload.toString(), fromServerPoll = true)
-                                        }
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Log.d("GatewayNetworkManager", "Remote peer poll skipped (${remotePeer.name}): ${e.message}")
-                            }
+                    val localUuids = localClients.map { it.uuid }.toSet()
+                    for ((uuid, clientObj) in serverClients) {
+                        if (!localUuids.contains(uuid)) {
+                            val reqStatus = clientObj.optString("req_status", "PENDING")
+                            val name = clientObj.optString("name", "Guest")
+                            val reason = clientObj.optString("reason", "")
+                            val token = clientObj.optString("token", "")
+                            val createdAt = clientObj.optLong("created_at", System.currentTimeMillis())
+                            val isOnline = onlineUuids.contains(uuid)
+                            val clientType = clientObj.optString("client_type", if (clientObj.optBoolean("is_mobile_host", false) || reqStatus.startsWith("MOBILE_")) "MOBILE" else "WEB")
+                            val srvAddrFromObj = clientObj.optString("server_address", "").trimEnd('/')
+                            val serverAddressVal = if (srvAddrFromObj.isNotEmpty() && srvAddrFromObj != "local") srvAddrFromObj else cleanUrl
+                            val newRequest = ClientRequest(
+                                uuid = uuid,
+                                name = name,
+                                message = reason,
+                                status = reqStatus,
+                                token = token,
+                                timestamp = createdAt,
+                                lastSeen = System.currentTimeMillis(),
+                                isOnline = isOnline,
+                                clientType = clientType,
+                                serverAddress = serverAddressVal
+                            )
+                            repository.insertRequest(newRequest)
                         }
                     }
                 }
-            } catch (e: Exception) {
-                serverReachable.value = false
-                _connectionStatus.value = "Connecting..."
-                if (e is java.io.IOException) {
-                    Log.w("GatewayNetworkManager", "Home Server unreachable ($serverUrlVal): ${e.localizedMessage ?: e.message}")
+            }
+        } catch (e: Exception) {
+            if (e is java.io.IOException) {
+                Log.w("GatewayNetworkManager", "Home Server unreachable (${server.name}, $cleanUrl): ${e.message}")
+                if (server.isPrimary) {
                     tryProbeFallbackCandidates(pinVal)
-                } else {
-                    Log.e("GatewayNetworkManager", "Error pulling tasks from Home Server", e)
                 }
+            } else {
+                Log.e("GatewayNetworkManager", "Error syncing with server ${server.name} ($cleanUrl)", e)
             }
         }
+
+        val latest = repository.getHomeServerById(server.id) ?: currentServer
+        val updated = latest.copy(
+            isReachable = fetchSuccess,
+            lastSeen = if (fetchSuccess) System.currentTimeMillis() else latest.lastSeen,
+            statusMessage = if (fetchSuccess) "Connected" else "Unreachable",
+            registeredUuid = if (latest.registeredUuid.isNotEmpty()) latest.registeredUuid else currentServer.registeredUuid
+        )
+        repository.updateHomeServer(updated)
+        return fetchSuccess
     }
 
     private fun tryProbeFallbackCandidates(pinVal: String) {
@@ -533,10 +617,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
     }
 
     suspend fun fetchFcmConfigFromServer(serverUrlVal: String, pinVal: String) {
-        if (serverUrlVal.isEmpty() || !serverUrlVal.startsWith("http")) return
+        val cleanUrl = serverUrlVal.trim().removeSuffix("/")
+        if (cleanUrl.isEmpty() || !cleanUrl.startsWith("http")) return
         try {
             val request = Request.Builder()
-                .url("$serverUrlVal/api/host/fcm_config")
+                .url("$cleanUrl/api/host/fcm_config")
                 .header("Authorization", "Bearer $pinVal")
                 .get()
                 .build()
@@ -566,21 +651,290 @@ class GatewayNetworkManager(private val context: Context, private val repository
             }
         } catch (e: Exception) {
             if (e is java.io.IOException) {
-                Log.w("FCMInit", "Home Server not reachable at $serverUrlVal: ${e.message}")
+                Log.w("FCMInit", "Home Server not reachable at $cleanUrl: ${e.message}")
             } else {
                 Log.e("FCMInit", "Failed to fetch FCM config from Home Server: ${e.message}")
             }
         }
     }
 
+    suspend fun syncFcmForServer(server: HomeServer) {
+        val cleanUrl = server.url.trim().removeSuffix("/")
+        val pinVal = server.apiKey
+        if (cleanUrl.isEmpty() || !cleanUrl.startsWith("http")) return
+        try {
+            val request = Request.Builder()
+                .url("$cleanUrl/api/host/fcm_config")
+                .header("Authorization", "Bearer $pinVal")
+                .get()
+                .build()
+
+            okHttpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val bodyStr = response.body?.string() ?: ""
+                    val json = JSONObject(bodyStr)
+                    val configured = json.optBoolean("configured", false)
+                    if (configured) {
+                        val senderId = json.optString("sender_id", "")
+                        val projectId = json.optString("project_id", "")
+                        val appId = json.optString("app_id", "")
+                        val apiKey = json.optString("api_key", "")
+
+                        val sName = json.optString("server_name", "").ifEmpty { json.optString("servername", "") }
+                        val nameToUse = if (sName.isNotEmpty() && (server.name == "Home Server" || server.name.isEmpty())) sName else server.name
+
+                        if (senderId.isNotEmpty() && (senderId != server.senderId || apiKey != server.fcmApiKey || nameToUse != server.name)) {
+                            Log.d("FCMInit", "[FCM Config Sync] Received FCM config for server $nameToUse ($cleanUrl): Sender ID: $senderId")
+                            val updated = server.copy(
+                                name = nameToUse,
+                                senderId = senderId,
+                                projectId = projectId,
+                                appId = appId,
+                                fcmApiKey = apiKey
+                            )
+                            repository.updateHomeServer(updated)
+                            registerPushTokenForServer(updated)
+                            return
+                        } else if (nameToUse != server.name) {
+                            repository.updateHomeServer(server.copy(name = nameToUse))
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            if (e !is java.io.IOException) {
+                Log.e("FCMInit", "Failed to fetch FCM config for ${server.name}: ${e.message}")
+            }
+        }
+        registerPushTokenForServer(server)
+    }
+
+    fun registerPushTokenForServer(server: HomeServer) {
+        val cleanUrl = server.url.trim().removeSuffix("/")
+        val pinVal = server.apiKey
+        if (cleanUrl.isEmpty() || pinVal.isEmpty()) return
+
+        if (server.senderId.isNotEmpty() && server.senderId.all { it.isDigit() }) {
+            try {
+                val appName = "fcm_srv_${server.id.take(8)}"
+                val senderId = server.senderId
+                val projectId = if (server.projectId.isNotEmpty()) server.projectId else "whisker-project"
+                val appId = if (server.appId.isNotEmpty()) server.appId else "1:$senderId:android:whisker"
+                val apiKey = if (server.fcmApiKey.isNotEmpty()) server.fcmApiKey else "AIzaSyWhiskerAutoConfiguredKey"
+
+                val existingApps = com.google.firebase.FirebaseApp.getApps(context.applicationContext)
+                val targetApp = existingApps.find { it.name == appName } ?: run {
+                    val options = com.google.firebase.FirebaseOptions.Builder()
+                        .setApplicationId(appId)
+                        .setApiKey(apiKey)
+                        .setProjectId(projectId)
+                        .setGcmSenderId(senderId)
+                        .build()
+                    com.google.firebase.FirebaseApp.initializeApp(context.applicationContext, options, appName)
+                }
+
+                targetApp.get(com.google.firebase.messaging.FirebaseMessaging::class.java).token.addOnCompleteListener { task ->
+                    if (task.isSuccessful && !task.result.isNullOrEmpty()) {
+                        val token = task.result
+                        Log.d("FCMInit", "Obtained server-specific FCM token for ${server.name}: ${token.take(12)}...")
+                        registerPushTokenOnServer(cleanUrl, pinVal, token)
+                        if (token != server.fcmToken) {
+                            scope.launch {
+                                repository.updateHomeServer(server.copy(fcmToken = token))
+                            }
+                        }
+                    } else {
+                        registerPushTokenOnServer(cleanUrl, pinVal, pushToken.value)
+                    }
+                }
+                return
+            } catch (e: Exception) {
+                Log.w("FCMInit", "Dedicated FirebaseApp initialization for ${server.name} fallback: ${e.message}")
+            }
+        }
+
+        registerPushTokenOnServer(cleanUrl, pinVal, pushToken.value)
+    }
+
+    suspend fun registerMobileWithServer(server: HomeServer): Pair<Boolean, String> {
+        val cleanUrl = server.url.trim().removeSuffix("/")
+        val pinVal = server.apiKey
+        if (cleanUrl.isEmpty() || !cleanUrl.startsWith("http")) return Pair(false, "")
+        try {
+            fetchFcmConfigFromServer(cleanUrl, pinVal)
+            val cleanUser = server.clientIdentity.trim().ifEmpty { hostUsername.value.ifEmpty { Build.MODEL ?: "Mobile Device" } }
+            val token = if (server.fcmToken.isNotEmpty()) server.fcmToken else pushToken.value
+            val body = JSONObject().apply {
+                put("username", cleanUser)
+                put("pin_token", pinVal)
+                put("push_token", token)
+            }
+            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+            val requestBody = RequestBody.create(mediaType, body.toString())
+            val request = Request.Builder()
+                .url("$cleanUrl/api/register_mobile")
+                .post(requestBody)
+                .build()
+            okHttpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val respBody = response.body?.string() ?: ""
+                    val json = JSONObject(respBody)
+                    val status = json.optString("status", "")
+                    val hostUuid = json.optString("host_uuid", "")
+                    val serverIsAdmin = json.optInt("is_admin", 0) == 1 ||
+                        json.optBoolean("is_admin", false) ||
+                        json.optInt("admin", 0) == 1 ||
+                        json.optBoolean("admin", false) ||
+                        json.optString("role", "").equals("admin", ignoreCase = true)
+                    val roleStr = json.optString("role", "").uppercase()
+                    val calculatedRole = when {
+                        roleStr.isNotEmpty() -> roleStr
+                        serverIsAdmin -> "ADMIN"
+                        else -> "COMPANION"
+                    }
+                    if (hostUuid.isNotEmpty()) {
+                        val latest = repository.getHomeServerById(server.id) ?: server
+                        val resolvedName = json.optString("server_name", json.optString("servername", latest.name)).ifBlank { latest.name }
+                        if (latest.registeredUuid != hostUuid || latest.isAdmin != serverIsAdmin || latest.serverRole != calculatedRole || latest.name != resolvedName) {
+                            repository.updateHomeServer(latest.copy(registeredUuid = hostUuid, isAdmin = serverIsAdmin, serverRole = calculatedRole, name = resolvedName))
+                        }
+                    }
+                    if (server.allowDirectCalls) {
+                        try {
+                            val payload = JSONObject().apply { put("allow_direct_calls", true) }
+                            val directBody = RequestBody.create(mediaType, payload.toString())
+                            val dcReq = Request.Builder()
+                                .url("$cleanUrl/api/host/direct_calls")
+                                .header("Authorization", "Bearer $pinVal")
+                                .post(directBody)
+                                .build()
+                            okHttpClient.newCall(dcReq).execute().close()
+                        } catch (_: Exception) {}
+                    }
+                    return Pair(status == "APPROVED", hostUuid)
+                }
+            }
+        } catch (e: Exception) {
+            Log.d("GatewayNetworkManager", "registerMobileWithServer error for ${server.name}: ${e.message}")
+        }
+        return Pair(false, server.registeredUuid)
+    }
+
+    suspend fun addHomeServer(
+        name: String,
+        url: String,
+        apiKey: String,
+        isPrimary: Boolean = false,
+        clientIdentity: String = "",
+        allowDirectCalls: Boolean = false,
+        isAdmin: Boolean = true
+    ): HomeServer {
+        val cleanUrl = url.trim().removeSuffix("/")
+        val cleanKey = apiKey.trim().ifEmpty { this.apiKey.value.ifEmpty { UUID.randomUUID().toString() } }
+        val cleanName = name.trim().ifEmpty { "Home Server" }
+        val effectiveIdentity = clientIdentity.trim().ifEmpty { hostUsername.value.ifEmpty { Build.MODEL ?: "Mobile Device" } }
+
+        val role = if (isAdmin) "ADMIN" else "COMPANION"
+        val server = HomeServer(
+            name = cleanName,
+            url = cleanUrl,
+            apiKey = cleanKey,
+            isPrimary = false,
+            isEnabled = true,
+            isAdmin = isAdmin,
+            serverRole = role,
+            fcmToken = pushToken.value,
+            isReachable = false,
+            statusMessage = "Connecting...",
+            registeredUuid = "",
+            clientIdentity = effectiveIdentity,
+            allowDirectCalls = allowDirectCalls
+        )
+        repository.insertHomeServer(server)
+        if (serverUrl.value.isEmpty()) {
+            serverUrl.value = cleanUrl
+            this.apiKey.value = cleanKey
+        }
+        scope.launch(Dispatchers.IO) {
+            registerMobileWithServer(server)
+            syncServerEventsAndClients(server)
+        }
+        return server
+    }
+
+    suspend fun updateHomeServer(server: HomeServer) {
+        val updated = server.copy(isPrimary = false)
+        repository.updateHomeServer(updated)
+        if (serverUrl.value.isEmpty() || serverUrl.value == server.url) {
+            serverUrl.value = server.url.trim().removeSuffix("/")
+            apiKey.value = server.apiKey.trim()
+        }
+        scope.launch(Dispatchers.IO) {
+            syncServerEventsAndClients(updated)
+        }
+    }
+
+    suspend fun deleteHomeServer(server: HomeServer) {
+        repository.deleteHomeServer(server)
+        val remaining = repository.getAllHomeServersSync()
+        if (remaining.isNotEmpty()) {
+            val nextActive = remaining.firstOrNull { it.isEnabled } ?: remaining.first()
+            serverUrl.value = nextActive.url
+            apiKey.value = nextActive.apiKey
+        }
+    }
+
+    suspend fun toggleServerEnabled(server: HomeServer) {
+        val nextEnabled = !server.isEnabled
+        val updated = server.copy(
+            isEnabled = nextEnabled,
+            isReachable = if (nextEnabled) server.isReachable else false,
+            statusMessage = if (nextEnabled) "Connecting..." else "Disabled"
+        )
+        repository.updateHomeServer(updated)
+        if (nextEnabled) {
+            scope.launch(Dispatchers.IO) {
+                syncServerEventsAndClients(updated)
+            }
+        }
+    }
+
+    suspend fun setPrimaryServer(server: HomeServer) {
+        // Equal status for all servers: update server without primary distinction
+        repository.updateHomeServer(server.copy(isPrimary = false))
+        serverUrl.value = server.url.trim().removeSuffix("/")
+        apiKey.value = server.apiKey.trim()
+    }
+
+    suspend fun refreshAllServers() {
+        val servers = repository.getAllHomeServersSync().filter { it.isEnabled }
+        for (server in servers) {
+            syncServerEventsAndClients(server)
+        }
+        val all = repository.getAllHomeServersSync()
+        updateAggregateConnectionStatus(all)
+    }
+
+    suspend fun refreshServer(server: HomeServer) {
+        syncServerEventsAndClients(server)
+        val all = repository.getAllHomeServersSync()
+        updateAggregateConnectionStatus(all)
+    }
+
+    fun updateHostUsername(name: String) {
+        val clean = name.trim()
+        if (clean.isNotEmpty()) {
+            hostUsername.value = clean
+            context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
+                .edit().putString("host_username", clean).apply()
+        }
+    }
+
     private fun registerPushTokenOnServer(serverUrlVal: String, pinVal: String, pushTokenVal: String) {
-        if (serverUrlVal.isEmpty() || !serverUrlVal.startsWith("http")) return
+        val cleanUrl = serverUrlVal.trim().removeSuffix("/")
+        if (cleanUrl.isEmpty() || !cleanUrl.startsWith("http")) return
         val activeToken = if (pushTokenVal.isNotEmpty()) pushTokenVal else pushToken.value
         if (activeToken.isEmpty() || activeToken == "undefined" || activeToken == "null" || activeToken.startsWith("Fetching") || activeToken.startsWith("Searching") || activeToken.startsWith("device-push-token-")) return
-
-        if (serverUrlVal == lastRegisteredServerUrl && pinVal == lastRegisteredApiKey && activeToken == lastRegisteredToken) {
-            return
-        }
 
         try {
             val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
@@ -589,7 +943,6 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 put("fcmToken", activeToken)
             }
             val requestBody = RequestBody.create(mediaType, body.toString())
-            val cleanUrl = getCleanServerUrl()
             val request = Request.Builder()
                 .url("$cleanUrl/api/host/register_push")
                 .header("Authorization", "Bearer $pinVal")
@@ -601,28 +954,28 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     lastRegisteredServerUrl = cleanUrl
                     lastRegisteredApiKey = pinVal
                     lastRegisteredToken = activeToken
-                    Log.d("GatewayNetworkManager", "Successfully registered FCM push token on server: $activeToken")
+                    Log.d("GatewayNetworkManager", "Successfully registered FCM push token on server ($cleanUrl): ${activeToken.take(12)}...")
                 } else {
-                    Log.w("GatewayNetworkManager", "Server reject push-binding: ${response.code}")
+                    Log.w("GatewayNetworkManager", "Server $cleanUrl reject push-binding: ${response.code}")
                 }
             }
         } catch (e: Exception) {
             if (e is java.io.IOException) {
-                Log.w("GatewayNetworkManager", "Home Server not reachable to save push settings: ${e.message}")
+                Log.w("GatewayNetworkManager", "Home Server $cleanUrl not reachable to save push settings: ${e.message}")
             } else {
-                Log.e("GatewayNetworkManager", "Failed to save push settings on server", e)
+                Log.e("GatewayNetworkManager", "Failed to save push settings on server $cleanUrl", e)
             }
         }
     }
 
     private fun ackEventOnServer(serverUrlVal: String, pinVal: String, eventId: String) {
+        val cleanUrl = serverUrlVal.trim().removeSuffix("/")
         try {
             val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
             val body = JSONObject().apply {
                 put("eventId", eventId)
             }
             val requestBody = RequestBody.create(mediaType, body.toString())
-            val cleanUrl = getCleanServerUrl()
             val request = Request.Builder()
                 .url("$cleanUrl/api/host/ack")
                 .header("Authorization", "Bearer $pinVal")
@@ -630,25 +983,39 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 .build()
             okHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    Log.w("GatewayNetworkManager", "Ack error on server: ${response.code}")
+                    Log.w("GatewayNetworkManager", "Ack error on server $cleanUrl: ${response.code}")
                 }
             }
         } catch (e: Exception) {
             if (e is java.io.IOException) {
-                Log.w("GatewayNetworkManager", "Home Server not reachable to clear task: ${e.message}")
+                Log.w("GatewayNetworkManager", "Home Server $cleanUrl not reachable to clear task: ${e.message}")
             } else {
-                Log.e("GatewayNetworkManager", "Failed to clear task on server", e)
+                Log.e("GatewayNetworkManager", "Failed to clear task on server $cleanUrl", e)
             }
         }
     }
 
-    fun processIncomingPayload(payloadStr: String, fromServerPoll: Boolean = false) {
+    fun processIncomingPayload(payloadStr: String, fromServerPoll: Boolean = false, originServerUrl: String? = null, originPin: String? = null) {
         try {
             val json = JSONObject(payloadStr)
-            val eventType = json.optString("event", json.optString("type", ""))
+            val rawEventType = json.optString("event", json.optString("type", ""))
+            val eventType = when (rawEventType) {
+                "chat_message" -> "message"
+                "webrtc_call_initiate", "call_initiate" -> "call"
+                "webrtc_ice_candidate", "webrtc_call_answer", "webrtc_call_hangup" -> "signal"
+                else -> if (json.has("text") && !json.has("sdp") && !json.has("candidate")) "message" else rawEventType
+            }
             val uuid = json.optString("uuid", json.optString("clientUuid", ""))
             val eventId = json.optString("eventId", json.optString("id", ""))
             val messageId = json.optString("messageId", "")
+
+            val payloadServerAddr = json.optString("server_address", "").trimEnd('/')
+            val effectiveServerUrl = when {
+                !originServerUrl.isNullOrEmpty() -> originServerUrl.trimEnd('/')
+                payloadServerAddr.isNotEmpty() && payloadServerAddr != "local" -> payloadServerAddr
+                else -> getCleanServerUrl()
+            }
+            val effectivePin = originPin ?: (homeServers.value.find { it.url.trimEnd('/') == effectiveServerUrl }?.apiKey ?: apiKey.value)
 
             if (eventId.isNotEmpty() && !fromServerPoll) {
                 val isDup = synchronized(processedEventIds) {
@@ -696,7 +1063,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 name = username,
                                 message = "Companion Mobile App / Tablet pairing request ($username)",
                                 status = "MOBILE_PENDING",
-                                token = ""
+                                token = "",
+                                serverAddress = effectiveServerUrl
                             )
                             repository.insertRequest(req)
                             showNotification(
@@ -734,7 +1102,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 name = name,
                                 message = reason,
                                 status = "PENDING",
-                                token = ""
+                                token = "",
+                                serverAddress = effectiveServerUrl
                             )
                             repository.insertRequest(request)
                             showNotification(
@@ -745,12 +1114,10 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         }
                     }
                 }
-                "message" -> {
+                "message", "chat_message" -> {
                     val token = json.optString("token", "")
                     val msgIdStr = json.optString("messageId", json.optString("id", ""))
                     val prevMsgIdStr = if (json.has("previousMessageId") && !json.isNull("previousMessageId")) json.optString("previousMessageId").takeIf { it.isNotEmpty() && it != "null" } else null
-                    val cleanUrl = getCleanServerUrl()
-                    val pinVal = apiKey.value
 
                     scope.launch(Dispatchers.IO) {
                         var request = repository.getRequestByUuid(uuid)
@@ -764,15 +1131,17 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 token = token,
                                 timestamp = System.currentTimeMillis(),
                                 lastSeen = System.currentTimeMillis(),
-                                isOnline = true
+                                isOnline = true,
+                                serverAddress = effectiveServerUrl
                             )
                             repository.insertRequest(newReq)
                             request = newReq
-                        } else if (request.status != "APPROVED" || (token.isNotEmpty() && request.token.isEmpty())) {
+                        } else if (request.status != "APPROVED" || (token.isNotEmpty() && request.token.isEmpty()) || request.serverAddress == "local" || request.serverAddress.isEmpty()) {
                             val updatedReq = request.copy(
                                 status = "APPROVED",
                                 token = if (token.isNotEmpty()) token else request.token,
                                 name = if (name != "Guest" && request.name == "Guest") name else request.name,
+                                serverAddress = if (request.serverAddress == "local" || request.serverAddress.isEmpty()) effectiveServerUrl else request.serverAddress,
                                 lastSeen = System.currentTimeMillis()
                             )
                             repository.updateRequest(updatedReq)
@@ -813,8 +1182,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                             )
                         }
 
-                        if (!prevMsgIdStr.isNullOrEmpty() && cleanUrl.isNotEmpty()) {
-                            fetchAndSyncMessageChain(cleanUrl, pinVal, uuid, prevMsgIdStr)
+                        if (!prevMsgIdStr.isNullOrEmpty() && effectiveServerUrl.isNotEmpty()) {
+                            fetchAndSyncMessageChain(effectiveServerUrl, effectivePin, uuid, prevMsgIdStr)
                         }
                     }
                 }
@@ -843,15 +1212,17 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                     timestamp = System.currentTimeMillis(),
                                     lastSeen = System.currentTimeMillis(),
                                     isOnline = true,
-                                    autoAcceptCall = false
+                                    autoAcceptCall = false,
+                                    serverAddress = effectiveServerUrl
                                 )
                             )
-                        } else if (existing != null && (existing.status != "APPROVED" || (token.isNotEmpty() && existing.token != token)) && !isDirectCall) {
+                        } else if (existing != null && (existing.status != "APPROVED" || (token.isNotEmpty() && existing.token != token) || existing.serverAddress == "local" || existing.serverAddress.isEmpty()) && !isDirectCall) {
                             repository.updateRequest(
                                 existing.copy(
                                     status = "APPROVED",
                                     token = if (token.isNotEmpty()) token else existing.token,
                                     name = callerName,
+                                    serverAddress = if (existing.serverAddress == "local" || existing.serverAddress.isEmpty()) effectiveServerUrl else existing.serverAddress,
                                     lastSeen = System.currentTimeMillis()
                                 )
                             )
@@ -986,11 +1357,17 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 token = token,
                                 timestamp = System.currentTimeMillis(),
                                 lastSeen = System.currentTimeMillis(),
-                                isOnline = true
+                                isOnline = true,
+                                serverAddress = effectiveServerUrl
                             )
                             repository.insertRequest(newRequest)
                         } else {
-                            repository.updateRequest(existing.copy(status = "APPROVED", token = token, name = name))
+                            repository.updateRequest(existing.copy(
+                                status = "APPROVED",
+                                token = token,
+                                name = name,
+                                serverAddress = if (existing.serverAddress == "local" || existing.serverAddress.isEmpty()) effectiveServerUrl else existing.serverAddress
+                            ))
                         }
 
                         showNotification(
@@ -1002,12 +1379,10 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 }
             }
 
-            if (eventId.isNotEmpty()) {
-                val cleanUrl = getCleanServerUrl()
-                val pinVal = apiKey.value
-                if (cleanUrl.isNotEmpty()) {
+            if (eventId.isNotEmpty() && !fromServerPoll) {
+                if (effectiveServerUrl.isNotEmpty()) {
                     scope.launch(Dispatchers.IO) {
-                        ackEventOnServer(cleanUrl, pinVal, eventId)
+                        ackEventOnServer(effectiveServerUrl, effectivePin, eventId)
                     }
                 }
             }
@@ -1116,7 +1491,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 payload.put("clientUuid", clientUuid)
 
                 val peer = repository.getRequestByUuid(clientUuid)
-                if (peer != null && peer.serverAddress != "local" && peer.serverAddress.startsWith("http")) {
+                val peerServerAddress = peer?.serverAddress?.trimEnd('/') ?: ""
+                val currentServers = homeServers.value.ifEmpty { repository.getAllHomeServersSync() }
+                val registeredHomeServer = currentServers.find { it.url.trimEnd('/') == peerServerAddress }
+
+                if (peer != null && peer.serverAddress != "local" && peer.serverAddress.startsWith("http") && registeredHomeServer == null) {
                     val remoteUrl = peer.serverAddress.trimEnd('/')
                     val pType = payload.optString("type", payload.optString("event", ""))
                     val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
@@ -1161,10 +1540,14 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
                 val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
                 val requestBody = RequestBody.create(mediaType, payload.toString())
-                val cleanUrl = getCleanServerUrl()
-                val pinVal = apiKey.value
+                val targetServer = registeredHomeServer
+                    ?: currentServers.find { it.url.trimEnd('/') == peerServerAddress }
+                    ?: currentServers.find { it.isEnabled }
+                    ?: currentServers.firstOrNull()
+                val cleanUrl = targetServer?.url?.trimEnd('/') ?: getCleanServerUrl()
+                val pinVal = targetServer?.apiKey ?: apiKey.value
 
-                Log.d("GatewayNetworkManager", "Posting host reply signal to server: $cleanUrl/api/host/response")
+                Log.d("GatewayNetworkManager", "Posting host reply signal to server (${targetServer?.name ?: "default"}): $cleanUrl/api/host/response")
                 val request = Request.Builder()
                     .url("$cleanUrl/api/host/response")
                     .header("Authorization", "Bearer $pinVal")
@@ -1195,56 +1578,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
             }
 
             val cleanUrl = getCleanServerUrl()
-            val pinVal = apiKey.value
 
-            // 1. Try local home server remote invite claim API first if connected
-            if (cleanUrl.isNotEmpty() && pinVal.isNotEmpty()) {
-                try {
-                    val json = JSONObject().apply {
-                        put("invite_url", cleanInvite)
-                        put("my_name", hostUsername.value)
-                    }
-                    val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
-                    val req = Request.Builder()
-                        .url("$cleanUrl/api/host/claim_remote_invite")
-                        .header("Authorization", "Bearer $pinVal")
-                        .post(RequestBody.create(mediaType, json.toString()))
-                        .build()
-
-                    okHttpClient.newCall(req).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            val respBody = JSONObject(resp.body?.string() ?: "{}")
-                            if (respBody.optBoolean("success", false)) {
-                                val peerUuid = respBody.getString("uuid")
-                                val peerName = respBody.optString("name", "Mobile App")
-                                val peerToken = respBody.getString("token")
-                                val peerServer = respBody.optString("server_address", "local")
-
-                                repository.insertRequest(
-                                    ClientRequest(
-                                        uuid = peerUuid,
-                                        name = peerName,
-                                        message = "Connected via invite ($peerServer)",
-                                        status = "APPROVED",
-                                        token = peerToken,
-                                        clientType = "MOBILE",
-                                        serverAddress = peerServer,
-                                        isOnline = true
-                                    )
-                                )
-                                withContext(Dispatchers.Main) {
-                                    onResult(true, "Connected to $peerName ($peerServer)")
-                                }
-                                return@launch
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.d("GatewayNetworkManager", "Server-side remote invite claim fallback: ${e.message}")
-                }
-            }
-
-            // 2. Direct client-side claim fallback
             try {
                 var targetBase = cleanUrl
                 var code = cleanInvite
@@ -1254,9 +1588,25 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     code = parts[1].substringBefore('?').substringBefore('#').trim()
                 }
 
+                if (targetBase.isEmpty() || !targetBase.startsWith("http")) {
+                    withContext(Dispatchers.Main) { onResult(false, "Please enter a full invite URL (e.g. http://server:8000/invite/code)") }
+                    return@launch
+                }
+
+                val allServers = repository.getAllHomeServersSync()
+                val existingMemberServer = allServers.find { it.url.removeSuffix("/") == targetBase.removeSuffix("/") && it.isMember }
+
                 val json = JSONObject().apply {
                     put("code", code)
                     put("name", hostUsername.value)
+                    put("client_type", "MOBILE")
+                    if (existingMemberServer != null && existingMemberServer.registeredUuid.isNotEmpty()) {
+                        put("existing_uuid", existingMemberServer.registeredUuid)
+                        put("existing_token", existingMemberServer.apiKey)
+                    }
+                    if (pushToken.value.isNotEmpty()) {
+                        put("push_token", pushToken.value)
+                    }
                 }
                 val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
                 val req = Request.Builder()
@@ -1268,25 +1618,29 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     if (resp.isSuccessful) {
                         val respBody = JSONObject(resp.body?.string() ?: "{}")
                         if (respBody.optBoolean("success", false)) {
-                            val peerUuid = respBody.getString("uuid")
-                            val peerName = respBody.optString("host_name", respBody.optString("name", "Mobile App"))
-                            val peerToken = respBody.getString("token")
-                            val isLocal = targetBase == cleanUrl || targetBase.isEmpty()
-                            val serverAddressStr = if (isLocal) "local" else targetBase
+                            val clientUuid = respBody.getString("uuid")
+                            val clientToken = respBody.getString("token")
+                            val hostUuid = respBody.optString("host_uuid", "").ifEmpty { respBody.optString("hostId", "") }
+                            val hostName = respBody.optString("host_name", respBody.optString("name", "Mobile App"))
+                            val sName = respBody.optString("server_name", respBody.optString("servername", hostName))
+                            val serverAddressStr = targetBase
 
+                            registerInviteHomeServer(serverAddressStr, sName, clientUuid, clientToken)
+
+                            val contactUuid = if (hostUuid.isNotEmpty()) hostUuid else clientUuid
                             val newReq = ClientRequest(
-                                uuid = peerUuid,
-                                name = peerName,
+                                uuid = contactUuid,
+                                name = hostName,
                                 message = "Connected via invite ($serverAddressStr)",
                                 status = "APPROVED",
-                                token = peerToken,
+                                token = clientToken,
                                 clientType = "MOBILE",
                                 serverAddress = serverAddressStr,
-                                isOnline = true
+                                isOnline = false
                             )
                             repository.insertRequest(newReq)
                             withContext(Dispatchers.Main) {
-                                onResult(true, "Connected to $peerName ($serverAddressStr)")
+                                onResult(true, "Connected to $hostName ($serverAddressStr)")
                             }
                             return@launch
                         } else {
@@ -1300,6 +1654,54 @@ class GatewayNetworkManager(private val context: Context, private val repository
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { onResult(false, "Error: ${e.localizedMessage ?: e.message}") }
             }
+        }
+    }
+
+    private suspend fun registerInviteHomeServer(
+        serverUrlStr: String,
+        serverNameStr: String,
+        clientUuid: String,
+        clientToken: String
+    ) {
+        val cleanUrl = serverUrlStr.trim().removeSuffix("/")
+        if (cleanUrl.isBlank() || !cleanUrl.startsWith("http")) return
+        val displayName = serverNameStr.trim().ifBlank { "Home Server" }
+        val allServers = repository.getAllHomeServersSync()
+        val match = allServers.find { it.url.removeSuffix("/") == cleanUrl }
+        val serverEntity = if (match != null) {
+            val updated = match.copy(
+                name = if (displayName != "Home Server") displayName else match.name,
+                apiKey = clientToken,
+                registeredUuid = clientUuid,
+                isAdmin = false,
+                serverRole = "MEMBER",
+                isEnabled = true,
+                isReachable = true,
+                statusMessage = "Connected as Member"
+            )
+            repository.updateHomeServer(updated)
+            updated
+        } else {
+            val newServer = HomeServer(
+                name = displayName,
+                url = cleanUrl,
+                apiKey = clientToken,
+                isPrimary = false,
+                isEnabled = true,
+                isAdmin = false,
+                serverRole = "MEMBER",
+                registeredUuid = clientUuid,
+                statusMessage = "Connected as Member",
+                isReachable = true,
+                clientIdentity = hostUsername.value
+            )
+            repository.insertHomeServer(newServer)
+            newServer
+        }
+        val updatedList = repository.getAllHomeServersSync()
+        updateAggregateConnectionStatus(updatedList)
+        scope.launch(Dispatchers.IO) {
+            syncServerEventsAndClients(serverEntity)
         }
     }
 
@@ -1488,11 +1890,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
         val savedPrefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
         savedPrefs.edit().putString("fcm_token", token).apply()
         
-        // Post the updated token to the server if URL is configured asynchronously on IO thread
-        val cleanUrl = serverUrl.value
-        val pinVal = apiKey.value
         scope.launch(Dispatchers.IO) {
-            registerPushTokenOnServer(cleanUrl, pinVal, token)
+            val servers = repository.getAllHomeServersSync()
+            for (srv in servers) {
+                registerPushTokenForServer(srv)
+            }
         }
     }
 
@@ -1518,6 +1920,18 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val respBody = response.body?.string() ?: ""
                     val json = JSONObject(respBody)
                     val status = json.optString("status", "")
+                    val hostUuid = json.optString("host_uuid", "")
+                    val isAdminVal = json.optInt("is_admin", 0) == 1 || json.optBoolean("is_admin", false)
+                    if (hostUuid.isNotEmpty()) {
+                        scope.launch(Dispatchers.IO) {
+                            val matching = repository.getAllHomeServersSync().find {
+                                it.url.removeSuffix("/") == serverUrlVal.removeSuffix("/")
+                            }
+                            if (matching != null && (matching.registeredUuid != hostUuid || matching.isAdmin != isAdminVal)) {
+                                repository.updateHomeServer(matching.copy(registeredUuid = hostUuid, isAdmin = isAdminVal))
+                            }
+                        }
+                    }
                     if (status == "APPROVED") {
                         serverReachable.value = true
                         _connectionStatus.value = "Connected"
@@ -1581,6 +1995,30 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 isSuccess = true
                                 lastRegisteredServerUrl = cleanUrl
                                 lastRegisteredApiKey = pinVal
+                                val hostUuid = json.optString("host_uuid", "")
+                                val isAdminVal = json.optInt("is_admin", 0) == 1 || json.optBoolean("is_admin", false)
+                                val sName = json.optString("server_name", json.optString("servername", "Home Server")).ifBlank { "Home Server" }
+                                val allServers = repository.getAllHomeServersSync()
+                                val match = allServers.find { it.url.removeSuffix("/") == cleanUrl.removeSuffix("/") }
+                                if (match != null) {
+                                    repository.updateHomeServer(match.copy(
+                                        apiKey = pinVal,
+                                        registeredUuid = if (hostUuid.isNotEmpty()) hostUuid else match.registeredUuid,
+                                        isAdmin = isAdminVal,
+                                        name = sName
+                                    ))
+                                } else {
+                                    repository.insertHomeServer(HomeServer(
+                                        name = sName,
+                                        url = cleanUrl,
+                                        apiKey = pinVal,
+                                        isPrimary = allServers.isEmpty(),
+                                        registeredUuid = hostUuid,
+                                        isAdmin = isAdminVal,
+                                        clientIdentity = cleanUser,
+                                        isEnabled = true
+                                    ))
+                                }
                             } else if (status == "PENDING") {
                                 errorMsg = "Pairing request pending admin approval."
                             } else if (status == "REJECTED") {
@@ -1615,50 +2053,61 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
     suspend fun fetchInvitesFromServer(): List<Invite> {
         return withContext(Dispatchers.IO) {
-            val serverUrlVal = serverUrl.value
-            val pinVal = apiKey.value
-            try {
-                val request = Request.Builder()
-                    .url("$serverUrlVal/api/host/invites")
-                    .header("Authorization", "Bearer $pinVal")
-                    .get()
-                    .build()
-                okHttpClient.newCall(request).execute().use { response ->
-                    val responseStr = response.body?.string()
-                    if (response.isSuccessful && responseStr != null) {
-                        val jsonArray = org.json.JSONArray(responseStr)
-                        val invites = mutableListOf<Invite>()
-                        for (i in 0 until jsonArray.length()) {
-                            val obj = jsonArray.getJSONObject(i)
-                            val code = obj.optString("code")
-                            invites.add(
-                                Invite(
-                                    code = code,
-                                    name = obj.optString("name", "Guest"),
-                                    isUsed = obj.optInt("used", 0) == 1,
-                                    createdTimestamp = obj.optLong("created_at", System.currentTimeMillis()),
-                                    url = "${serverUrlVal.removeSuffix("/")}/invite/$code"
-                                )
-                            )
+            val currentServers = homeServers.value.ifEmpty { repository.getAllHomeServersSync() }
+            val serversToQuery = currentServers.filter { it.isEnabled }.ifEmpty {
+                if (serverUrl.value.isNotEmpty()) listOf(HomeServer(name = "Home Server", url = serverUrl.value, apiKey = apiKey.value)) else emptyList()
+            }
+            val allInvites = mutableListOf<Invite>()
+            val seenCodes = mutableSetOf<String>()
+
+            for (s in serversToQuery) {
+                val sUrl = s.url.trimEnd('/')
+                val sPin = s.apiKey.ifEmpty { apiKey.value }
+                if (sUrl.isEmpty() || sPin.isEmpty()) continue
+                try {
+                    val request = Request.Builder()
+                        .url("$sUrl/api/host/invites")
+                        .header("Authorization", "Bearer $sPin")
+                        .get()
+                        .build()
+                    okHttpClient.newCall(request).execute().use { response ->
+                        val responseStr = response.body?.string()
+                        if (response.isSuccessful && responseStr != null) {
+                            val jsonArray = org.json.JSONArray(responseStr)
+                            for (i in 0 until jsonArray.length()) {
+                                val obj = jsonArray.getJSONObject(i)
+                                val code = obj.optString("code")
+                                if (code.isNotEmpty() && !seenCodes.contains(code)) {
+                                    seenCodes.add(code)
+                                    allInvites.add(
+                                        Invite(
+                                            code = code,
+                                            name = obj.optString("name", "Guest"),
+                                            isUsed = obj.optInt("used", 0) == 1,
+                                            createdTimestamp = obj.optLong("created_at", System.currentTimeMillis()),
+                                            url = "${sUrl}/invite/$code"
+                                        )
+                                    )
+                                }
+                            }
                         }
-                        return@withContext invites
+                    }
+                } catch (e: Exception) {
+                    if (e is java.io.IOException) {
+                        Log.w("GatewayNetworkManager", "Home Server not reachable for invites at $sUrl: ${e.message}")
+                    } else {
+                        Log.e("GatewayNetworkManager", "fetchInvites error on $sUrl", e)
                     }
                 }
-            } catch (e: Exception) {
-                if (e is java.io.IOException) {
-                    Log.w("GatewayNetworkManager", "Home Server not reachable for invites at $serverUrlVal: ${e.message}")
-                } else {
-                    Log.e("GatewayNetworkManager", "fetchInvites error", e)
-                }
             }
-            return@withContext emptyList()
+            allInvites
         }
     }
 
-    suspend fun createInviteOnServer(name: String, code: String) {
+    suspend fun createInviteOnServer(name: String, code: String, targetServer: HomeServer? = null) {
         withContext(Dispatchers.IO) {
-            val serverUrlVal = serverUrl.value
-            val pinVal = apiKey.value
+            val serverUrlVal = targetServer?.url?.trimEnd('/') ?: serverUrl.value.trimEnd('/')
+            val pinVal = targetServer?.apiKey?.ifEmpty { apiKey.value } ?: apiKey.value
             try {
                 val body = JSONObject().apply {
                     put("name", name)
@@ -1671,40 +2120,53 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     .post(requestBody)
                     .build()
                 okHttpClient.newCall(request).execute().use { response ->
-                    Log.d("GatewayNetworkManager", "createInvite response: ${response.code}")
+                    Log.d("GatewayNetworkManager", "createInvite on $serverUrlVal response: ${response.code}")
                 }
             } catch (e: Exception) {
                 if (e is java.io.IOException) {
-                    Log.w("GatewayNetworkManager", "Home Server not reachable to create invite: ${e.message}")
+                    Log.w("GatewayNetworkManager", "Home Server not reachable to create invite at $serverUrlVal: ${e.message}")
                 } else {
-                    Log.e("GatewayNetworkManager", "createInvite error", e)
+                    Log.e("GatewayNetworkManager", "createInvite error at $serverUrlVal", e)
                 }
             }
         }
     }
 
-    suspend fun deleteInviteOnServer(code: String) {
+    suspend fun deleteInviteOnServer(code: String, targetUrl: String? = null) {
         withContext(Dispatchers.IO) {
-            val serverUrlVal = serverUrl.value
-            val pinVal = apiKey.value
-            try {
-                val body = JSONObject().apply {
-                    put("code", code)
+            val currentServers = homeServers.value.ifEmpty { repository.getAllHomeServersSync() }
+            val serversToTry = if (!targetUrl.isNullOrBlank()) {
+                val clean = targetUrl.trimEnd('/')
+                currentServers.filter { clean.startsWith(it.url.trimEnd('/')) || it.url.trimEnd('/') == clean }.ifEmpty { currentServers }
+            } else {
+                currentServers.ifEmpty {
+                    if (serverUrl.value.isNotEmpty()) listOf(HomeServer(name = "Home Server", url = serverUrl.value, apiKey = apiKey.value)) else emptyList()
                 }
-                val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), body.toString())
-                val request = Request.Builder()
-                    .url("$serverUrlVal/api/host/delete_invite")
-                    .header("Authorization", "Bearer $pinVal")
-                    .post(requestBody)
-                    .build()
-                okHttpClient.newCall(request).execute().use { response ->
-                    Log.d("GatewayNetworkManager", "deleteInvite response: ${response.code}")
-                }
-            } catch (e: Exception) {
-                if (e is java.io.IOException) {
-                    Log.w("GatewayNetworkManager", "Home Server not reachable to delete invite: ${e.message}")
-                } else {
-                    Log.e("GatewayNetworkManager", "deleteInvite error", e)
+            }
+
+            for (s in serversToTry) {
+                val sUrl = s.url.trimEnd('/')
+                val sPin = s.apiKey.ifEmpty { apiKey.value }
+                if (sUrl.isEmpty() || sPin.isEmpty()) continue
+                try {
+                    val body = JSONObject().apply {
+                        put("code", code)
+                    }
+                    val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), body.toString())
+                    val request = Request.Builder()
+                        .url("$sUrl/api/host/delete_invite")
+                        .header("Authorization", "Bearer $sPin")
+                        .post(requestBody)
+                        .build()
+                    okHttpClient.newCall(request).execute().use { response ->
+                        Log.d("GatewayNetworkManager", "deleteInvite on $sUrl response: ${response.code}")
+                    }
+                } catch (e: Exception) {
+                    if (e is java.io.IOException) {
+                        Log.w("GatewayNetworkManager", "Home Server not reachable to delete invite at $sUrl: ${e.message}")
+                    } else {
+                        Log.e("GatewayNetworkManager", "deleteInvite error on $sUrl", e)
+                    }
                 }
             }
         }
@@ -1712,28 +2174,40 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
     suspend fun deleteClientOnServer(uuid: String) {
         withContext(Dispatchers.IO) {
-            val serverUrlVal = serverUrl.value
-            val pinVal = apiKey.value
-            if (serverUrlVal.isEmpty() || pinVal.isEmpty()) return@withContext
-            try {
-                val body = JSONObject().apply {
-                    put("uuid", uuid)
-                    put("clientUuid", uuid)
-                }
-                val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), body.toString())
-                val request = Request.Builder()
-                    .url("$serverUrlVal/api/host/delete_client")
-                    .header("Authorization", "Bearer $pinVal")
-                    .post(requestBody)
-                    .build()
-                okHttpClient.newCall(request).execute().use { response ->
-                    Log.d("GatewayNetworkManager", "deleteClientOnServer response: ${response.code}")
-                }
-            } catch (e: Exception) {
-                if (e is java.io.IOException) {
-                    Log.w("GatewayNetworkManager", "Home Server not reachable to delete client: ${e.message}")
-                } else {
-                    Log.e("GatewayNetworkManager", "deleteClientOnServer error", e)
+            val peer = repository.getRequestByUuid(uuid)
+            val currentServers = homeServers.value.ifEmpty { repository.getAllHomeServersSync() }
+            val peerServerAddress = peer?.serverAddress?.trimEnd('/') ?: ""
+            val matchedServer = currentServers.find { it.url.trimEnd('/') == peerServerAddress }
+            val targetServers = if (matchedServer != null) {
+                listOf(matchedServer)
+            } else {
+                currentServers.filter { it.isEnabled }.ifEmpty { currentServers }
+            }
+
+            for (server in targetServers) {
+                val serverUrlVal = server.url.trimEnd('/')
+                val pinVal = server.apiKey
+                if (serverUrlVal.isEmpty() || pinVal.isEmpty()) continue
+                try {
+                    val body = JSONObject().apply {
+                        put("uuid", uuid)
+                        put("clientUuid", uuid)
+                    }
+                    val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), body.toString())
+                    val request = Request.Builder()
+                        .url("$serverUrlVal/api/host/delete_client")
+                        .header("Authorization", "Bearer $pinVal")
+                        .post(requestBody)
+                        .build()
+                    okHttpClient.newCall(request).execute().use { response ->
+                        Log.d("GatewayNetworkManager", "deleteClientOnServer (${server.name}) response: ${response.code}")
+                    }
+                } catch (e: Exception) {
+                    if (e is java.io.IOException) {
+                        Log.w("GatewayNetworkManager", "Home Server ${server.name} not reachable to delete client: ${e.message}")
+                    } else {
+                        Log.e("GatewayNetworkManager", "deleteClientOnServer error for ${server.name}", e)
+                    }
                 }
             }
         }
@@ -1748,6 +2222,33 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
         fun getInstance(context: Context): GatewayNetworkManager {
             return CompanionRegistry.getOrInitializeManager(context)
+        }
+    }
+
+    fun updateServerDirectCalls(server: HomeServer, allowed: Boolean) {
+        scope.launch(Dispatchers.IO) {
+            val latest = repository.getHomeServerById(server.id) ?: server
+            val updated = latest.copy(allowDirectCalls = allowed)
+            repository.updateHomeServer(updated)
+            val cleanUrl = server.url.trim().removeSuffix("/")
+            val pinVal = server.apiKey
+            if (cleanUrl.isNotEmpty() && cleanUrl.startsWith("http")) {
+                try {
+                    val payload = JSONObject().apply {
+                        put("allow_direct_calls", allowed)
+                    }
+                    val body = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), payload.toString())
+                    val request = Request.Builder()
+                        .url("$cleanUrl/api/host/direct_calls")
+                        .header("Authorization", "Bearer $pinVal")
+                        .post(body)
+                        .build()
+                    okHttpClient.newCall(request).execute().close()
+                    Log.d("GatewayNetworkManager", "Updated allow_direct_calls on ${server.name} to $allowed")
+                } catch (e: Exception) {
+                    Log.e("GatewayNetworkManager", "Error updating direct calls setting on ${server.name}", e)
+                }
+            }
         }
     }
 
@@ -2174,7 +2675,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
         notificationManager.notify(1002, builder.build())
 
-        // Wake screen up immediately
+        // Wake screen up immediately for incoming call
         try {
             val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             @Suppress("DEPRECATION")

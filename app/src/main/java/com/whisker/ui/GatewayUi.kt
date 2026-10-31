@@ -1,5 +1,6 @@
 package com.whisker.ui
 
+import com.whisker.BuildConfig
 import com.whisker.R
 import android.annotation.SuppressLint
 import android.content.Context
@@ -99,10 +100,15 @@ fun GatewayDashboard(
     val pushTokenVal by viewModel.pushToken.collectAsState()
     val serverReachableVal by viewModel.serverReachable.collectAsState()
     val allowDirectCalls by viewModel.allowDirectCalls.collectAsState()
+    val hostUsernameVal by viewModel.networkManager.hostUsername.collectAsState()
 
     val selectedTab by viewModel.selectedTab.collectAsState()
-    var showServerConfigDialog by remember { mutableStateOf(false) }
+    val homeServers by viewModel.allHomeServers.collectAsState()
+    var showServersModal by remember { mutableStateOf(false) }
+    var serverToEdit by remember { mutableStateOf<HomeServer?>(null) }
+    var showServerEditDialog by remember { mutableStateOf(false) }
     var showDozeInfoDialog by remember { mutableStateOf(false) }
+    var showAddServerDialog by remember { mutableStateOf(false) }
     var showInviteDialog by remember { mutableStateOf(false) }
     val allInvites by viewModel.allInvites.collectAsState()
 
@@ -155,6 +161,15 @@ fun GatewayDashboard(
                             fontWeight = FontWeight.ExtraBold,
                             color = Color.White
                         )
+                        Text(
+                            text = com.whisker.BuildConfig.VERSION_NAME,
+                            fontSize = 10.sp,
+                            color = Color.LightGray.copy(alpha = 0.8f),
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier
+                                .background(Color(0xFF1F2937), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -162,25 +177,19 @@ fun GatewayDashboard(
                     titleContentColor = Color.White
                 ),
                 actions = {
-                    // Quick configuration icon button
-                    IconButton(
-                        onClick = { showServerConfigDialog = true },
-                        modifier = Modifier.padding(end = 4.dp).size(40.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Configure LAN Host Server",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    // Connection Status Bubble (Clickable & Connection status aware)
-                    val (statusColor, statusText, detailedStatus) = when {
-                        serverUrlVal.isEmpty() -> Triple(Color(0xFFEF4444), "Disconnected", "No Home Server configured")
-                        serverReachableVal -> Triple(Color(0xFF10B981), "Connected", "Connected to Home Server with active events sync")
-                        connStatus.contains("Connecting", ignoreCase = true) -> Triple(Color(0xFFFBBF24), "Connecting", "Connecting to Home Server ($connStatus)")
-                        else -> Triple(Color(0xFFEF4444), "Disconnected", "Waiting for server connection ($connStatus)")
+                    // Connection Status Bubble (Clickable -> opens modal with all configured home servers)
+                    val enabledServers = homeServers.filter { it.isEnabled }
+                    val reachableServers = enabledServers.filter { it.isReachable }
+                    val (statusColor, statusText) = when {
+                        homeServers.isEmpty() && serverUrlVal.isEmpty() -> Pair(Color(0xFFEF4444), "No Server")
+                        enabledServers.isEmpty() -> Pair(Color(0xFF64748B), "Disabled")
+                        reachableServers.size == enabledServers.size -> {
+                            val txt = if (enabledServers.size > 1) "${reachableServers.size}/${enabledServers.size} Online" else "Connected"
+                            Pair(Color(0xFF10B981), txt)
+                        }
+                        reachableServers.isNotEmpty() -> Pair(Color(0xFF10B981), "${reachableServers.size}/${enabledServers.size} Online")
+                        connStatus.contains("Connecting", ignoreCase = true) -> Pair(Color(0xFFFBBF24), "Connecting")
+                        else -> Pair(Color(0xFFEF4444), "Disconnected")
                     }
 
                     Box(
@@ -188,7 +197,7 @@ fun GatewayDashboard(
                             .padding(end = 12.dp)
                             .clip(RoundedCornerShape(100.dp))
                             .clickable {
-                                showDozeInfoDialog = true
+                                showServersModal = true
                             }
                             .background(Color(0xFF1F2937).copy(alpha = 0.6f), RoundedCornerShape(100.dp))
                             .border(1.dp, statusColor.copy(alpha = 0.4f), RoundedCornerShape(100.dp))
@@ -198,7 +207,6 @@ fun GatewayDashboard(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            // LED status dot representing push service optimization level
                             Box(
                                 modifier = Modifier
                                     .size(8.dp)
@@ -244,7 +252,22 @@ fun GatewayDashboard(
                         activeInvites = allInvites,
                         allowDirectCalls = allowDirectCalls,
                         isTablet = isTablet,
+                        homeServers = homeServers,
+                        onAddServer = {
+                            serverToEdit = null
+                            showServerEditDialog = true
+                        },
+                        onEditServer = {
+                            serverToEdit = it
+                            showServerEditDialog = true
+                        },
+                        onDeleteServer = { viewModel.deleteHomeServer(it) },
+                        onToggleServerEnabled = { viewModel.toggleServerEnabled(it) },
+                        onSetPrimaryServer = { viewModel.setPrimaryServer(it) },
+                        onRefreshServer = { viewModel.refreshServer(it) },
+                        onRefreshAllServers = { viewModel.refreshAllServers() },
                         onToggleDirectCalls = { viewModel.toggleAllowDirectCalls(it) },
+                        onToggleServerDirectCalls = { server, allowed -> viewModel.toggleServerDirectCalls(server, allowed) },
                         onApprove = { viewModel.approveClient(it) },
                         onReject = { viewModel.rejectClient(it) },
                         onDelete = { viewModel.deleteClient(it) },
@@ -275,6 +298,7 @@ fun GatewayDashboard(
                             approvedRequests = approvedRequests,
                             messages = messages,
                             isTablet = isTablet,
+                            homeServers = homeServers,
                             onSendMessage = { uuid, name, text -> viewModel.sendMessage(uuid, name, text) },
                             onMarkAsRead = { viewModel.markMessagesRead(it) },
                             onActiveChatChanged = { viewModel.setSelectedChatUuid(it) },
@@ -555,6 +579,35 @@ fun GatewayDashboard(
             val clipboardManager = LocalClipboardManager.current
             val scrollState = rememberScrollState()
 
+            val hostHomeServers = remember(homeServers) {
+                val hosts = homeServers.filter { it.isHost && it.isEnabled }
+                if (hosts.isNotEmpty()) hosts
+                else {
+                    val anyHost = homeServers.filter { it.isHost }
+                    if (anyHost.isNotEmpty()) anyHost
+                    else {
+                        val primaries = homeServers.filter { it.isPrimary }
+                        if (primaries.isNotEmpty()) primaries
+                        else homeServers.filter { it.isEnabled }.ifEmpty { homeServers }
+                    }
+                }
+            }
+            val hostServerIds = remember(hostHomeServers) { hostHomeServers.map { it.id } }
+            var selectedServerId by remember {
+                mutableStateOf(
+                    hostHomeServers.firstOrNull { it.isPrimary }?.id
+                        ?: hostHomeServers.firstOrNull()?.id
+                        ?: ""
+                )
+            }
+            LaunchedEffect(hostServerIds) {
+                if (selectedServerId.isEmpty() || !hostServerIds.contains(selectedServerId)) {
+                    selectedServerId = hostHomeServers.firstOrNull { it.isPrimary }?.id
+                        ?: hostHomeServers.firstOrNull()?.id
+                        ?: ""
+                }
+            }
+
             AlertDialog(
                 onDismissRequest = { 
                     if (!isConnecting) {
@@ -624,6 +677,101 @@ fun GatewayDashboard(
                                     color = Color.LightGray,
                                     lineHeight = 16.sp
                                 )
+
+                                if (hostHomeServers.isNotEmpty()) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color(0xFF0F172A))
+                                            .padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "TARGET HOME SERVER",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            letterSpacing = 0.8.sp
+                                        )
+                                        Text(
+                                            text = "Select home server (Admin or Companion):",
+                                            fontSize = 11.sp,
+                                            color = Color.LightGray
+                                        )
+
+                                        hostHomeServers.forEach { srv ->
+                                            val isSelected = (srv.id == selectedServerId)
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
+                                                    .clickable { selectedServerId = srv.id }
+                                                    .padding(horizontal = 4.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                RadioButton(
+                                                    selected = isSelected,
+                                                    onClick = { selectedServerId = srv.id },
+                                                    colors = RadioButtonDefaults.colors(
+                                                        selectedColor = MaterialTheme.colorScheme.primary,
+                                                        unselectedColor = Color.Gray
+                                                    ),
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Text(
+                                                            text = srv.name.ifEmpty { "Home Server" },
+                                                            fontSize = 12.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = Color.White
+                                                        )
+                                                        when (srv.serverRole) {
+                                                            "ADMIN" -> {
+                                                                Spacer(Modifier.width(6.dp))
+                                                                Text(
+                                                                    text = "👑 ADMIN",
+                                                                    fontSize = 9.sp,
+                                                                    fontWeight = FontWeight.ExtraBold,
+                                                                    color = MaterialTheme.colorScheme.primary,
+                                                                    modifier = Modifier
+                                                                        .clip(RoundedCornerShape(3.dp))
+                                                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
+                                                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                                                )
+                                                            }
+                                                            "COMPANION" -> {
+                                                                Spacer(Modifier.width(6.dp))
+                                                                Text(
+                                                                    text = "📱 COMPANION",
+                                                                    fontSize = 9.sp,
+                                                                    fontWeight = FontWeight.ExtraBold,
+                                                                    color = Color(0xFFA78BFA),
+                                                                    modifier = Modifier
+                                                                        .clip(RoundedCornerShape(3.dp))
+                                                                        .background(Color(0xFFA78BFA).copy(alpha = 0.2f))
+                                                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                    Text(
+                                                        text = srv.url,
+                                                        fontSize = 10.sp,
+                                                        color = Color.Gray,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 OutlinedTextField(
                                     value = inviteName,
                                     onValueChange = { inviteName = it },
@@ -637,7 +785,7 @@ fun GatewayDashboard(
                                     shape = RoundedCornerShape(8.dp)
                                 )
                             } else {
-                                val inviteUrl = "${serverUrlVal.removeSuffix("/")}/invite/${createdInvite!!.code}"
+                                val inviteUrl = createdInvite!!.url
                                 Text("Invite Generated!", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                                 
                                 val qrBitmap = remember(inviteUrl) { generateQrCodeBitmap(inviteUrl, 512) }
@@ -747,7 +895,8 @@ fun GatewayDashboard(
                             Button(
                                 onClick = {
                                     if (inviteName.isNotBlank()) {
-                                        createdInvite = viewModel.createInvite(inviteName)
+                                        val targetServer = hostHomeServers.find { it.id == selectedServerId } ?: hostHomeServers.firstOrNull()
+                                        createdInvite = viewModel.createInvite(inviteName, targetServer)
                                     }
                                 },
                                 enabled = inviteName.isNotBlank(),
@@ -810,285 +959,55 @@ fun GatewayDashboard(
             )
         }
 
-        // CORE NETWORK CONFIGURATION AND PAIRING SETTINGS DIALOG
-        if (showServerConfigDialog) {
-            val usernameVal by viewModel.networkManager.hostUsername.collectAsState()
-            var inputUrl by remember(serverUrlVal) { mutableStateOf(serverUrlVal) }
-            var inputUsername by remember(usernameVal) { mutableStateOf(usernameVal) }
-            val clipboardManager = LocalClipboardManager.current
-            val scrollState = rememberScrollState()
-
-            AlertDialog(
-                onDismissRequest = { showServerConfigDialog = false },
-                title = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Settings",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Text(
-                            text = "Network & Guest Settings",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    }
+        // HOME SERVERS STATUS MODAL (TRIGGERED FROM CONNECTION BUBBLE)
+        if (showServersModal) {
+            HomeServersStatusModal(
+                servers = homeServers,
+                hostUsername = hostUsernameVal,
+                onUpdateHostUsername = { viewModel.networkManager.updateHostUsername(it) },
+                onDismiss = { showServersModal = false },
+                onRefreshAll = { viewModel.refreshAllServers() },
+                onRefreshServer = { viewModel.refreshServer(it) },
+                onToggleEnabled = { viewModel.toggleServerEnabled(it) },
+                onEditServer = { server ->
+                    serverToEdit = server
+                    showServerEditDialog = true
                 },
-                text = {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 520.dp)
-                            .verticalScroll(scrollState),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        // HOME SERVER SECTION
-                        Text(
-                            text = "HOME SERVER",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                            letterSpacing = 1.sp
-                        )
+                onAddServer = {
+                    serverToEdit = null
+                    showServerEditDialog = true
+                }
+            )
+        }
 
-                        OutlinedTextField(
-                            value = inputUsername,
-                            onValueChange = { inputUsername = it },
-                            label = { Text("Mobile App Username (Visible to Guests)", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary) },
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                unfocusedBorderColor = Color.Gray.copy(alpha = 0.5f)
-                            ),
-                            shape = RoundedCornerShape(10.dp)
-                        )
-
-                        OutlinedTextField(
-                            value = inputUrl,
-                            onValueChange = { inputUrl = it },
-                            label = { Text("Home Server Address", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                unfocusedBorderColor = Color.Gray.copy(alpha = 0.5f)
-                            ),
-                            shape = RoundedCornerShape(10.dp)
-                        )
-
-                        HorizontalDivider(color = Color.Gray.copy(alpha = 0.15f))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "FCM PUSH TOKEN",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary,
-                                letterSpacing = 1.sp
-                            )
-                            val isTokenAvailable = pushTokenVal.isNotEmpty() && !pushTokenVal.startsWith("device-push-token-")
-                            Text(
-                                text = if (isTokenAvailable) "Active FCM" else "No FCM Token",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isTokenAvailable) Color(0xFF10B981) else Color(0xFFEF4444),
-                                modifier = Modifier
-                                    .background(
-                                        if (isTokenAvailable) Color(0xFF10B981).copy(alpha = 0.15f) else Color(0xFFEF4444).copy(alpha = 0.15f),
-                                        RoundedCornerShape(4.dp)
-                                    )
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
-                        }
-
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(10.dp))
-                                .border(1.dp, Color.Gray.copy(alpha = 0.10f), RoundedCornerShape(10.dp))
-                                .padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            if (pushTokenVal.isNotEmpty() && !pushTokenVal.startsWith("device-push-token-")) {
-                                Text(
-                                    text = "Your Home Server sends FCM push notifications to this token:",
-                                    fontSize = 10.sp,
-                                    color = Color.Gray,
-                                    lineHeight = 14.sp
-                                )
-                                SelectionContainer {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = pushTokenVal,
-                                            fontSize = 10.sp,
-                                            fontFamily = FontFamily.Monospace,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        IconButton(
-                                            onClick = {
-                                                clipboardManager.setText(AnnotatedString(pushTokenVal))
-                                                Toast.makeText(context, "Address copied!", Toast.LENGTH_SHORT).show()
-                                            },
-                                            modifier = Modifier.size(24.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Share,
-                                                contentDescription = "Copy Token",
-                                                tint = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(14.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            } else {
-                                var manualApiKeyInput by remember {
-                                    val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
-                                    mutableStateOf(prefs.getString("fcm_api_key", "") ?: "")
-                                }
-
-                                Text(
-                                    text = "FCM push token is not registered yet. Ensure your Home Server has generated 'whisker-push-sa.json' using 'python3 fcm_setup.py' or enter your Firebase Web API Key (AIzaSy...) below.",
-                                    fontSize = 10.sp,
-                                    color = Color(0xFFEF4444),
-                                    lineHeight = 14.sp
-                                )
-
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(10.dp))
-                                        .border(1.dp, Color.Gray.copy(alpha = 0.10f), RoundedCornerShape(10.dp))
-                                        .padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Text(
-                                        text = "Firebase Web API Key",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    OutlinedTextField(
-                                        value = manualApiKeyInput,
-                                        onValueChange = { manualApiKeyInput = it },
-                                        placeholder = { Text("AIzaSy...", fontSize = 11.sp, color = Color.Gray) },
-                                        singleLine = true,
-                                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = Color.White),
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                    Button(
-                                        onClick = {
-                                            if (manualApiKeyInput.isNotBlank()) {
-                                                viewModel.networkManager.updateCustomApiKey(manualApiKeyInput)
-                                                Toast.makeText(context, "API Key saved. Re-registering FCM token...", Toast.LENGTH_SHORT).show()
-                                            }
-                                        },
-                                        modifier = Modifier.align(Alignment.End),
-                                        shape = RoundedCornerShape(8.dp)
-                                    ) {
-                                        Text("Save & Connect FCM", fontSize = 11.sp)
-                                    }
-                                }
-                            }
-                        }
-
-
-
-                        // HOME SERVER ACCESS KEY SECTION
-                        Text(
-                            text = "HOME SERVER ACCESS KEY",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                            letterSpacing = 1.sp
-                        )
-
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(10.dp))
-                                .border(1.dp, Color.Gray.copy(alpha = 0.10f), RoundedCornerShape(10.dp))
-                                .padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                text = "This unique home server access key is randomly generated on first launch. On first connection, your home server pairs and locks to this key, preventing any unauthorized devices from connecting.",
-                                fontSize = 10.sp,
-                                color = Color.Gray,
-                                lineHeight = 14.sp
-                            )
-                            SelectionContainer {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = apiKeyVal,
-                                        fontSize = 10.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    IconButton(
-                                        onClick = {
-                                            clipboardManager.setText(AnnotatedString(apiKeyVal))
-                                            Toast.makeText(context, "Access key copied!", Toast.LENGTH_SHORT).show()
-                                        },
-                                        modifier = Modifier.size(24.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Share,
-                                            contentDescription = "Copy Access Key",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
+        // PER-SERVER CONFIGURATION & ADD DIALOG
+        if (showServerEditDialog) {
+            HomeServerEditDialog(
+                server = serverToEdit,
+                defaultClientIdentity = hostUsernameVal.ifEmpty { Build.MODEL ?: "Mobile Device" },
+                onDismiss = {
+                    showServerEditDialog = false
+                    serverToEdit = null
                 },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            viewModel.networkManager.updateSettings(inputUrl, inputUsername)
-                            showServerConfigDialog = false
-                            Toast.makeText(context, "Server link updated!", Toast.LENGTH_SHORT).show()
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Save & Apply", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                    }
+                onSave = { name, url, clientIdentity, isEnabled ->
+                    viewModel.saveHomeServer(
+                        id = serverToEdit?.id ?: "",
+                        name = name,
+                        url = url,
+                        clientIdentity = clientIdentity,
+                        isEnabled = isEnabled,
+                        isAdmin = serverToEdit?.isAdmin ?: true
+                    )
+                    showServerEditDialog = false
+                    serverToEdit = null
                 },
-                dismissButton = {
-                    TextButton(
-                        onClick = { showServerConfigDialog = false }
-                    ) {
-                        Text("Close", color = Color.Gray, fontSize = 12.sp)
+                onDelete = serverToEdit?.let { s ->
+                    {
+                        viewModel.deleteHomeServer(s)
+                        showServerEditDialog = false
+                        serverToEdit = null
                     }
-                },
-                containerColor = Color(0xFF151926),
-                tonalElevation = 6.dp
+                }
             )
         }
 
@@ -1294,13 +1213,23 @@ fun CompactContactCard(
     onCall: (String, String) -> Unit,
     onRename: (ClientRequest) -> Unit,
     onDelete: (ClientRequest) -> Unit,
-    onToggleAutoAccept: (ClientRequest, Boolean) -> Unit
+    onToggleAutoAccept: (ClientRequest, Boolean) -> Unit,
+    homeServers: List<HomeServer> = emptyList()
 ) {
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
-    val isMobileApp = request.status == "MOBILE_APPROVED" || request.clientType == "MOBILE"
-    val isRemote = request.serverAddress.isNotBlank() && request.serverAddress != "local"
-    val serverDisplay = if (isRemote) request.serverAddress else "local"
+    val isMobileApp = request.status == "MOBILE_APPROVED" || request.clientType.equals("MOBILE", ignoreCase = true)
+    val isCli = request.clientType.equals("CLI", ignoreCase = true) || request.name.contains("cli", ignoreCase = true) || request.message.contains("CLI", ignoreCase = true)
+    val rawAddress = request.serverAddress.trimEnd('/')
+    val matchedServer = homeServers.firstOrNull { it.url.trimEnd('/') == rawAddress }
+        ?: if (rawAddress == "local" || rawAddress.isEmpty()) {
+            homeServers.firstOrNull { it.isEnabled } ?: homeServers.firstOrNull()
+        } else {
+            null
+        }
+    val serverName = matchedServer?.name?.ifEmpty { "Home Server" } ?: "Remote Server"
+    val serverAddress = matchedServer?.url ?: (if (rawAddress.isNotEmpty() && rawAddress != "local") rawAddress else "server")
+    val isSharedServer = (matchedServer != null)
 
     Card(
         modifier = Modifier
@@ -1331,8 +1260,8 @@ fun CompactContactCard(
                 // Left: LED & Name with Mobile/Server badge
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.weight(1f, fill = false)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f).padding(end = 8.dp)
                 ) {
                     Box(
                         modifier = Modifier
@@ -1345,35 +1274,43 @@ fun CompactContactCard(
                         fontWeight = FontWeight.Bold,
                         color = Color.White,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
 
-                    // Compact badge
+                    // Client type badge
                     Surface(
-                        color = if (isMobileApp) Color(0xFF8B5CF6).copy(alpha = 0.25f) else Color(0xFF3B82F6).copy(alpha = 0.25f),
+                        color = if (isMobileApp) Color(0xFF8B5CF6).copy(alpha = 0.25f) else if (isCli) Color(0xFF10B981).copy(alpha = 0.25f) else Color(0xFF3B82F6).copy(alpha = 0.25f),
                         shape = RoundedCornerShape(4.dp)
                     ) {
                         Text(
-                            text = if (isMobileApp) "📱" else "💻",
+                            text = if (isMobileApp) "📱 Mobile" else if (isCli) "⌨️ CLI" else "💻 Web",
                             fontSize = 10.sp,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            fontWeight = FontWeight.Bold,
+                            color = if (isMobileApp) Color(0xFFA78BFA) else if (isCli) Color(0xFF6EE7B7) else Color(0xFF93C5FD),
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                         )
                     }
 
-                    if (isMobileApp && isRemote) {
-                        Surface(
-                            color = Color(0xFF1E3A8A).copy(alpha = 0.5f),
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                text = "🌐 $serverDisplay",
-                                fontSize = 9.sp,
-                                color = Color(0xFF93C5FD),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                            )
-                        }
+                    // Server attribution for all approved contacts
+                    Surface(
+                        color = Color(0xFF1E293B).copy(alpha = 0.7f),
+                        shape = RoundedCornerShape(4.dp),
+                        border = BorderStroke(0.5.dp, Color.Gray.copy(alpha = 0.3f))
+                    ) {
+                        Text(
+                            text = "🏠 $serverName",
+                            fontSize = 9.sp,
+                            color = Color(0xFFCBD5E1),
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                                .widthIn(max = 110.dp)
+                        )
                     }
                 }
 
@@ -1455,25 +1392,66 @@ fun CompactContactCard(
                             modifier = Modifier.padding(8.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            if (isMobileApp) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "HOME SERVER:",
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = Color.Gray
-                                    )
-                                    Text(
-                                        text = if (isRemote) serverDisplay else "local (Same Server)",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isRemote) Color(0xFF93C5FD) else Color(0xFF6EE7B7)
-                                    )
-                                }
+                            // Home Server Details for all approved contacts
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "HOME SERVER:",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.Gray
+                                )
+                                Text(
+                                    text = "$serverName ($serverAddress)",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF93C5FD),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            // Connection Type
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "CONNECTION:",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.Gray
+                                )
+                                Text(
+                                    text = if (isMobileApp) "Mobile App Connection" else "Direct Host Connection",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFE2E8F0)
+                                )
+                            }
+
+                            // Client Type
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "CLIENT TYPE:",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.Gray
+                                )
+                                Text(
+                                    text = if (isMobileApp) "Mobile App Peer" else if (isCli) "CLI Client" else "Web Client",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isMobileApp) Color(0xFFA78BFA) else if (isCli) Color(0xFF6EE7B7) else Color(0xFF93C5FD)
+                                )
                             }
 
                             Row(
@@ -1603,6 +1581,1013 @@ fun CompactContactCard(
 }
 
 // ==========================================
+// COMPACT HOME SERVER CARD (Single line with expandable details)
+// ==========================================
+@Composable
+fun CompactHomeServerCard(
+    server: HomeServer,
+    isExpanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onSettingsClick: () -> Unit,
+    onToggleEnabled: () -> Unit,
+    onToggleDirectCalls: (Boolean) -> Unit,
+    onSetPrimary: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
+
+    val ledColor = when {
+        !server.isEnabled -> Color(0xFF64748B)
+        server.isReachable -> Color(0xFF10B981)
+        server.statusMessage.contains("Connecting", ignoreCase = true) -> Color(0xFFFBBF24)
+        else -> Color(0xFFEF4444)
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp)),
+        colors = CardDefaults.cardColors(
+            containerColor = if (!server.isEnabled) Color(0xFF111827).copy(alpha = 0.5f) else Color(0xFF1A1F2C).copy(alpha = 0.85f)
+        ),
+        border = BorderStroke(
+            1.dp,
+            if (server.isEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f) else Color.Gray.copy(alpha = 0.25f)
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Main Compact Line: LED + Server Name + Badges + Enable Toggle + Expand Chevron
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Left: LED & Name with Badges - clicking expands/collapses
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { onToggleExpand() }
+                        .padding(vertical = 4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(ledColor)
+                    )
+                    Text(
+                        text = server.name,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    when (server.serverRole) {
+                        "ADMIN" -> {
+                            Surface(
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = "👑 ADMIN",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                        "COMPANION" -> {
+                            Surface(
+                                color = Color(0xFFA78BFA).copy(alpha = 0.2f),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = "📱 COMPANION",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFA78BFA),
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                        else -> { // MEMBER
+                            Surface(
+                                color = Color(0xFF10B981).copy(alpha = 0.18f),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = "🔗 MEMBER",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF6EE7B7),
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    if (!server.isEnabled) {
+                        Surface(
+                            color = Color(0xFF64748B).copy(alpha = 0.25f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "DISABLED",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF94A3B8),
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Right: Enable Toggle + Expand Chevron
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // Disable/Enable Toggle directly on collapsed card
+                    Switch(
+                        checked = server.isEnabled,
+                        onCheckedChange = { onToggleEnabled() },
+                        modifier = Modifier
+                            .scale(0.8f)
+                            .height(28.dp),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Black,
+                            checkedTrackColor = MaterialTheme.colorScheme.primary,
+                            uncheckedThumbColor = Color.LightGray,
+                            uncheckedTrackColor = Color(0xFF374151)
+                        )
+                    )
+
+                    // Expand Chevron
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .clickable { onToggleExpand() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            contentDescription = if (isExpanded) "Collapse" else "Expand",
+                            tint = Color.Gray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
+            // Expanded Details Section
+            AnimatedVisibility(
+                visible = isExpanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    HorizontalDivider(color = Color.Gray.copy(alpha = 0.2f))
+
+                    // Server Address & Status Box
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.35f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "SERVER ADDRESS",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = server.url,
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(server.url))
+                                        Toast.makeText(context, "Address copied!", Toast.LENGTH_SHORT).show()
+                                    },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Share,
+                                        contentDescription = "Copy URL",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "STATUS: ${server.statusMessage.ifEmpty { if (server.isReachable) "Online • Synced" else "Disconnected" }}",
+                                    fontSize = 10.sp,
+                                    color = if (server.isReachable) Color(0xFF10B981) else Color(0xFFEF4444)
+                                )
+                                if (server.lastSeen > 0) {
+                                    Text(
+                                        text = SimpleDateFormat("HH:mm • dd MMM", Locale.getDefault()).format(Date(server.lastSeen)),
+                                        fontSize = 10.sp,
+                                        color = Color.Gray
+                                    )
+                                }
+                            }
+
+                            // Mobile Client Identity
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "MOBILE CLIENT IDENTITY",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = server.clientIdentity.ifEmpty { "Mobile Device" },
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White
+                                )
+                            }
+
+                            // Pairing ID (Registered UUID)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "PAIRING ID",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = server.registeredUuid.ifEmpty { "Pending registration..." },
+                                    fontSize = 10.sp,
+                                    color = if (server.registeredUuid.isNotEmpty()) Color(0xFFA78BFA) else Color.Gray,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    // Per-Server Allow Direct Calls Toggle
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.25f),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, if (server.allowDirectCalls) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f) else Color.Gray.copy(alpha = 0.15f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("⚡", fontSize = 16.sp)
+                                Column {
+                                    Text(
+                                        text = "Allow Direct Calls",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "Allow visitors to call immediately before pre-approval",
+                                        fontSize = 9.sp,
+                                        color = Color.Gray
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = server.allowDirectCalls,
+                                onCheckedChange = { onToggleDirectCalls(it) },
+                                modifier = Modifier
+                                    .scale(0.8f)
+                                    .testTag("direct_calls_toggle_${server.id.take(6)}"),
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.Black,
+                                    checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                    uncheckedThumbColor = Color.LightGray,
+                                    uncheckedTrackColor = Color(0xFF374151)
+                                )
+                            )
+                        }
+                    }
+
+                    // Action buttons row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onSettingsClick,
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Settings,
+                                contentDescription = null,
+                                tint = Color.Black,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Configure", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
+
+                        OutlinedButton(
+                            onClick = onDelete,
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
+                            border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f)),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = null,
+                                tint = Color(0xFFEF4444),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Delete", color = Color(0xFFEF4444), fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==========================================
+// HOME SERVERS STATUS MODAL (Opened from Connection Bubble)
+// ==========================================
+@Composable
+fun HomeServersStatusModal(
+    servers: List<HomeServer>,
+    hostUsername: String,
+    onUpdateHostUsername: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onRefreshAll: () -> Unit,
+    onRefreshServer: (HomeServer) -> Unit,
+    onEditServer: (HomeServer) -> Unit,
+    onToggleEnabled: (HomeServer) -> Unit = {},
+    onAddServer: () -> Unit
+) {
+    val validServers = servers.filter {
+        val u = it.url.trim().lowercase()
+        u.isNotBlank() && (u.startsWith("http://") || u.startsWith("https://")) && !u.contains("10.0.2.2") && !u.contains("localhost") && u != "http://" && u != "https://"
+    }
+    val scrollState = rememberScrollState()
+    var editingUsername by remember { mutableStateOf(false) }
+    var usernameText by remember(hostUsername) { mutableStateOf(hostUsername) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Cloud,
+                        contentDescription = "Home Servers",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Text(
+                        text = "Home Servers Status",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+
+                IconButton(
+                    onClick = onRefreshAll,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Refresh All",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(scrollState),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Host Username banner
+                Surface(
+                    color = Color.Black.copy(alpha = 0.35f),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, Color.Gray.copy(alpha = 0.2f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("MOBILE CLIENT IDENTITY", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            if (editingUsername) {
+                                OutlinedTextField(
+                                    value = usernameText,
+                                    onValueChange = { usernameText = it },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                        unfocusedBorderColor = Color.Gray
+                                    )
+                                )
+                            } else {
+                                Text(hostUsername.ifEmpty { "Host" }, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        IconButton(
+                            onClick = {
+                                if (editingUsername) {
+                                    if (usernameText.isNotBlank()) {
+                                        onUpdateHostUsername(usernameText.trim())
+                                    }
+                                    editingUsername = false
+                                } else {
+                                    editingUsername = true
+                                }
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (editingUsername) Icons.Default.Check else Icons.Default.Edit,
+                                contentDescription = if (editingUsername) "Save" else "Edit Name",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+
+                if (validServers.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "No Home Servers Configured",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "Add your Whisker home server to sync events, messages, and calls.",
+                                fontSize = 11.sp,
+                                color = Color.Gray,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    validServers.forEach { server ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (!server.isEnabled) Color(0xFF1E293B).copy(alpha = 0.4f) else Color(0xFF1E293B).copy(alpha = 0.85f)
+                            ),
+                            border = BorderStroke(
+                                1.dp,
+                                if (server.isEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f) else Color.Gray.copy(alpha = 0.25f)
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    ) {
+                                        val ledColor = when {
+                                            !server.isEnabled -> Color(0xFF64748B)
+                                            server.isReachable -> Color(0xFF10B981)
+                                            server.statusMessage.contains("Connecting", ignoreCase = true) -> Color(0xFFFBBF24)
+                                            else -> Color(0xFFEF4444)
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .size(10.dp)
+                                                .clip(CircleShape)
+                                                .background(ledColor)
+                                        )
+                                        Text(
+                                            text = server.name,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        when (server.serverRole) {
+                                            "ADMIN" -> {
+                                                Surface(
+                                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                                    shape = RoundedCornerShape(4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "👑 ADMIN",
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                    )
+                                                }
+                                            }
+                                            "COMPANION" -> {
+                                                Surface(
+                                                    color = Color(0xFFA78BFA).copy(alpha = 0.2f),
+                                                    shape = RoundedCornerShape(4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "📱 COMPANION",
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = Color(0xFFA78BFA),
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                    )
+                                                }
+                                            }
+                                            else -> {
+                                                Surface(
+                                                    color = Color(0xFF10B981).copy(alpha = 0.18f),
+                                                    shape = RoundedCornerShape(4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "🔗 MEMBER",
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = Color(0xFF6EE7B7),
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Switch(
+                                            checked = server.isEnabled,
+                                            onCheckedChange = { onToggleEnabled(server) },
+                                            modifier = Modifier.scale(0.75f).height(24.dp),
+                                            colors = SwitchDefaults.colors(
+                                                checkedThumbColor = Color.Black,
+                                                checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                                uncheckedThumbColor = Color.LightGray,
+                                                uncheckedTrackColor = Color(0xFF374151)
+                                            )
+                                        )
+                                        IconButton(
+                                            onClick = { onEditServer(server) },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Settings,
+                                                contentDescription = "Settings",
+                                                tint = Color.LightGray,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Text(
+                                    text = server.url,
+                                    fontSize = 11.sp,
+                                    color = Color.Gray,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+
+                                if (server.clientIdentity.isNotEmpty()) {
+                                    Text(
+                                        text = "Identity: ${server.clientIdentity}",
+                                        fontSize = 10.sp,
+                                        color = Color.LightGray
+                                    )
+                                }
+
+                                if (server.registeredUuid.isNotEmpty()) {
+                                    Text(
+                                        text = "Pairing ID: ${server.registeredUuid}",
+                                        fontSize = 9.sp,
+                                        color = Color(0xFFA78BFA),
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+
+                                val statusLabel = when {
+                                    !server.isEnabled -> "Disabled"
+                                    server.isReachable -> "Online • Synced"
+                                    server.statusMessage.isNotEmpty() -> server.statusMessage
+                                    else -> "Disconnected"
+                                }
+                                Text(
+                                    text = statusLabel,
+                                    fontSize = 10.sp,
+                                    color = if (server.isReachable && server.isEnabled) Color(0xFF10B981) else Color.LightGray
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Text(
+                    text = "App Version: ${com.whisker.BuildConfig.VERSION_NAME}",
+                    fontSize = 10.sp,
+                    color = Color.Gray.copy(alpha = 0.7f),
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(top = 4.dp, start = 4.dp)
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onAddServer,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = null,
+                    tint = Color.Black,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Add Server", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = Color.Gray, fontSize = 12.sp)
+            }
+        },
+        containerColor = Color(0xFF151926),
+        tonalElevation = 6.dp
+    )
+}
+
+// ==========================================
+// HOME SERVER EDIT / ADD DIALOG
+// ==========================================
+@Composable
+fun HomeServerEditDialog(
+    server: HomeServer?,
+    defaultClientIdentity: String = "",
+    onDismiss: () -> Unit,
+    onSave: (name: String, url: String, clientIdentity: String, isEnabled: Boolean) -> Unit,
+    onDelete: (() -> Unit)? = null
+) {
+    var resolvedServerName by remember(server) { mutableStateOf(server?.name ?: "") }
+    var inputUrl by remember(server) { mutableStateOf(server?.url ?: "") }
+    var clientIdentity by remember(server) {
+        mutableStateOf(
+            server?.clientIdentity?.ifBlank { defaultClientIdentity }
+                ?: defaultClientIdentity.ifBlank { Build.MODEL ?: "Mobile Device" }
+        )
+    }
+    var isEnabled by remember(server) { mutableStateOf(server?.isEnabled ?: true) }
+
+    var isTestingConnection by remember { mutableStateOf(false) }
+    var testResult by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+    val scrollState = rememberScrollState()
+
+    // Auto-resolve server name from public endpoint when URL changes
+    LaunchedEffect(inputUrl) {
+        val trimmed = inputUrl.trim().removeSuffix("/")
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val conn = java.net.URL("$trimmed/api/init-status").openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 3000
+                    conn.readTimeout = 3000
+                    if (conn.responseCode == 200) {
+                        val text = conn.inputStream.bufferedReader().use { it.readText() }
+                        val json = org.json.JSONObject(text)
+                        val name = json.optString("server_name", json.optString("servername", ""))
+                        if (name.isNotBlank()) {
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                resolvedServerName = name
+                            }
+                        }
+                    }
+                    conn.disconnect()
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = if (server == null) Icons.Default.Add else Icons.Default.Settings,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp)
+                )
+                Text(
+                    text = if (server == null) "Add Home Server" else "Configure ${server.name}",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp)
+                    .verticalScroll(scrollState),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                // Server name provided by home server (read-only info card)
+                Surface(
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Home,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "SERVER NAME (FROM HOME SERVER)",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = if (resolvedServerName.isNotBlank()) resolvedServerName else (if (inputUrl.isNotBlank()) "Connecting..." else "Discovered automatically from server"),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (resolvedServerName.isNotBlank()) Color.White else Color.Gray,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = inputUrl,
+                    onValueChange = { inputUrl = it },
+                    label = { Text("Server URL (e.g. http://192.168.1.50:8000)", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = Color.Gray.copy(alpha = 0.5f)
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                OutlinedTextField(
+                    value = clientIdentity,
+                    onValueChange = { clientIdentity = it },
+                    label = { Text("Mobile Client Identity", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary) },
+                    placeholder = { Text(defaultClientIdentity.ifBlank { "Mobile Device" }, fontSize = 12.sp, color = Color.Gray) },
+                    modifier = Modifier.fillMaxWidth().testTag("client_identity_input"),
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = Color.Gray.copy(alpha = 0.5f)
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                // Test Connection Button querying public unauthenticated endpoint
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (inputUrl.isNotBlank()) {
+                                coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    isTestingConnection = true
+                                    testResult = null
+                                    try {
+                                        val base = inputUrl.trim().removeSuffix("/")
+                                        val urlObj = java.net.URL("$base/api/init-status")
+                                        val conn = urlObj.openConnection() as java.net.HttpURLConnection
+                                        conn.connectTimeout = 4000
+                                        conn.readTimeout = 4000
+                                        val code = conn.responseCode
+                                        if (code == 200) {
+                                            val respText = conn.inputStream.bufferedReader().use { it.readText() }
+                                            val json = org.json.JSONObject(respText)
+                                            val sName = json.optString("server_name", json.optString("servername", ""))
+                                            if (sName.isNotBlank()) {
+                                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                    resolvedServerName = sName
+                                                }
+                                            }
+                                            val shortName = if (sName.isNotBlank()) sName.take(12) else "OK"
+                                            testResult = "Connected ($shortName)"
+                                        } else {
+                                            testResult = "HTTP $code"
+                                        }
+                                        conn.disconnect()
+                                    } catch (e: Exception) {
+                                        testResult = when {
+                                            e is java.net.ConnectException -> "Refused"
+                                            e is java.net.SocketTimeoutException -> "Timeout"
+                                            e is java.net.UnknownHostException -> "No host"
+                                            else -> "Error"
+                                        }
+                                    } finally {
+                                        isTestingConnection = false
+                                    }
+                                }
+                            }
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        enabled = !isTestingConnection && inputUrl.isNotBlank()
+                    ) {
+                        Text(
+                            text = if (isTestingConnection) "Testing..." else "Test Connection",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    testResult?.let { res ->
+                        Text(
+                            text = res,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(start = 8.dp),
+                            color = if (res.startsWith("Connected")) Color(0xFF10B981) else Color(0xFFEF4444)
+                        )
+                    }
+                }
+
+
+
+                if (onDelete != null) {
+                    HorizontalDivider(color = Color.Gray.copy(alpha = 0.2f))
+                    Spacer(modifier = Modifier.height(2.dp))
+                    OutlinedButton(
+                        onClick = onDelete,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
+                        border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = null,
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Delete This Server", color = Color(0xFFEF4444), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (inputUrl.isNotBlank()) {
+                        val finalName = if (resolvedServerName.isNotBlank()) resolvedServerName else (server?.name?.ifBlank { "Home Server" } ?: "Home Server")
+                        onSave(
+                            finalName,
+                            inputUrl.trim(),
+                            clientIdentity.trim().ifBlank { defaultClientIdentity.ifBlank { "Mobile Device" } },
+                            isEnabled
+                        )
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("Save Server", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = Color.Gray, fontSize = 12.sp)
+            }
+        },
+        containerColor = Color(0xFF151926),
+        tonalElevation = 6.dp
+    )
+}
+
+// ==========================================
 // APPROVALS TAB
 // ==========================================
 @Composable
@@ -1612,7 +2597,16 @@ fun ApprovalsTab(
     activeInvites: List<Invite>,
     allowDirectCalls: Boolean = false,
     isTablet: Boolean = false,
+    homeServers: List<HomeServer> = emptyList(),
+    onAddServer: () -> Unit = {},
+    onEditServer: (HomeServer) -> Unit = {},
+    onDeleteServer: (HomeServer) -> Unit = {},
+    onToggleServerEnabled: (HomeServer) -> Unit = {},
+    onSetPrimaryServer: (HomeServer) -> Unit = {},
+    onRefreshServer: (HomeServer) -> Unit = {},
+    onRefreshAllServers: () -> Unit = {},
     onToggleDirectCalls: (Boolean) -> Unit = {},
+    onToggleServerDirectCalls: (HomeServer, Boolean) -> Unit = { _, _ -> },
     onApprove: (ClientRequest) -> Unit,
     onReject: (ClientRequest) -> Unit,
     onDelete: (ClientRequest) -> Unit,
@@ -1625,11 +2619,16 @@ fun ApprovalsTab(
     var editingRequest by remember { mutableStateOf<ClientRequest?>(null) }
     var renameInputText by remember { mutableStateOf("") }
     val expandedContactUuids = remember { mutableStateMapOf<String, Boolean>() }
+    val expandedServerIds = remember { mutableStateMapOf<String, Boolean>() }
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
 
     val mobilePending = pendingRequests.filter { it.status == "MOBILE_PENDING" }
     val visitorPending = pendingRequests.filter { it.status == "PENDING" }
+    val validHomeServers = homeServers.filter {
+        val u = it.url.trim().lowercase()
+        u.isNotBlank() && (u.startsWith("http://") || u.startsWith("https://")) && !u.contains("10.0.2.2") && !u.contains("localhost") && u != "http://" && u != "https://"
+    }
 
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -1640,56 +2639,95 @@ fun ApprovalsTab(
                 .fillMaxHeight()
                 .widthIn(max = 840.dp)
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 128.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-        // Direct Calls (Pre-Approval) Setting Card
+        // Configured Home Servers Section
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)),
-                border = BorderStroke(1.dp, if (allowDirectCalls) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f) else Color.Gray.copy(alpha = 0.2f))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.weight(1f),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Text("⚡", fontSize = 20.sp)
-                        Column {
-                            Text(
-                                text = "Allow Direct Calls (Pre-Approval)",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
-                            )
-                            Text(
-                                text = "Permit web visitors to call immediately before access approval by stating their reason (10s timeout).",
-                                fontSize = 10.sp,
-                                color = Color.Gray,
-                                lineHeight = 13.sp
-                            )
-                        }
-                    }
-                    Switch(
-                        checked = allowDirectCalls,
-                        onCheckedChange = onToggleDirectCalls,
-                        modifier = Modifier.scale(0.85f).testTag("direct_calls_toggle_switch"),
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.Black,
-                            checkedTrackColor = MaterialTheme.colorScheme.primary,
-                            uncheckedThumbColor = Color.LightGray,
-                            uncheckedTrackColor = Color(0xFF374151)
-                        )
+                    Text("🌐", fontSize = 16.sp)
+                    Text(
+                        text = "CONFIGURED HOME SERVERS (${validHomeServers.size})",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        letterSpacing = 1.sp
                     )
                 }
+
+                IconButton(
+                    onClick = onAddServer,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Add Home Server",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+
+        if (validHomeServers.isEmpty()) {
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onAddServer() },
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)),
+                    border = BorderStroke(1.dp, Color.Gray.copy(alpha = 0.25f)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "+ Tap to Configure Home Server",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Connect Whisker to your local LAN or remote home server to start receiving calls and messages.",
+                            fontSize = 11.sp,
+                            color = Color.Gray,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+        } else {
+            items(validHomeServers, key = { it.id }) { server ->
+                val isExpanded = expandedServerIds[server.id] ?: false
+                CompactHomeServerCard(
+                    server = server,
+                    isExpanded = isExpanded,
+                    onToggleExpand = {
+                        expandedServerIds[server.id] = !isExpanded
+                    },
+                    onSettingsClick = { onEditServer(server) },
+                    onToggleEnabled = { onToggleServerEnabled(server) },
+                    onToggleDirectCalls = { allowed -> onToggleServerDirectCalls(server, allowed) },
+                    onSetPrimary = { onSetPrimaryServer(server) },
+                    onDelete = { onDeleteServer(server) }
+                )
             }
         }
         // Companion Mobile App Queue (if any)
@@ -2010,7 +3048,8 @@ fun ApprovalsTab(
                         renameInputText = it.name
                     },
                     onDelete = onDelete,
-                    onToggleAutoAccept = onToggleAutoAccept
+                    onToggleAutoAccept = onToggleAutoAccept,
+                    homeServers = homeServers
                 )
             }
         }
@@ -2115,6 +3154,10 @@ fun ApprovalsTab(
                     }
                 }
             }
+
+            item {
+                Spacer(modifier = Modifier.height(24.dp))
+            }
         }
     }
 }
@@ -2170,6 +3213,7 @@ fun ChatTab(
     approvedRequests: List<ClientRequest>,
     messages: List<Message>,
     isTablet: Boolean = false,
+    homeServers: List<HomeServer> = emptyList(),
     onSendMessage: (String, String, String) -> Unit,
     onMarkAsRead: (String) -> Unit,
     onActiveChatChanged: (String?) -> Unit,
@@ -2220,6 +3264,7 @@ fun ChatTab(
             ) {
                 approvedRequests.forEach { client ->
                     val isMobile = client.status == "MOBILE_APPROVED" || client.clientType == "MOBILE"
+                    val isCli = client.clientType.equals("CLI", ignoreCase = true) || client.name.contains("cli", ignoreCase = true) || client.message.contains("CLI", ignoreCase = true)
                     val isRemote = client.serverAddress.isNotBlank() && client.serverAddress != "local"
                     Tab(
                         selected = selectedClient?.uuid == client.uuid,
@@ -2234,7 +3279,7 @@ fun ChatTab(
                             ) {
                                 Box(modifier = Modifier.size(6.dp).background(if (client.isOnline) Color(0xFF10B981) else Color(0xFFEF4444), CircleShape))
                                 Text(
-                                    text = if (isMobile) "📱 ${client.name}" else client.name,
+                                    text = if (isMobile) "📱 ${client.name}" else if (isCli) "⌨️ ${client.name}" else client.name,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -2253,8 +3298,17 @@ fun ChatTab(
             selectedClient?.let { client ->
                 val clientMsgs = messages.filter { it.clientUuid == client.uuid }.sortedBy { it.timestamp }
                 val isMobile = client.status == "MOBILE_APPROVED" || client.clientType == "MOBILE"
-                val isRemote = client.serverAddress.isNotBlank() && client.serverAddress != "local"
-                val serverDisplay = if (isRemote) client.serverAddress else "local"
+                val isCli = client.clientType.equals("CLI", ignoreCase = true) || client.name.contains("cli", ignoreCase = true) || client.message.contains("CLI", ignoreCase = true)
+                val rawAddress = client.serverAddress.trimEnd('/')
+                val matchedServer = homeServers.firstOrNull { it.url.trimEnd('/') == rawAddress }
+                    ?: if (rawAddress == "local" || rawAddress.isEmpty()) {
+                        homeServers.firstOrNull { it.isEnabled } ?: homeServers.firstOrNull()
+                    } else {
+                        null
+                    }
+                val sName = matchedServer?.name?.ifEmpty { "Home Server" } ?: "Remote Server"
+                val sAddress = matchedServer?.url ?: (if (rawAddress.isNotEmpty() && rawAddress != "local") rawAddress else "server")
+                val isSharedServer = (matchedServer != null)
 
                 // Sub-header for the individual active conversation
                 Row(
@@ -2293,27 +3347,33 @@ fun ChatTab(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Surface(
-                                color = if (isMobile) Color(0xFF8B5CF6).copy(alpha = 0.25f) else Color(0xFF3B82F6).copy(alpha = 0.25f),
+                                color = if (isMobile) Color(0xFF8B5CF6).copy(alpha = 0.25f) else if (isCli) Color(0xFF10B981).copy(alpha = 0.25f) else Color(0xFF3B82F6).copy(alpha = 0.25f),
                                 shape = RoundedCornerShape(4.dp)
                             ) {
                                 Text(
-                                    text = if (isMobile) "📱 Mobile App" else "💻 Web Client",
+                                    text = if (isMobile) "📱 Mobile App" else if (isCli) "⌨️ CLI Client" else "💻 Web Client",
                                     fontSize = 9.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (isMobile) Color(0xFFA78BFA) else Color(0xFF93C5FD),
+                                    color = if (isMobile) Color(0xFFA78BFA) else if (isCli) Color(0xFF6EE7B7) else Color(0xFF93C5FD),
+                                    maxLines = 1,
+                                    softWrap = false,
                                     modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                                 )
                             }
 
                             Surface(
-                                color = if (isRemote) Color(0xFF1E3A8A).copy(alpha = 0.5f) else Color(0xFF064E3B).copy(alpha = 0.5f),
-                                shape = RoundedCornerShape(4.dp)
+                                color = Color(0xFF1E293B).copy(alpha = 0.7f),
+                                shape = RoundedCornerShape(4.dp),
+                                border = BorderStroke(0.5.dp, Color.Gray.copy(alpha = 0.3f))
                             ) {
                                 Text(
-                                    text = if (isRemote) "🌐 $serverDisplay" else "🏠 local",
+                                    text = "🏠 $sName",
                                     fontSize = 9.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (isRemote) Color(0xFF93C5FD) else Color(0xFF6EE7B7),
+                                    color = Color(0xFFCBD5E1),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                                 )
                             }

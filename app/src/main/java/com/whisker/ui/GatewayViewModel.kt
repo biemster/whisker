@@ -55,6 +55,12 @@ class GatewayViewModel(
         initialValue = emptyList()
     )
 
+    val allHomeServers = repository.allHomeServers.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
+
     fun fetchInvites() {
         viewModelScope.launch {
             _serverInvites.value = networkManager.fetchInvitesFromServer()
@@ -205,14 +211,15 @@ class GatewayViewModel(
         }
     }
 
-    fun createInvite(name: String): Invite {
+    fun createInvite(name: String, targetServer: HomeServer? = null): Invite {
         val chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         var code = ""
         for (i in 0 until 5) {
             code += chars[java.util.Random().nextInt(chars.length)]
         }
         val timestamp = System.currentTimeMillis()
-        val inviteUrl = "${networkManager.serverUrl.value.removeSuffix("/")}/invite/$code"
+        val baseServerUrl = targetServer?.url?.trimEnd('/') ?: networkManager.serverUrl.value.trimEnd('/')
+        val inviteUrl = "${baseServerUrl}/invite/$code"
         val invite = Invite(
             code = code,
             name = name,
@@ -221,7 +228,7 @@ class GatewayViewModel(
             createdTimestamp = timestamp
         )
         viewModelScope.launch {
-            networkManager.createInviteOnServer(name, code)
+            networkManager.createInviteOnServer(name, code, targetServer)
             fetchInvites()
         }
         return invite
@@ -229,7 +236,7 @@ class GatewayViewModel(
 
     fun deleteInvite(invite: Invite) {
         viewModelScope.launch {
-            networkManager.deleteInviteOnServer(invite.code)
+            networkManager.deleteInviteOnServer(invite.code, targetUrl = invite.url)
             fetchInvites()
         }
     }
@@ -255,6 +262,109 @@ class GatewayViewModel(
 
     fun saveFcmConfig(senderId: String, projectId: String, appId: String, apiKey: String) {
         networkManager.saveFcmConfig(senderId, projectId, appId, apiKey)
+    }
+
+    fun addHomeServer(name: String, url: String, apiKey: String, isPrimary: Boolean = false) {
+        viewModelScope.launch {
+            networkManager.addHomeServer(name, url, apiKey, isPrimary)
+        }
+    }
+
+    fun saveHomeServer(
+        id: String,
+        name: String,
+        url: String,
+        clientIdentity: String = "",
+        apiKey: String = "",
+        isPrimary: Boolean = false,
+        isEnabled: Boolean = true,
+        isAdmin: Boolean? = null,
+        allowDirectCalls: Boolean = false,
+        senderId: String = "",
+        projectId: String = "",
+        appId: String = "",
+        fcmApiKey: String = ""
+    ) {
+        viewModelScope.launch {
+            if (id.isEmpty()) {
+                val newServer = networkManager.addHomeServer(
+                    name = name,
+                    url = url,
+                    apiKey = apiKey,
+                    isPrimary = isPrimary,
+                    clientIdentity = clientIdentity,
+                    allowDirectCalls = allowDirectCalls,
+                    isAdmin = isAdmin ?: true
+                )
+                if (senderId.isNotEmpty() || projectId.isNotEmpty() || appId.isNotEmpty() || fcmApiKey.isNotEmpty() || !isEnabled) {
+                    val updated = newServer.copy(
+                        senderId = senderId,
+                        projectId = projectId,
+                        appId = appId,
+                        fcmApiKey = fcmApiKey,
+                        isEnabled = isEnabled
+                    )
+                    networkManager.updateHomeServer(updated)
+                }
+            } else {
+                val existing = repository.getHomeServerById(id)
+                val effectiveAdmin = isAdmin ?: existing?.isAdmin ?: false
+                val updated = (existing ?: HomeServer(id = id, name = name, url = url)).copy(
+                    name = name.trim().ifEmpty { "Home Server" },
+                    url = url.trim().removeSuffix("/"),
+                    clientIdentity = clientIdentity.trim().ifEmpty { existing?.clientIdentity ?: "" },
+                    apiKey = apiKey.trim().ifEmpty { existing?.apiKey ?: UUID.randomUUID().toString() },
+                    isPrimary = isPrimary,
+                    isEnabled = isEnabled,
+                    isAdmin = effectiveAdmin,
+                    senderId = senderId.trim(),
+                    projectId = projectId.trim(),
+                    appId = appId.trim(),
+                    fcmApiKey = fcmApiKey.trim()
+                )
+                networkManager.updateHomeServer(updated)
+            }
+        }
+    }
+
+    fun toggleServerDirectCalls(server: HomeServer, allowed: Boolean) {
+        networkManager.updateServerDirectCalls(server, allowed)
+    }
+
+    fun updateHomeServer(server: HomeServer) {
+        viewModelScope.launch {
+            networkManager.updateHomeServer(server)
+        }
+    }
+
+    fun deleteHomeServer(server: HomeServer) {
+        viewModelScope.launch {
+            networkManager.deleteHomeServer(server)
+        }
+    }
+
+    fun toggleServerEnabled(server: HomeServer) {
+        viewModelScope.launch {
+            networkManager.toggleServerEnabled(server)
+        }
+    }
+
+    fun setPrimaryServer(server: HomeServer) {
+        viewModelScope.launch {
+            networkManager.setPrimaryServer(server)
+        }
+    }
+
+    fun refreshAllServers() {
+        viewModelScope.launch {
+            networkManager.refreshAllServers()
+        }
+    }
+
+    fun refreshServer(server: HomeServer) {
+        viewModelScope.launch {
+            networkManager.refreshServer(server)
+        }
     }
 
     class Factory(

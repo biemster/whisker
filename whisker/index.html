@@ -57,6 +57,12 @@
         </div>
 
         <div class="flex items-center space-x-2">
+            <!-- BROWSER NOTIFICATIONS PERMISSION BUTTON -->
+            <button id="enableNotificationsBtn" onclick="requestNotificationPermission(true)" class="hidden flex items-center space-x-1.5 bg-gray-800 hover:bg-cyan-950/60 border border-cyan-500/40 text-cyan-300 px-3 py-1.5 rounded-full text-xs font-medium transition select-none">
+                <span>🔔</span>
+                <span>Enable Alerts</span>
+            </button>
+
             <!-- MULTI-HOST CONNECTION SWITCHER -->
             <div id="connectionSelectorContainer" class="hidden relative">
                 <button id="connectionDropdownBtn" onclick="toggleConnectionDropdown()" class="flex items-center space-x-2 bg-cyan-950/70 hover:bg-cyan-900/70 border border-cyan-700/60 text-cyan-300 px-3 py-1.5 rounded-full text-xs font-medium transition select-none">
@@ -433,6 +439,76 @@
         let isWebMicMuted = false;
         let isWebCamDisabled = false;
         let isVideoExpanded = false;
+        let activeCallNotification = null;
+
+        function updateNotificationButton() {
+            const btn = document.getElementById('enableNotificationsBtn');
+            if (!btn) return;
+            if (!('Notification' in window)) {
+                btn.classList.add('hidden');
+                return;
+            }
+            if (Notification.permission === 'default') {
+                btn.classList.remove('hidden');
+            } else {
+                btn.classList.add('hidden');
+            }
+        }
+
+        function requestNotificationPermission(userTriggered = false) {
+            if (!('Notification' in window)) return;
+            if (Notification.permission === 'default') {
+                Notification.requestPermission().then(permission => {
+                    console.log("Browser notification permission:", permission);
+                    updateNotificationButton();
+                    if (permission === 'granted' && userTriggered) {
+                        showBrowserNotification("🔔 Alerts Enabled", {
+                            body: "You will now receive notifications for incoming calls and messages.",
+                            tag: "whisker-alerts-enabled"
+                        });
+                    }
+                }).catch(e => console.warn("Notification permission request error:", e));
+            } else {
+                updateNotificationButton();
+            }
+        }
+
+        function showBrowserNotification(title, options = {}) {
+            if (!('Notification' in window) || Notification.permission !== 'granted') {
+                return null;
+            }
+            try {
+                const iconSvg = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐱</text></svg>";
+                const notif = new Notification(title, {
+                    icon: options.icon || iconSvg,
+                    badge: options.badge || iconSvg,
+                    ...options
+                });
+                notif.onclick = function(event) {
+                    try {
+                        event.preventDefault();
+                        window.focus();
+                        if (options.onClick) {
+                            options.onClick();
+                        }
+                        notif.close();
+                    } catch(err) {}
+                };
+                return notif;
+            } catch (e) {
+                console.warn("Could not display browser notification:", e);
+                return null;
+            }
+        }
+
+        function closeCallNotification() {
+            if (activeCallNotification) {
+                try {
+                    activeCallNotification.close();
+                } catch(e) {}
+                activeCallNotification = null;
+            }
+        }
 
         function setCallLayoutActive(active, isVideo = true) {
             const provView = document.getElementById('provisionedView');
@@ -906,6 +982,10 @@
 
         window.addEventListener('DOMContentLoaded', () => {
             checkAndProcessInitialInvite();
+            updateNotificationButton();
+            if (localStorage.getItem('whisker_active_uuid') || localStorage.getItem('dc_token')) {
+                requestNotificationPermission(false);
+            }
         });
 
         function startE2eStatusPolling() {
@@ -1086,6 +1166,7 @@
         }
 
         function initSession() {
+            updateNotificationButton();
             if (clientToken) {
                 document.getElementById('statusDot').className = "w-2.5 h-2.5 rounded-full bg-green-500";
                 document.getElementById('statusText').innerText = "Connected";
@@ -1251,11 +1332,27 @@
                         chatLogs.push(newMsg);
                         saveActiveConnectionData();
                         renderChat();
+
+                        if (isPhone) {
+                            const senderName = hostName || "Mobile Phone";
+                            const notifBody = fileVal ? `📎 Attachment: ${payload.text || 'File'}` : (payload.text || 'New message');
+                            showBrowserNotification(`💬 ${senderName}`, {
+                                body: notifBody,
+                                tag: 'whisker-msg-' + (msgId || Date.now()),
+                                renotify: true,
+                                onClick: () => {
+                                    window.focus();
+                                    const chatInp = document.getElementById('chatInput');
+                                    if (chatInp) chatInp.focus();
+                                }
+                            });
+                        }
                     }
                 }
             } else if (payload.type === "webrtc_call_initiate") {
                 handleIncomingCallOffer(payload);
             } else if (payload.type === "webrtc_call_answer" || payload.event === "call_answered") {
+                closeCallNotification();
                 if (payload.call_id && currentCallId && payload.call_id !== currentCallId) {
                     console.log("Ignoring answer for mismatched call_id", payload.call_id, currentCallId);
                     return;
@@ -1293,6 +1390,7 @@
                     }
                 }
             } else if (payload.type === "webrtc_call_hangup" || payload.event === "call_ended" || payload.event === "call_declined" || payload.event === "hangup") {
+                closeCallNotification();
                 if (payload.call_id && currentCallId && payload.call_id !== currentCallId) {
                     console.log("Ignoring hangup for mismatched call_id", payload.call_id, currentCallId);
                     return;
@@ -1866,6 +1964,19 @@
             if (modalEl) modalEl.classList.remove('hidden');
 
             playRingtone();
+
+            closeCallNotification();
+            activeCallNotification = showBrowserNotification(`📞 Incoming Call from ${callerName}`, {
+                body: isVideo ? "📹 Direct Video & Audio Call • Click to answer" : "📞 Direct Audio Call • Click to answer",
+                tag: 'whisker-call-' + (payload.call_id || Date.now()),
+                requireInteraction: true,
+                renotify: true,
+                onClick: () => {
+                    window.focus();
+                    const mEl = document.getElementById('incomingCallModal');
+                    if (mEl) mEl.classList.remove('hidden');
+                }
+            });
         }
 
         function showCallDeclinedModal(peerName) {
@@ -1887,6 +1998,7 @@
 
         function declineIncomingCall() {
             stopRingtone();
+            closeCallNotification();
             const modalEl = document.getElementById('incomingCallModal');
             if (modalEl) modalEl.classList.add('hidden');
             if (pendingIncomingCallOffer) {
@@ -1927,6 +2039,7 @@
 
         async function acceptIncomingCall() {
             stopRingtone();
+            closeCallNotification();
             const modalEl = document.getElementById('incomingCallModal');
             if (modalEl) modalEl.classList.add('hidden');
             if (!pendingIncomingCallOffer) return;
@@ -1937,6 +2050,7 @@
         }
 
         async function executeAcceptCall(payload) {
+            closeCallNotification();
             if (isCallActive && window.pc) return;
             isCallActive = true;
             currentCallId = payload.call_id || ("call_" + Date.now());
@@ -2041,6 +2155,7 @@
             const wasDirect = isDirectCallMode;
             const endedCallId = currentCallId;
             stopRingtone();
+            closeCallNotification();
             const modalEl = document.getElementById('incomingCallModal');
             if (modalEl) modalEl.classList.add('hidden');
             pendingIncomingCallOffer = null;

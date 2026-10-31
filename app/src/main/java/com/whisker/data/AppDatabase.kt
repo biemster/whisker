@@ -6,8 +6,8 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [ClientRequest::class, Message::class, CallLog::class, Invite::class],
-    version = 7,
+    entities = [ClientRequest::class, Message::class, CallLog::class, Invite::class, HomeServer::class],
+    version = 13,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -15,6 +15,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
     abstract fun callLogDao(): CallLogDao
     abstract fun inviteDao(): InviteDao
+    abstract fun homeServerDao(): HomeServerDao
 
     companion object {
         @Volatile

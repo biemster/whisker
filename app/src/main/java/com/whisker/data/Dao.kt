@@ -95,3 +95,30 @@ interface InviteDao {
     @Delete
     suspend fun deleteInvite(invite: Invite)
 }
+
+@Dao
+interface HomeServerDao {
+    @Query("SELECT * FROM home_servers ORDER BY isPrimary DESC, name ASC")
+    fun getAllServers(): Flow<List<HomeServer>>
+
+    @Query("SELECT * FROM home_servers ORDER BY isPrimary DESC, name ASC")
+    suspend fun getAllServersSync(): List<HomeServer>
+
+    @Query("SELECT * FROM home_servers WHERE id = :id LIMIT 1")
+    suspend fun getServerById(id: String): HomeServer?
+
+    @Query("SELECT * FROM home_servers WHERE isPrimary = 1 LIMIT 1")
+    suspend fun getPrimaryServer(): HomeServer?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertServer(server: HomeServer)
+
+    @Update
+    suspend fun updateServer(server: HomeServer)
+
+    @Delete
+    suspend fun deleteServer(server: HomeServer)
+
+    @Query("DELETE FROM home_servers WHERE id = :id")
+    suspend fun deleteServerById(id: String)
+}

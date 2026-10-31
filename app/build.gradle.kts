@@ -1,3 +1,8 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
@@ -5,6 +10,33 @@ plugins {
   alias(libs.plugins.roborazzi)
   alias(libs.plugins.secrets)
 }
+
+fun computeVersionName(): String {
+  val tag = System.getenv("GITHUB_REF_NAME")?.trim()?.takeIf { it.isNotEmpty() }
+    ?: System.getenv("APP_VERSION")?.trim()?.takeIf { it.isNotEmpty() }
+    ?: System.getenv("VERSION_NAME")?.trim()?.takeIf { it.isNotEmpty() }
+    ?: (project.findProperty("versionName") as? String)?.trim()?.takeIf { it.isNotEmpty() }
+    ?: (project.findProperty("appVersion") as? String)?.trim()?.takeIf { it.isNotEmpty() }
+
+  if (tag != null) {
+    val cleanTag = tag.removePrefix("refs/tags/")
+    return if (cleanTag.startsWith("v")) cleanTag else "v$cleanTag"
+  }
+
+  val sdf = SimpleDateFormat("yyyyMMdd.HHmmss", Locale.US)
+  sdf.timeZone = TimeZone.getTimeZone("UTC")
+  return "v${sdf.format(Date())}"
+}
+
+fun computeVersionCode(vName: String): Int {
+  val propCode = (project.findProperty("versionCode") as? String)?.toIntOrNull()
+    ?: System.getenv("VERSION_CODE")?.toIntOrNull()
+  if (propCode != null) return propCode
+  return (System.currentTimeMillis() / 1000).toInt()
+}
+
+val computedVersionName = computeVersionName()
+val computedVersionCode = computeVersionCode(computedVersionName)
 
 android {
   namespace = "com.whisker"
@@ -14,8 +46,8 @@ android {
     applicationId = "com.whisker"
     minSdk = 23
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = computedVersionCode
+    versionName = computedVersionName
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -132,3 +164,19 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
+
+tasks.register("syncApkToBuildOutputs") {
+  doLast {
+    val srcApk = file("${layout.buildDirectory.get()}/outputs/apk/debug/app-debug.apk")
+    val destDir = file("${rootDir}/.build-outputs")
+    if (srcApk.exists()) {
+      destDir.mkdirs()
+      srcApk.copyTo(file("${destDir}/app-debug.apk"), overwrite = true)
+    }
+  }
+}
+
+tasks.matching { it.name == "assembleDebug" || it.name == "packageDebug" }.configureEach {
+  finalizedBy("syncApkToBuildOutputs")
+}
+

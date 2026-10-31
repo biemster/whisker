@@ -1,5 +1,5 @@
 {
-  "name": "Remix: Whisker",
+  "name": "Whisker",
   "description": "Secure WebRTC communication gateway supporting persistent connections, video/calling, messaging, client approval flows, and local tunnel support.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

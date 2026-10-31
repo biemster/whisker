@@ -38,10 +38,14 @@ def get_service_account_file():
         except Exception:
             pass
 
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     possible_files = [
         os.environ.get('SERVICE_ACCOUNT_PATH'),
         os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'),
+        os.path.join(base_dir, 'whisker-push-sa.json'),
+        os.path.join(os.getcwd(), 'whisker-push-sa.json'),
         'whisker-push-sa.json',
+        os.path.join(base_dir, 'service-account.json'),
         'service-account.json',
         'firebase-service-account.json',
         'serviceAccountKey.json'
@@ -98,7 +102,7 @@ class FCMManager:
             return self._cached_token
 
 
-    def send_tickle_notification(self, push_token, event_id=None, event_type=None, extra_status=None, username=None):
+    def send_tickle_notification(self, push_token, event_id=None, event_type=None, extra_status=None, username=None, server_address=None, server_name=None):
         user_label = f" to user '{username}'" if username else ""
         if not push_token or push_token.startswith('device-push-token-') or push_token.startswith('mock-'):
             print(f"[Push Notification] Skipping FCM tickle for event '{event_type}'{user_label}: No valid pushToken registered.")
@@ -135,6 +139,10 @@ class FCMManager:
             data_payload["status"] = str(extra_status)
         if username:
             data_payload["username"] = str(username)
+        if server_address:
+            data_payload["server_address"] = str(server_address)
+        if server_name:
+            data_payload["server_name"] = str(server_name)
 
         fcm_url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
         payload = {

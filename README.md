@@ -33,13 +33,15 @@ Whether you want a hassle-free personal communication system for external visito
 - **WebRTC Calling**: Full peer-to-peer audio and video calling operational with adaptive camera/mic permissions, candidate signaling, and synthetic fallback stream generation.
 - **Multi-Device Pairing**: Support for multiple mobile host applications paired with a single home server, featuring admin approval controls, custom usernames, invite code generation, and multi-device routing for messages and calls.
 - **Mobile-to-Mobile Communication**: Real-time messaging and WebRTC calling between mobile apps on the same Home Server (`local`) and across different Home Servers (`serverAddress`), unified by invite pairing and direct signaling.
+- **Multi-Server Mobile Client**: Support for connecting a single mobile application to multiple home servers simultaneously, featuring independent controls to connect, disconnect, or mute specific servers (e.g. managing family, work, and community servers in one app).
 - **Web Client UI**: Responsive fluid layout with auto-expanding video on active calls, interactive header status indicator with connectivity modal, and mobile-optimized columnar view.
 - **Push Notifications**: FCM HTTP v1 push notification tickle integration complete with low-power battery optimization.
 
 ### In Development & Future Roadmap
+- **Model Context Protocol (MCP) Server**: Python-native MCP server extending the Whisker client core with zero external dependencies, exposing tools and resources for AI agent platforms (e.g., Claude Desktop, Cursor) to automate messaging, initiate calls, and inspect event queues.
+- **Embeddable Web Client Widget**: Lightweight, drop-in JavaScript widget / Web Component for personal websites (similar to customer support helpdesk applets), enabling site visitors to initiate direct messaging and WebRTC calls to host devices.
 - **File & Media Transfer**: Secure attachment and file transfer directly between web visitors/mobile clients and the home server.
 - **Automated Background Photo Backup**: Scheduled automatic background synchronization of camera roll photos and media folders to home server storage.
-- **Multi-Server Mobile Client**: Support for connecting a single mobile application to multiple home servers simultaneously, featuring independent controls to disconnect or mute specific servers (e.g. managing family, work, and community servers in one app).
 - **iOS Mobile Application**: Native iOS client app built with Swift / SwiftUI, featuring WebRTC P2P calling, background APNs (Apple Push Notification service) push tickle support, and call notification alerts.
 
 ---
@@ -62,20 +64,28 @@ Whisker consists of three primary components:
 
 Before launching, complete the [FCM Push Setup](#fcm-push-setup-whisker-setup-fcm) at the bottom of this document to enable push notifications.
 
-Install the package via `pip` or run directly with Python 3:
+Install the package via `pip` or run directly with Python 3. The `--name` parameter is **obligatory** and determines the Home Server's display name and dedicated database file (`whisker_server_<name>.db`):
 
 ```bash
 pip install .
-whisker server
+whisker server --name "Home Base"
 ```
 
 Or run directly without installation:
 
 ```bash
-python3 -m whisker server
+python3 -m whisker server --name "Home Base"
 ```
 
-The server listens on `http://localhost:3000` (or your configured port via `--port`) and initializes the SQLite database (`whisker_server.db`).
+To run multiple servers from the same directory without database clashes, specify different names and ports:
+
+```bash
+# Server instance 1 (creates whisker_server_home_base.db):
+whisker server --name "Home Base" --port 3000
+
+# Server instance 2 (creates whisker_server_work_office.db):
+whisker server --name "Work Office" --port 3001
+```
 
 ### 2. Connect the Android Mobile App
 
@@ -87,45 +97,50 @@ The server listens on `http://localhost:3000` (or your configured port via `--po
 
 ## AI Agent & CLI Integration (`whisker`)
 
-The `whisker` CLI enables AI harnesses (such as OpenClaw, AutoGPT, or LangChain agents), headless Linux servers, and automated scripts to pair with multiple host devices, send messages, initiate WebRTC audio/video calls, and stream real-time events.
+The `whisker` CLI enables AI harnesses (such as OpenClaw, AutoGPT, or LangChain agents), headless Linux servers, and automated scripts to pair with host devices, send messages, initiate WebRTC audio/video calls, and stream real-time events.
 
-### Multi-Connection CLI Workflows:
+Each client connection to a home server is isolated in its own dedicated database file (`whisker_client_<username>_<servername>.db`). A CLI client connects to one home server per database, allowing multiple users and multiple servers to run side-by-side in the same directory without cross-talk or state files.
+
+### Client Workflows & Automatic Resolution:
+
+- **Automatic Single-DB Resolution**: When only a single client database exists in the working directory, operations (`send`, `call`, `listen`, `info`) automatically use it without requiring parameters.
+- **Disambiguation Rules**:
+  - If a single username is registered across multiple servers, specify `-s <server_name>`.
+  - If multiple usernames are registered on a single server, specify `-u <username>`.
+  - Both parameters (`-u / --username` and `-s / --server`) can always be specified explicitly.
 
 - **Claim an Invite & Pair with Host**:
   ```bash
+  # Pair with invite (creates whisker_client_<user>_<server>.db automatically):
   whisker init "http://<server-ip>:3000/invite/INVITE123"
-  # Or: python3 -m whisker init "http://<server-ip>:3000/invite/INVITE123"
+
+  # Pair specifying username and server name:
+  whisker init "http://<server-ip>:3000/invite/INVITE123" --name "Alice" --server "Family Server"
   ```
-- **List All Paired Connections**:
+- **List Local Client Databases**:
   ```bash
-  whisker connections
-  # Or: whisker contacts / whisker list
+  # View all local client databases in the directory:
+  whisker clients
+  # Or: whisker list
   ```
-- **Switch Default Active Connection**:
+- **Send a Message**:
   ```bash
-  whisker switch "Living Room Phone"
-  # Or switch by connection ID or UUID:
-  whisker switch 2
-  ```
-- **Send a Message (to Active or Specific Host/Username)**:
-  ```bash
-  # Send to active host:
+  # Send message (auto-resolves DB if single or unambiguous):
   whisker send "Hello from OpenClaw AI agent! Event processing complete."
 
-  # Target specific host by username:
-  whisker send -u "Alice" "Hello Alice! Status update."
+  # Specify username and/or home server:
+  whisker send -u "Alice" -s "Family Server" "Hello! Status update."
 
-  # Target specific host by name, ID, or UUID:
-  whisker send -c "Office Tablet" "Alert: High CPU temperature detected."
+  # Target specific remote host by UUID or name:
+  whisker send -u "Alice" -c "Office Tablet" "Alert: High CPU temperature detected."
   ```
 - **Initiate a WebRTC Audio / Video Call**:
   ```bash
-  # Initiate audio+video call to active host:
+  # Initiate audio+video call:
   whisker call
 
-  # Initiate call targeting specific username or contact:
-  whisker call -u "Alice"
-  whisker call -c "Living Room Phone"
+  # Initiate call specifying username and server:
+  whisker call -u "Alice" -s "Family Server"
 
   # Stream Linux camera (V4L2 device) & audio (ALSA/Pulse) during call:
   whisker call -u "Alice" --video /dev/video0 --audio default
@@ -135,41 +150,35 @@ The `whisker` CLI enables AI harnesses (such as OpenClaw, AutoGPT, or LangChain 
   ```
 - **Stream Events (SSE Listener) & Auto-Answer Calls**:
   ```bash
-  # Listen to active host (automatically renders incoming WebRTC calls with aspect-ratio-preserved GUI):
+  # Listen for events & auto-answer calls:
   whisker listen
 
-  # Listen to specific user or host:
-  whisker listen -u "Alice"
-  whisker listen -c "Office Tablet"
+  # Listen specifying username and server:
+  whisker listen -u "Alice" -s "Family Server"
+
+  # Listen across all local client databases simultaneously:
+  whisker listen --all
 
   # Listen with camera/mic configured for incoming calls:
-  whisker listen -u "Alice" --video /dev/video0 --audio default
-
-  # Listen and save all accepted calls to disk:
-  whisker listen -u "Alice" --save-streams
-
-  # Listen to all paired connections simultaneously:
-  whisker listen --all
+  whisker listen -u "Alice" --video /dev/video0 --audio default --save-streams
+  ```
+- **Client Configuration & Server Status**:
+  ```bash
+  whisker info
+  whisker info -u "Alice" -s "Family Server"
+  ```
+- **Delete Client Database**:
+  ```bash
+  whisker remove -u "Alice" -s "Family Server"
   ```
 - **CLI WebRTC Calling & Media Features**:
   - **Full Audio & Video Sessions**: Every call establishes a complete bidirectional audio and video session. If hardware sources are omitted, standard fallback tracks (48 kHz silence audio and dynamic video placeholder card) ensure full reciprocal mobile camera streaming.
   - **Aspect-Ratio-Preserved Video Window**: Resizable GUI window (`480x720` portrait default) dynamically scales incoming portrait and landscape camera feeds while preserving their exact aspect ratio without distortion.
   - **Stream Recording (`--save-streams` / Headless)**: Pass `--save-streams` to record the synchronized audio and video stream to `<caller>.<callee>.<unixepoch>.mp4`. When run in headless environments (without an active display server), calls automatically record to disk.
   - **Robust Remote Hangup Handling**: Multi-layered hangup detection (SSE events, active call status polling, ICE state tracking) guarantees the CLI immediately returns to the shell when the mobile app hangs up.
-- **Check Connectivity & System Info**:
+- **Start Home Server with Custom DB / Port / Name**:
   ```bash
-  whisker info
-  # Or check specific username or connection ID:
-  whisker info -u "Alice"
-  whisker info -c 1
-  ```
-- **Remove / Disconnect a Paired Device**:
-  ```bash
-  whisker remove "Old Phone"
-  ```
-- **Start Home Server with Custom DB / Port**:
-  ```bash
-  whisker server --port 3000 --db /path/to/whisker_server.db
+  whisker server --name "Home Base" --port 3000 --db /path/to/custom_server.db
   ```
 - **Show Built-In Help**:
   ```bash

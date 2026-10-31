@@ -36,23 +36,16 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         super.onMessageReceived(remoteMessage)
         Log.d("FCMService", "FCM tickle received from: ${remoteMessage.from}")
 
-        // 1. Acquire partial wake lock to keep CPU awake while fetching from home server
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        val wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "Whisker:FCMWakeLock"
-        )
-        try {
-            wakeLock.acquire(20000) // Acquire for 20 seconds max
-        } catch (e: Exception) {
-            Log.e("FCMService", "Failed to acquire wake lock", e)
-        }
-
-        // 2. Pure tickle push: fetch pending events directly from home server on-demand
+        // 1. Pure tickle push: fetch pending events directly from home server on-demand
         val networkManager = CompanionRegistry.getOrInitializeManager(applicationContext)
+        val tickleEventId = remoteMessage.data["eventId"] ?: remoteMessage.data["id"] ?: ""
+        val tickleServerAddr = remoteMessage.data["server_address"] ?: ""
         try {
             kotlinx.coroutines.runBlocking(Dispatchers.IO) {
-                networkManager.fetchPendingEventsFromServerSuspended()
+                networkManager.fetchPendingEventsFromServerSuspended(
+                    tickleEventId = tickleEventId.takeIf { it.isNotEmpty() },
+                    targetServerUrl = tickleServerAddr.takeIf { it.isNotEmpty() }
+                )
             }
         } catch (e: Exception) {
             if (e is java.io.IOException) {
@@ -60,17 +53,9 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             } else {
                 Log.e("FCMService", "Error pulling tasks from Home Server after push tickle", e)
             }
-        } finally {
-            try {
-                if (wakeLock.isHeld) {
-                    wakeLock.release()
-                }
-            } catch (e: Exception) {
-                Log.e("FCMService", "Error releasing wake lock", e)
-            }
         }
 
-        // 3. Display explicit FCM notification payload if provided
+        // 2. Display explicit FCM notification payload if provided
         val notification = remoteMessage.notification
         if (notification != null) {
             val title = notification.title ?: "Whisker Notification"

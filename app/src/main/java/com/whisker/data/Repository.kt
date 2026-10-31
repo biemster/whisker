@@ -7,12 +7,22 @@ class LinkRepository(private val db: AppDatabase) {
     val messageDao = db.messageDao()
     val callLogDao = db.callLogDao()
     val inviteDao = db.inviteDao()
+    val homeServerDao = db.homeServerDao()
 
     val allRequests: Flow<List<ClientRequest>> = clientRequestDao.getAllRequests()
     val pendingRequests: Flow<List<ClientRequest>> = clientRequestDao.getPendingRequests()
     val allMessages: Flow<List<Message>> = messageDao.getAllMessages()
     val allCallLogs: Flow<List<CallLog>> = callLogDao.getAllCallLogs()
     val allInvites: Flow<List<Invite>> = inviteDao.getAllInvites()
+    val allHomeServers: Flow<List<HomeServer>> = homeServerDao.getAllServers()
+
+    suspend fun getAllHomeServersSync(): List<HomeServer> = homeServerDao.getAllServersSync()
+    suspend fun getHomeServerById(id: String): HomeServer? = homeServerDao.getServerById(id)
+    suspend fun getPrimaryHomeServer(): HomeServer? = homeServerDao.getPrimaryServer()
+    suspend fun insertHomeServer(server: HomeServer) = homeServerDao.insertServer(server)
+    suspend fun updateHomeServer(server: HomeServer) = homeServerDao.updateServer(server)
+    suspend fun deleteHomeServer(server: HomeServer) = homeServerDao.deleteServer(server)
+    suspend fun deleteHomeServerById(id: String) = homeServerDao.deleteServerById(id)
 
     suspend fun getAllRequestsSync(): List<ClientRequest> = clientRequestDao.getAllRequestsSync()
     suspend fun getRequestByUuid(uuid: String): ClientRequest? = clientRequestDao.getRequestByUuid(uuid)

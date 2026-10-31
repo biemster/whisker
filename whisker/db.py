@@ -152,6 +152,10 @@ class DatabaseManager:
                     cursor.execute("ALTER TABLE requests ADD COLUMN remote_token TEXT DEFAULT NULL")
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    cursor.execute("ALTER TABLE requests ADD COLUMN push_token TEXT DEFAULT NULL")
+                except sqlite3.OperationalError:
+                    pass
 
                 conn.commit()
             finally:
@@ -204,6 +208,17 @@ class DatabaseManager:
             finally:
                 conn.close()
 
+    def update_request_push_token(self, uuid, push_token):
+        if not uuid: return
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE requests SET push_token = ? WHERE uuid = ?", (push_token, uuid))
+                conn.commit()
+            finally:
+                conn.close()
+
     def get_request(self, uuid):
         with self.lock:
             conn = self.get_connection()
@@ -214,6 +229,9 @@ class DatabaseManager:
                 return dict(row) if row else None
             finally:
                 conn.close()
+
+    def get_requests(self):
+        return self.get_clients()
 
     def add_message(self, client_uuid, host_uuid, sender, text, file_path=None, msg_id=None):
         now = int(time.time() * 1000)
@@ -309,6 +327,25 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM host_events WHERE id = ?", (event_id,))
                 conn.commit()
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
+
+    def get_host_event(self, event_id):
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM host_events WHERE id = ?", (event_id,))
+                row = cursor.fetchone()
+                if row:
+                    item = dict(row)
+                    try:
+                        item['payload'] = json.loads(item['payload'])
+                    except Exception:
+                        pass
+                    return item
+                return None
             finally:
                 conn.close()
 
@@ -392,7 +429,8 @@ class DatabaseManager:
             try:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT r.uuid, r.name, r.reason, r.status as req_status, r.token, r.created_at,
+                    SELECT r.uuid, r.name, r.reason, r.status, r.status as req_status, r.token, r.created_at,
+                           r.client_type, r.server_address, r.push_token,
                            c.is_online, c.last_seen
                     FROM requests r
                     LEFT JOIN client_presence c ON r.uuid = c.uuid
@@ -427,8 +465,15 @@ class DatabaseManager:
                     (client_uuid,)
                 )
                 rows = cursor.fetchall()
-                events = [dict(r) for r in rows]
-                return events
+                result = []
+                for r in rows:
+                    item = dict(r)
+                    try:
+                        item['payload'] = json.loads(item['payload'])
+                    except Exception:
+                        pass
+                    result.append(item)
+                return result
             finally:
                 conn.close()
 
@@ -439,6 +484,35 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM guest_events WHERE client_uuid = ?", (client_uuid,))
                 conn.commit()
+            finally:
+                conn.close()
+
+    def delete_guest_event(self, event_id):
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM guest_events WHERE id = ?", (event_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
+
+    def get_guest_event(self, event_id):
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM guest_events WHERE id = ?", (event_id,))
+                row = cursor.fetchone()
+                if row:
+                    item = dict(row)
+                    try:
+                        item['payload'] = json.loads(item['payload'])
+                    except Exception:
+                        pass
+                    return item
+                return None
             finally:
                 conn.close()
 
@@ -500,6 +574,18 @@ class DatabaseManager:
                 cursor.execute("SELECT * FROM hosts WHERE is_admin = 1 LIMIT 1")
                 row = cursor.fetchone()
                 return dict(row) if row else None
+            finally:
+                conn.close()
+
+    def transfer_admin(self, new_admin_uuid):
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE hosts SET is_admin = 0")
+                cursor.execute("UPDATE hosts SET is_admin = 1, status = 'APPROVED' WHERE uuid = ?", (new_admin_uuid,))
+                conn.commit()
+                return cursor.rowcount > 0
             finally:
                 conn.close()
                 
@@ -591,7 +677,7 @@ class DatabaseManager:
             try:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT r.uuid, r.name, r.reason, r.status as req_status, r.token, r.created_at,
+                    SELECT r.uuid, r.name, r.reason, r.status, r.status as req_status, r.token, r.created_at,
                            r.client_type, r.server_address,
                            c.is_online, c.last_seen
                     FROM requests r
