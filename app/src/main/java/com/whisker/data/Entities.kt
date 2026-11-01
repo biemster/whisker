@@ -71,6 +71,7 @@ data class HomeServer(
     val registeredUuid: String = "",
     val clientIdentity: String = "",
     val allowDirectCalls: Boolean = false,
+    val allowWidgetAccess: Boolean = true,
     val isAdmin: Boolean = false,
     val serverRole: String = if (isAdmin) "ADMIN" else "COMPANION" // "ADMIN", "COMPANION", "MEMBER"
 ) {

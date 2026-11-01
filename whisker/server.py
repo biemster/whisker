@@ -464,15 +464,29 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         4. Returns the host dict or None.
         """
         approved_hosts = self.db.get_approved_hosts_for_client(client_uuid)
-        if not approved_hosts:
-            return None
+        req = self.db.get_request(client_uuid)
+        target_uuid = (contact_uuid or (req.get('target_host_uuid') if req else None))
 
-        if contact_uuid:
+        if contact_uuid and approved_hosts:
             cid_str = str(contact_uuid).strip()
             target = next((h for h in approved_hosts if h['uuid'] == cid_str or (h.get('username') and h.get('username').lower() == cid_str.lower()) or (h.get('device_name') and h.get('device_name').lower() == cid_str.lower())), None)
-            return target
-        
-        return approved_hosts[0]
+            if target:
+                return target
+
+        if req and req.get('target_host_uuid') and approved_hosts:
+            target = next((h for h in approved_hosts if h['uuid'] == req['target_host_uuid']), None)
+            if target:
+                return target
+
+        if approved_hosts:
+            return approved_hosts[0]
+
+        if target_uuid:
+            th = self.db.get_host(str(target_uuid).strip())
+            if th and th.get('status') == 'APPROVED':
+                return th
+
+        return None
 
     def _get_index_html(self):
         possible_paths = [
@@ -542,6 +556,71 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 "server_time": int(time.time() * 1000)
             })
 
+        # Serve Embeddable Web Client Widget
+        if path in ['/widget.js', '/embed.js']:
+            js_path = os.path.join(os.path.dirname(__file__), 'widget.js')
+            if os.path.exists(js_path):
+                with open(js_path, 'r', encoding='utf-8') as f:
+                    js_content = f.read()
+            else:
+                js_content = "// Whisker Widget\n"
+            body = js_content.encode('utf-8')
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/javascript; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path in ['/widget-demo.html', '/embed-demo.html', '/widget-demo', '/embed-demo']:
+            srv_url = self._get_server_url()
+            demo_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Whisker Widget Demo Site</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 40px 20px;
+      background: #0f172a;
+      color: #f8fafc;
+      min-height: 100vh;
+      box-sizing: border-box;
+      line-height: 1.6;
+    }}
+    .container {{
+      max-width: 760px;
+      margin: 0 auto;
+      background: #1e293b;
+      padding: 36px;
+      border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      border: 1px solid #334155;
+    }}
+    h1 {{ color: #38bdf8; margin-top: 0; }}
+    pre {{ background: #0f172a; padding: 14px; border-radius: 8px; overflow-x: auto; color: #a78bfa; font-size: 13px; }}
+    .badge {{ display: inline-block; padding: 4px 10px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-radius: 9999px; font-size: 12px; font-weight: bold; margin-bottom: 12px; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <span class="badge">🌐 Embed Widget Preview</span>
+    <h1>Personal Webpage Example</h1>
+    <p>This demo page illustrates how the <strong>Whisker Web Client Widget</strong> appears when embedded on any personal HTML page.</p>
+    <p>Look at the bottom right corner (or bottom sheet on mobile) to interact with the widget.</p>
+    <h3>One-line Integration Snippet</h3>
+    <pre>&lt;script src="{srv_url}/widget.js"&gt;&lt;/script&gt;</pre>
+  </div>
+  <script src="/widget.js"></script>
+</body>
+</html>"""
+            return self._send_html(demo_html)
+
         # Static Portal Router: / or /index.html or /invite/<code>
         if path in ['/', '/index.html'] or path.startswith('/invite/'):
             if not self._is_initialized():
@@ -555,6 +634,24 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                     html_str = html_str.replace('</head>', f'{inject_script}</head>')
 
             return self._send_html(html_str)
+
+        # Public widget host discovery
+        if path in ['/api/widget/hosts', '/api/embed/hosts']:
+            s_name = self.db.get_setting('server_name') or getattr(WhiskerServerHandler, 'server_name', 'Whisker Home Server')
+            hosts = self.db.get_hosts()
+            widget_hosts = []
+            for h in hosts:
+                if h.get('status') == 'APPROVED' and h.get('allow_widget', 1) == 1:
+                    widget_hosts.append({
+                        "uuid": h["uuid"],
+                        "username": h.get("username") or f"Mobile Device ({h['uuid'][:6]})",
+                        "is_admin": (h.get("is_admin", 0) == 1),
+                        "role": "ADMIN" if (h.get("is_admin", 0) == 1) else "COMPANION"
+                    })
+            return self._send_json({
+                "server_name": s_name,
+                "hosts": widget_hosts
+            })
 
         # Enforce server initialization requirement on non-host endpoints
         if not self._is_initialized() and not path.startswith('/api/host/'):
@@ -632,6 +729,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                         "is_admin": 1 if is_adm else 0,
                         "role": "ADMIN" if is_adm else "COMPANION",
                         "status": host.get("status", "APPROVED"),
+                        "allow_direct_calls": bool(host.get("allow_direct_calls", 0)),
+                        "allow_widget": bool(host.get("allow_widget", 1)),
                         "server_name": s_name,
                         "servername": s_name
                     })
@@ -745,6 +844,20 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                             })
                             seen_uuids.add(h['uuid'])
 
+                if is_admin:
+                    pending_requests = [r for r in self.db.get_requests() if r.get('status') == 'PENDING']
+                else:
+                    pending_requests = [r for r in self.db.get_requests() if r.get('status') == 'PENDING' and r.get('target_host_uuid') == host_uuid]
+
+                for pr in pending_requests:
+                    if pr['uuid'] not in seen_uuids:
+                        pr_copy = dict(pr)
+                        pr_copy['is_online'] = 1 if pr['uuid'] in active_uuids else 0
+                        pr_copy['server_name'] = s_name
+                        pr_copy['server_address'] = server_addr
+                        clients.append(pr_copy)
+                        seen_uuids.add(pr['uuid'])
+
                 return self._send_json(clients)
 
             # Check if caller is an approved Member client (joined via invite)
@@ -843,6 +956,43 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 return self._send_json({"error": "No registration found"}, 403)
 
             return self._handle_guest_sse(uuid)
+
+        if path in ['/api/embed/session', '/api/guest/session']:
+            uuid = qs.get('uuid', [''])[0]
+            if not uuid:
+                return self._send_json({"error": "Missing uuid"}, 400)
+            req = self.db.get_request(uuid)
+            if not req:
+                return self._send_json({"status": "NOT_FOUND"}, 404)
+
+            s_name = self.db.get_setting('server_name') or getattr(WhiskerServerHandler, 'server_name', 'Whisker Home Server')
+            is_approved = (req.get('status') == 'APPROVED')
+
+            now = time.time()
+            with WhiskerServerHandler.streams_lock:
+                active_hosts = {u for u, stms in WhiskerServerHandler.host_streams.items() if stms}
+            for u, ts in WhiskerServerHandler.host_last_seen.items():
+                if now - ts < 35:
+                    active_hosts.add(u)
+            
+            target_uuid = req.get('target_host_uuid')
+            target_h = self.db.get_host(target_uuid) if target_uuid else None
+            if target_uuid:
+                host_online = (target_uuid in active_hosts)
+            else:
+                host_online = len(active_hosts) > 0
+
+            return self._send_json({
+                "uuid": req["uuid"],
+                "name": req["name"],
+                "status": req["status"],
+                "token": req.get("token", "") if is_approved else "",
+                "client_type": req.get("client_type", "EMBED"),
+                "server_name": s_name,
+                "target_host_uuid": target_uuid or "",
+                "target_host_name": (target_h.get("username") if target_h else "") or "",
+                "host_online": host_online if is_approved else False
+            })
 
         if path == '/api/client/hosts':
             uuid = qs.get('uuid', [''])[0]
@@ -1040,6 +1190,21 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             self.db.update_host(host_uuid, allow_direct_calls=allow)
             print(f"⚡ [Direct Calls] Host '{host.get('username') or host_uuid}' updated allow_direct_calls to {bool(allow)}")
             return self._send_json({"message": "Direct calls setting updated", "allow_direct_calls": bool(allow)})
+
+        if path in ['/api/host/widget_access', '/api/host/allow_widget']:
+            host = self._authorize_host()
+            if not host: return
+            host_uuid = host["uuid"]
+            allow = 1 if (body.get('allow_widget') is True or body.get('allow_widget_access') is True or body.get('enabled') is True or body.get('allow') is True) else 0
+            if 'allow_widget' in body and not body['allow_widget']:
+                allow = 0
+            elif 'allow_widget_access' in body and not body['allow_widget_access']:
+                allow = 0
+            elif 'enabled' in body and not body['enabled']:
+                allow = 0
+            self.db.update_host(host_uuid, allow_widget=allow)
+            print(f"⚡ [Widget Access] Host '{host.get('username') or host_uuid}' updated allow_widget to {bool(allow)}")
+            return self._send_json({"message": "Widget access setting updated", "allow_widget": bool(allow)})
 
         if path == '/api/host/ack':
             token = self._get_auth_token()
@@ -1587,15 +1752,42 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             uuid = body.get('uuid')
             name = body.get('name')
             reason = body.get('reason')
+            client_type = body.get('client_type', 'WEB')
+            target_host_uuid = body.get('target_host') or body.get('target_host_uuid')
             if not uuid or not name or not reason:
                 return self._send_json({"error": "Missing required fields"}, 400)
 
-            self.db.add_request(uuid, name, reason)
-            event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
-            payload = {"event": "visitor", "eventId": event_id, "uuid": uuid, "name": name, "reason": reason, "server_address": self._get_server_url()}
-            
             hosts = self.db.get_hosts()
-            for host in hosts:
+            if client_type == 'EMBED':
+                available_hosts = [h for h in hosts if h.get('status') == 'APPROVED' and h.get('allow_widget', 1) == 1]
+            else:
+                available_hosts = [h for h in hosts if h.get('status') == 'APPROVED']
+
+            if not available_hosts:
+                return self._send_json({"error": "No mobile apps are currently available to accept connections on this home server."}, 503)
+
+            target_hosts = []
+            if target_host_uuid:
+                target_hosts = [h for h in available_hosts if h['uuid'] == target_host_uuid]
+                if not target_hosts:
+                    return self._send_json({"error": "Selected mobile app is not available on this home server."}, 404)
+            if not target_hosts:
+                target_hosts = available_hosts
+
+            self.db.add_request(uuid, name, reason, client_type=client_type, target_host_uuid=target_host_uuid)
+            event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
+            payload = {
+                "event": "visitor",
+                "eventId": event_id,
+                "uuid": uuid,
+                "name": name,
+                "reason": reason,
+                "client_type": client_type,
+                "target_host_uuid": target_host_uuid or "",
+                "server_address": self._get_server_url()
+            }
+
+            for host in target_hosts:
                 self.db.add_host_event(host['uuid'], event_id, "visitor", payload)
                 self._notify_host_streams(host['uuid'], "visitor", payload)
                 if host.get('push_token'):
@@ -1794,6 +1986,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             has_video = "m=video" in sdp_str
             req = self.db.get_request(uuid)
             caller_name = (body.get('name') or '').strip() or (req.get('name') if req else 'Guest')
+            reason_str = (body.get('reason') or '').strip() or (req.get('reason') if req else 'WebRTC Call')
             print(f"📞 [WebRTC Call] {'⚡ DIRECT CALL' if is_direct else 'Guest'} '{uuid}' ({caller_name}) initiated call | Call ID: {call_id} | Host: '{host.get('username') or host_uuid}' | Video: {is_vid} | Reason: '{reason_str}' | SDP Len: {sdp_len}")
 
             self._register_call(call_id, host_uuid, uuid, caller_name=caller_name, initiator="guest", is_direct=is_direct, video=is_vid)

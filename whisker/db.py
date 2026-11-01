@@ -156,6 +156,14 @@ class DatabaseManager:
                     cursor.execute("ALTER TABLE requests ADD COLUMN push_token TEXT DEFAULT NULL")
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    cursor.execute("ALTER TABLE hosts ADD COLUMN allow_widget INTEGER DEFAULT 1")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE requests ADD COLUMN target_host_uuid TEXT DEFAULT NULL")
+                except sqlite3.OperationalError:
+                    pass
 
                 conn.commit()
             finally:
@@ -182,7 +190,7 @@ class DatabaseManager:
             finally:
                 conn.close()
 
-    def add_request(self, uuid, name, reason, status='PENDING', token='', client_type='WEB', server_address='local', remote_uuid=None, remote_token=None):
+    def add_request(self, uuid, name, reason, status='PENDING', token='', client_type='WEB', server_address='local', remote_uuid=None, remote_token=None, target_host_uuid=None):
         now = int(time.time() * 1000)
         with self.lock:
             conn = self.get_connection()
@@ -190,9 +198,9 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute(
                     """INSERT OR REPLACE INTO requests 
-                       (uuid, name, reason, status, token, created_at, client_type, server_address, remote_uuid, remote_token) 
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (uuid, name, reason, status, token, now, client_type, server_address, remote_uuid, remote_token)
+                       (uuid, name, reason, status, token, created_at, client_type, server_address, remote_uuid, remote_token, target_host_uuid) 
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (uuid, name, reason, status, token, now, client_type, server_address, remote_uuid, remote_token, target_host_uuid)
                 )
                 conn.commit()
             finally:

@@ -331,6 +331,10 @@ class GatewayViewModel(
         networkManager.updateServerDirectCalls(server, allowed)
     }
 
+    fun toggleServerWidgetAccess(server: HomeServer, allowed: Boolean) {
+        networkManager.updateServerWidgetAccess(server, allowed)
+    }
+
     fun updateHomeServer(server: HomeServer) {
         viewModelScope.launch {
             networkManager.updateHomeServer(server)

@@ -268,6 +268,7 @@ fun GatewayDashboard(
                         onRefreshAllServers = { viewModel.refreshAllServers() },
                         onToggleDirectCalls = { viewModel.toggleAllowDirectCalls(it) },
                         onToggleServerDirectCalls = { server, allowed -> viewModel.toggleServerDirectCalls(server, allowed) },
+                        onToggleServerWidgetAccess = { server, allowed -> viewModel.toggleServerWidgetAccess(server, allowed) },
                         onApprove = { viewModel.approveClient(it) },
                         onReject = { viewModel.rejectClient(it) },
                         onDelete = { viewModel.deleteClient(it) },
@@ -1220,6 +1221,7 @@ fun CompactContactCard(
     val context = LocalContext.current
     val isMobileApp = request.status == "MOBILE_APPROVED" || request.clientType.equals("MOBILE", ignoreCase = true)
     val isCli = request.clientType.equals("CLI", ignoreCase = true) || request.name.contains("cli", ignoreCase = true) || request.message.contains("CLI", ignoreCase = true)
+    val isEmbed = request.clientType.equals("EMBED", ignoreCase = true) || request.clientType.equals("WIDGET", ignoreCase = true) || request.message.contains("embed", ignoreCase = true)
     val rawAddress = request.serverAddress.trimEnd('/')
     val matchedServer = homeServers.firstOrNull { it.url.trimEnd('/') == rawAddress }
         ?: if (rawAddress == "local" || rawAddress.isEmpty()) {
@@ -1280,14 +1282,23 @@ fun CompactContactCard(
 
                     // Client type badge
                     Surface(
-                        color = if (isMobileApp) Color(0xFF8B5CF6).copy(alpha = 0.25f) else if (isCli) Color(0xFF10B981).copy(alpha = 0.25f) else Color(0xFF3B82F6).copy(alpha = 0.25f),
+                        color = if (isMobileApp) Color(0xFF8B5CF6).copy(alpha = 0.25f)
+                                else if (isCli) Color(0xFF10B981).copy(alpha = 0.25f)
+                                else if (isEmbed) Color(0xFF06B6D4).copy(alpha = 0.25f)
+                                else Color(0xFF3B82F6).copy(alpha = 0.25f),
                         shape = RoundedCornerShape(4.dp)
                     ) {
                         Text(
-                            text = if (isMobileApp) "📱 Mobile" else if (isCli) "⌨️ CLI" else "💻 Web",
+                            text = if (isMobileApp) "📱 Mobile"
+                                   else if (isCli) "⌨️ CLI"
+                                   else if (isEmbed) "🌐 Embed"
+                                   else "💻 Web",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (isMobileApp) Color(0xFFA78BFA) else if (isCli) Color(0xFF6EE7B7) else Color(0xFF93C5FD),
+                            color = if (isMobileApp) Color(0xFFA78BFA)
+                                    else if (isCli) Color(0xFF6EE7B7)
+                                    else if (isEmbed) Color(0xFF67E8F9)
+                                    else Color(0xFF93C5FD),
                             maxLines = 1,
                             softWrap = false,
                             modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
@@ -1591,6 +1602,7 @@ fun CompactHomeServerCard(
     onSettingsClick: () -> Unit,
     onToggleEnabled: () -> Unit,
     onToggleDirectCalls: (Boolean) -> Unit,
+    onToggleWidgetAccess: (Boolean) -> Unit = {},
     onSetPrimary: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -1916,6 +1928,56 @@ fun CompactHomeServerCard(
                                 modifier = Modifier
                                     .scale(0.8f)
                                     .testTag("direct_calls_toggle_${server.id.take(6)}"),
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.Black,
+                                    checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                    uncheckedThumbColor = Color.LightGray,
+                                    uncheckedTrackColor = Color(0xFF374151)
+                                )
+                            )
+                        }
+                    }
+
+                    // Per-Server Allow Widget Access Toggle
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.25f),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, if (server.allowWidgetAccess) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f) else Color.Gray.copy(alpha = 0.15f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("🌐", fontSize = 16.sp)
+                                Column {
+                                    Text(
+                                        text = "Allow Widget Access",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "Allow messages and calls from the embeddable web widget",
+                                        fontSize = 9.sp,
+                                        color = Color.Gray
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = server.allowWidgetAccess,
+                                onCheckedChange = { onToggleWidgetAccess(it) },
+                                modifier = Modifier
+                                    .scale(0.8f)
+                                    .testTag("widget_access_toggle_${server.id.take(6)}"),
                                 colors = SwitchDefaults.colors(
                                     checkedThumbColor = Color.Black,
                                     checkedTrackColor = MaterialTheme.colorScheme.primary,
@@ -2607,6 +2669,7 @@ fun ApprovalsTab(
     onRefreshAllServers: () -> Unit = {},
     onToggleDirectCalls: (Boolean) -> Unit = {},
     onToggleServerDirectCalls: (HomeServer, Boolean) -> Unit = { _, _ -> },
+    onToggleServerWidgetAccess: (HomeServer, Boolean) -> Unit = { _, _ -> },
     onApprove: (ClientRequest) -> Unit,
     onReject: (ClientRequest) -> Unit,
     onDelete: (ClientRequest) -> Unit,
@@ -2725,6 +2788,7 @@ fun ApprovalsTab(
                     onSettingsClick = { onEditServer(server) },
                     onToggleEnabled = { onToggleServerEnabled(server) },
                     onToggleDirectCalls = { allowed -> onToggleServerDirectCalls(server, allowed) },
+                    onToggleWidgetAccess = { allowed -> onToggleServerWidgetAccess(server, allowed) },
                     onSetPrimary = { onSetPrimaryServer(server) },
                     onDelete = { onDeleteServer(server) }
                 )
@@ -2934,21 +2998,42 @@ fun ApprovalsTab(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column {
-                                Text(
-                                    text = request.name,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color.White
-                                )
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                val isEmbedReq = request.clientType.equals("EMBED", ignoreCase = true) || request.message.contains("embed", ignoreCase = true) || request.message.contains("widget", ignoreCase = true)
+                                val isCliReq = request.clientType.equals("CLI", ignoreCase = true)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = request.name,
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color.White
+                                    )
+                                    Surface(
+                                        color = if (isEmbedReq) Color(0xFF06B6D4).copy(alpha = 0.25f)
+                                                else if (isCliReq) Color(0xFF10B981).copy(alpha = 0.25f)
+                                                else Color(0xFF3B82F6).copy(alpha = 0.25f),
+                                        shape = RoundedCornerShape(6.dp),
+                                        border = BorderStroke(1.dp, if (isEmbedReq) Color(0xFF06B6D4).copy(alpha = 0.6f) else if (isCliReq) Color(0xFF10B981).copy(alpha = 0.6f) else Color(0xFF3B82F6).copy(alpha = 0.6f))
+                                    ) {
+                                        Text(
+                                            text = if (isEmbedReq) "🌐 EMBED WIDGET" else if (isCliReq) "⌨️ CLI CLIENT" else "💻 WEB VISITOR",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isEmbedReq) Color(0xFF67E8F9) else if (isCliReq) Color(0xFF6EE7B7) else Color(0xFF93C5FD),
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
 
                                 Text(
-                                    text = "GUEST ID: ${request.uuid}",
+                                    text = "CLIENT ID: ${request.uuid}",
                                     fontSize = 10.sp,
                                     fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = if (isEmbedReq) Color(0xFF06B6D4) else MaterialTheme.colorScheme.primary
                                 )
-
                             }
                             Text(
                                 text = SimpleDateFormat("HH:mm • dd MMM", Locale.getDefault()).format(Date(request.timestamp)),
@@ -3265,6 +3350,7 @@ fun ChatTab(
                 approvedRequests.forEach { client ->
                     val isMobile = client.status == "MOBILE_APPROVED" || client.clientType == "MOBILE"
                     val isCli = client.clientType.equals("CLI", ignoreCase = true) || client.name.contains("cli", ignoreCase = true) || client.message.contains("CLI", ignoreCase = true)
+                    val isEmbed = client.clientType.equals("EMBED", ignoreCase = true) || client.clientType.equals("WIDGET", ignoreCase = true) || client.message.contains("embed", ignoreCase = true)
                     val isRemote = client.serverAddress.isNotBlank() && client.serverAddress != "local"
                     Tab(
                         selected = selectedClient?.uuid == client.uuid,
@@ -3279,7 +3365,7 @@ fun ChatTab(
                             ) {
                                 Box(modifier = Modifier.size(6.dp).background(if (client.isOnline) Color(0xFF10B981) else Color(0xFFEF4444), CircleShape))
                                 Text(
-                                    text = if (isMobile) "📱 ${client.name}" else if (isCli) "⌨️ ${client.name}" else client.name,
+                                    text = if (isMobile) "📱 ${client.name}" else if (isCli) "⌨️ ${client.name}" else if (isEmbed) "🌐 ${client.name}" else client.name,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -3299,6 +3385,7 @@ fun ChatTab(
                 val clientMsgs = messages.filter { it.clientUuid == client.uuid }.sortedBy { it.timestamp }
                 val isMobile = client.status == "MOBILE_APPROVED" || client.clientType == "MOBILE"
                 val isCli = client.clientType.equals("CLI", ignoreCase = true) || client.name.contains("cli", ignoreCase = true) || client.message.contains("CLI", ignoreCase = true)
+                val isEmbed = client.clientType.equals("EMBED", ignoreCase = true) || client.clientType.equals("WIDGET", ignoreCase = true) || client.message.contains("embed", ignoreCase = true)
                 val rawAddress = client.serverAddress.trimEnd('/')
                 val matchedServer = homeServers.firstOrNull { it.url.trimEnd('/') == rawAddress }
                     ?: if (rawAddress == "local" || rawAddress.isEmpty()) {
@@ -3347,14 +3434,23 @@ fun ChatTab(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Surface(
-                                color = if (isMobile) Color(0xFF8B5CF6).copy(alpha = 0.25f) else if (isCli) Color(0xFF10B981).copy(alpha = 0.25f) else Color(0xFF3B82F6).copy(alpha = 0.25f),
+                                color = if (isMobile) Color(0xFF8B5CF6).copy(alpha = 0.25f)
+                                        else if (isCli) Color(0xFF10B981).copy(alpha = 0.25f)
+                                        else if (isEmbed) Color(0xFF06B6D4).copy(alpha = 0.25f)
+                                        else Color(0xFF3B82F6).copy(alpha = 0.25f),
                                 shape = RoundedCornerShape(4.dp)
                             ) {
                                 Text(
-                                    text = if (isMobile) "📱 Mobile App" else if (isCli) "⌨️ CLI Client" else "💻 Web Client",
+                                    text = if (isMobile) "📱 Mobile App"
+                                           else if (isCli) "⌨️ CLI Client"
+                                           else if (isEmbed) "🌐 Embed Widget"
+                                           else "💻 Web Client",
                                     fontSize = 9.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (isMobile) Color(0xFFA78BFA) else if (isCli) Color(0xFF6EE7B7) else Color(0xFF93C5FD),
+                                    color = if (isMobile) Color(0xFFA78BFA)
+                                            else if (isCli) Color(0xFF6EE7B7)
+                                            else if (isEmbed) Color(0xFF67E8F9)
+                                            else Color(0xFF93C5FD),
                                     maxLines = 1,
                                     softWrap = false,
                                     modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)

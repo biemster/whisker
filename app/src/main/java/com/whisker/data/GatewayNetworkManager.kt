@@ -811,6 +811,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
                             okHttpClient.newCall(dcReq).execute().close()
                         } catch (_: Exception) {}
                     }
+                    try {
+                        val widgetPayload = JSONObject().apply { put("allow_widget", server.allowWidgetAccess) }
+                        val widgetBody = RequestBody.create(mediaType, widgetPayload.toString())
+                        val wReq = Request.Builder()
+                            .url("$cleanUrl/api/host/widget_access")
+                            .header("Authorization", "Bearer $pinVal")
+                            .post(widgetBody)
+                            .build()
+                        okHttpClient.newCall(wReq).execute().close()
+                    } catch (_: Exception) {}
                     return Pair(status == "APPROVED", hostUuid)
                 }
             }
@@ -1079,6 +1089,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 "visitor" -> {
                     val name = json.optString("name", "Incoming Visitor")
                     val reason = json.optString("reason", "Local call request")
+                    val clientType = json.optString("client_type", if (reason.contains("widget", ignoreCase = true) || reason.contains("embed", ignoreCase = true)) "EMBED" else "WEB")
                     
                     scope.launch {
                         val existing = repository.getRequestByUuid(uuid)
@@ -1103,12 +1114,15 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                 message = reason,
                                 status = "PENDING",
                                 token = "",
+                                clientType = clientType,
                                 serverAddress = effectiveServerUrl
                             )
                             repository.insertRequest(request)
+                            val notifTitle = if (clientType.equals("EMBED", ignoreCase = true)) "🌐 Web Widget Request" else "Access Request"
+                            val notifMsg = if (clientType.equals("EMBED", ignoreCase = true)) "Embed widget visitor '$name' is requesting access." else "New visitor '$name' is requesting direct calling access."
                             showNotification(
-                                "Access Request",
-                                "New visitor '$name' is requesting direct calling access.",
+                                notifTitle,
+                                notifMsg,
                                 1001
                             )
                         }
@@ -2247,6 +2261,33 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     Log.d("GatewayNetworkManager", "Updated allow_direct_calls on ${server.name} to $allowed")
                 } catch (e: Exception) {
                     Log.e("GatewayNetworkManager", "Error updating direct calls setting on ${server.name}", e)
+                }
+            }
+        }
+    }
+
+    fun updateServerWidgetAccess(server: HomeServer, allowed: Boolean) {
+        scope.launch(Dispatchers.IO) {
+            val latest = repository.getHomeServerById(server.id) ?: server
+            val updated = latest.copy(allowWidgetAccess = allowed)
+            repository.updateHomeServer(updated)
+            val cleanUrl = server.url.trim().removeSuffix("/")
+            val pinVal = server.apiKey
+            if (cleanUrl.isNotEmpty() && cleanUrl.startsWith("http")) {
+                try {
+                    val payload = JSONObject().apply {
+                        put("allow_widget", allowed)
+                    }
+                    val body = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), payload.toString())
+                    val request = Request.Builder()
+                        .url("$cleanUrl/api/host/widget_access")
+                        .header("Authorization", "Bearer $pinVal")
+                        .post(body)
+                        .build()
+                    okHttpClient.newCall(request).execute().close()
+                    Log.d("GatewayNetworkManager", "Updated allow_widget on ${server.name} to $allowed")
+                } catch (e: Exception) {
+                    Log.e("GatewayNetworkManager", "Error updating widget access setting on ${server.name}", e)
                 }
             }
         }

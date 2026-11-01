@@ -35,11 +35,11 @@ Whether you want a hassle-free personal communication system for external visito
 - **Mobile-to-Mobile Communication**: Real-time messaging and WebRTC calling between mobile apps on the same Home Server (`local`) and across different Home Servers (`serverAddress`), unified by invite pairing and direct signaling.
 - **Multi-Server Mobile Client**: Support for connecting a single mobile application to multiple home servers simultaneously, featuring independent controls to connect, disconnect, or mute specific servers (e.g. managing family, work, and community servers in one app).
 - **Web Client UI**: Responsive fluid layout with auto-expanding video on active calls, interactive header status indicator with connectivity modal, and mobile-optimized columnar view.
+- **Embeddable Web Client Widget**: Single `<script src="http://<server-ip>:3000/widget.js"></script>` drop-in widget for personal websites with multi-device session tabs, radio-button mobile device selection, custom visitor usernames, real-time messaging, two-way WebRTC audio/video calling, and transparent host approval.
 - **Push Notifications**: FCM HTTP v1 push notification tickle integration complete with low-power battery optimization.
 
 ### In Development & Future Roadmap
 - **Model Context Protocol (MCP) Server**: Python-native MCP server extending the Whisker client core with zero external dependencies, exposing tools and resources for AI agent platforms (e.g., Claude Desktop, Cursor) to automate messaging, initiate calls, and inspect event queues.
-- **Embeddable Web Client Widget**: Lightweight, drop-in JavaScript widget / Web Component for personal websites (similar to customer support helpdesk applets), enabling site visitors to initiate direct messaging and WebRTC calls to host devices.
 - **File & Media Transfer**: Secure attachment and file transfer directly between web visitors/mobile clients and the home server.
 - **Automated Background Photo Backup**: Scheduled automatic background synchronization of camera roll photos and media folders to home server storage.
 - **iOS Mobile Application**: Native iOS client app built with Swift / SwiftUI, featuring WebRTC P2P calling, background APNs (Apple Push Notification service) push tickle support, and call notification alerts.
