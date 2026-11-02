@@ -1183,7 +1183,6 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             if not self._is_admin_authenticated():
                 return self._send_json({"error": "Unauthorized"}, 401)
             name = (body.get('name') or 'Admin Invite').strip()
-            import random, string
             code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
             admin_host = self.db.get_admin_host()
             host_uuid = admin_host['uuid'] if admin_host else None
