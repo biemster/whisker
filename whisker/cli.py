@@ -829,8 +829,8 @@ def print_help():
     print(f"""Whisker Unified CLI & Home Server Package
 
 Usage:
-  {base} server --name <NAME> [--port PORT] [--db DB_FILE]
-      Start Whisker Home Server (server name is mandatory)
+  {base} server --name <NAME> [--port PORT] [--db DB_FILE] [--admin-password PWD]
+      Start Whisker Home Server with optional admin console password
 
   {base} init <invite_url> [--name USERNAME] [--server SERVER_NAME] [--db DB_FILE]
       Pair with a host via invite URL (creates whisker_client_<user>_<server>.db)
@@ -856,6 +856,9 @@ Usage:
   {base} setup-fcm
       Run Firebase / FCM OAuth2 setup tool
 
+  {base} mcp [--directory DIR]
+      Start Whisker Model Context Protocol (MCP) Server for AI agents
+
   {base} help
       Show this help menu
 """)
@@ -873,15 +876,16 @@ def main():
         parser.add_argument('--name', '-n', '--server-name', '--servername', dest='server_name', type=str, default=os.environ.get('SERVER_NAME', None), help="Obligatory name of the Home Server")
         parser.add_argument('--port', '-p', type=int, default=int(os.environ.get('PORT', 3000)), help="Port to listen on (default: 3000)")
         parser.add_argument('--db', '-d', type=str, default=os.environ.get('DB_FILE', None), help="Custom path to SQLite database file")
+        parser.add_argument('--admin-password', '-a', '--password', dest='admin_password', type=str, default=os.environ.get('ADMIN_PASSWORD', None), help="Administrator password for web admin console")
         args = parser.parse_args(sys.argv[2:])
 
         if not args.server_name or not str(args.server_name).strip():
             print("Error: Server name is required to run Whisker Server.")
-            print(f"Usage: {get_cmd_prog(cmd)} --name <server_name> [--port 3000] [--db <db_file>]")
+            print(f"Usage: {get_cmd_prog(cmd)} --name <server_name> [--port 3000] [--db <db_file>] [--admin-password <pwd>]")
             print(f"Example: {get_cmd_prog(cmd)} --name 'Home Base' --port 3000")
             sys.exit(1)
 
-        run_server(port=args.port, db_path=args.db, server_name=args.server_name)
+        run_server(port=args.port, db_path=args.db, server_name=args.server_name, admin_password=args.admin_password)
 
     elif cmd == 'init':
         parser = argparse.ArgumentParser(prog=get_cmd_prog(cmd), description="Initialize / pair CLI client via invite URL")
@@ -981,6 +985,13 @@ def main():
                 print("Please install it with: pip install requests")
                 sys.exit(1)
             raise
+
+    elif cmd in ['mcp', 'mcp-server']:
+        parser = argparse.ArgumentParser(prog=get_cmd_prog(cmd), description="Start Whisker Model Context Protocol (MCP) Server")
+        parser.add_argument('--directory', '-d', type=str, default='.', help="Working directory containing client databases")
+        args = parser.parse_args(sys.argv[2:])
+        from whisker.mcp import run_mcp_server
+        run_mcp_server(directory=args.directory)
 
     elif cmd in ['-h', '--help', 'help']:
         print_help()

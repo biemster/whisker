@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Whisker Home Server - Admin Console</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      background-color: #0b0f19;
+      color: #f3f4f6;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .glow-cyan {
+      box-shadow: 0 0 25px rgba(6, 182, 212, 0.25);
+    }
+    .badge-admin {
+      background: linear-gradient(135deg, #f59e0b, #d97706);
+      color: #ffffff;
+    }
+    .badge-companion {
+      background: #334155;
+      color: #94a3b8;
+    }
+    .tab-active {
+      border-bottom: 2px solid #38bdf8;
+      color: #38bdf8;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col antialiased">
+
+  <!-- Header -->
+  <header class="border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-40">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <span class="text-2xl">🐱</span>
+        <div>
+          <span class="font-bold text-lg text-white tracking-tight">Whisker</span>
+          <span class="text-xs px-2 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800/50 font-mono ml-2">ADMIN CONSOLE</span>
+        </div>
+      </div>
+      <div id="header-user-actions" class="flex items-center space-x-3" style="display: none;">
+        <span id="header-server-name" class="text-xs text-gray-400 hidden sm:inline-block bg-gray-800 px-2.5 py-1 rounded-full"></span>
+        <button id="btn-logout" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white px-3 py-1.5 rounded-lg border border-gray-700 transition">
+          Log Out
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Login Modal / Screen -->
+  <div id="login-modal" class="flex-1 flex items-center justify-center p-4">
+    <div class="max-w-md w-full bg-gray-900 border border-gray-800 p-8 rounded-2xl shadow-2xl glow-cyan space-y-6">
+      <div class="text-center space-y-2">
+        <div class="w-14 h-14 bg-gradient-to-tr from-cyan-500 to-indigo-500 rounded-2xl flex items-center justify-center mx-auto text-2xl shadow-lg">
+          🔒
+        </div>
+        <h2 class="text-xl font-bold text-white">Admin Authentication</h2>
+        <p class="text-xs text-gray-400">Enter the administrator password configured for this Whisker server.</p>
+      </div>
+      <form id="login-form" class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-300 mb-1">Administrator Password</label>
+          <input type="password" id="login-password" required autofocus
+                 class="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition"
+                 placeholder="Enter admin password">
+        </div>
+        <div id="login-error" class="text-xs text-red-400 hidden"></div>
+        <button type="submit" id="btn-login-submit"
+                class="w-full bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-medium py-2.5 rounded-xl text-sm transition shadow-lg">
+          Sign In to Admin
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main Dashboard Container -->
+  <main id="admin-dashboard" class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6" style="display: none;">
+
+    <!-- Metrics Overview -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div class="bg-gray-900/90 border border-gray-800 p-5 rounded-2xl">
+        <div class="flex items-center justify-between text-gray-400 text-xs mb-1">
+          <span>Registered Mobile Apps</span>
+          <span class="text-base">📱</span>
+        </div>
+        <div class="text-2xl font-bold text-white" id="stat-hosts-count">0</div>
+        <div class="text-xs text-cyan-400 mt-1" id="stat-admin-name">Admin: Loading...</div>
+      </div>
+
+      <div class="bg-gray-900/90 border border-gray-800 p-5 rounded-2xl">
+        <div class="flex items-center justify-between text-gray-400 text-xs mb-1">
+          <span>Connected Clients & Web</span>
+          <span class="text-base">👥</span>
+        </div>
+        <div class="text-2xl font-bold text-white" id="stat-clients-count">0</div>
+        <div class="text-xs text-gray-500 mt-1">Web, CLI, and Widget sessions</div>
+      </div>
+
+      <div class="bg-gray-900/90 border border-gray-800 p-5 rounded-2xl">
+        <div class="flex items-center justify-between text-gray-400 text-xs mb-1">
+          <span>Server Status</span>
+          <span class="text-base">🌐</span>
+        </div>
+        <div class="text-lg font-bold text-emerald-400 flex items-center gap-1.5">
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span>Operational</span>
+        </div>
+        <div class="text-xs text-gray-400 mt-1 font-mono" id="stat-server-port">Port: 3000</div>
+      </div>
+
+      <div class="bg-gray-900/90 border border-gray-800 p-5 rounded-2xl">
+        <div class="flex items-center justify-between text-gray-400 text-xs mb-1">
+          <span>Push Alerts (FCM)</span>
+          <span class="text-base">🔔</span>
+        </div>
+        <div class="text-base font-bold" id="stat-fcm-status">Checking...</div>
+        <div class="text-xs text-gray-500 mt-1" id="stat-fcm-detail">Battery-efficient tickles</div>
+      </div>
+    </div>
+
+    <!-- Tab Navigation -->
+    <div class="border-b border-gray-800 flex space-x-8 text-sm">
+      <button class="tab-btn py-3 px-1 tab-active transition flex items-center gap-2" data-tab="tab-hosts">
+        <span>📱 Mobile Applications</span>
+        <span id="badge-hosts-count" class="bg-gray-800 text-gray-400 text-xs px-2 py-0.5 rounded-full">0</span>
+      </button>
+      <button class="tab-btn py-3 px-1 text-gray-400 hover:text-gray-200 transition flex items-center gap-2" data-tab="tab-clients">
+        <span>👥 Clients & Pairings</span>
+        <span id="badge-clients-count" class="bg-gray-800 text-gray-400 text-xs px-2 py-0.5 rounded-full">0</span>
+      </button>
+      <button class="tab-btn py-3 px-1 text-gray-400 hover:text-gray-200 transition flex items-center gap-2" data-tab="tab-storage">
+        <span>💾 Storage & Settings</span>
+      </button>
+      <button class="tab-btn py-3 px-1 text-gray-400 hover:text-gray-200 transition flex items-center gap-2" data-tab="tab-invites">
+        <span>🎫 Invites</span>
+      </button>
+    </div>
+
+    <!-- Tab 1: Mobile Applications (Hosts) -->
+    <div id="tab-hosts" class="tab-content space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="text-lg font-bold text-white">Registered Mobile Applications</h3>
+          <p class="text-xs text-gray-400">Mobile apps paired with this Home Server. Transfer administrator rights or remove devices.</p>
+        </div>
+        <button id="btn-refresh-hosts" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-700 transition">
+          ↻ Refresh
+        </button>
+      </div>
+
+      <div class="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden shadow">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-gray-950/70 text-gray-400 uppercase tracking-wider border-b border-gray-800 font-semibold">
+              <tr>
+                <th class="px-5 py-3.5">Device / Username</th>
+                <th class="px-5 py-3.5">Role</th>
+                <th class="px-5 py-3.5">Presence</th>
+                <th class="px-5 py-3.5">Features</th>
+                <th class="px-5 py-3.5">UUID</th>
+                <th class="px-5 py-3.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="hosts-table-body" class="divide-y divide-gray-800/60 text-gray-300">
+              <tr>
+                <td colspan="6" class="px-5 py-8 text-center text-gray-500">Loading registered mobile apps...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 2: Clients & Pairings -->
+    <div id="tab-clients" class="tab-content space-y-4" style="display: none;">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="text-lg font-bold text-white">Client Pairings & Visitor Sessions</h3>
+          <p class="text-xs text-gray-400">All external web visitors, CLI agents, embed widgets, and peer connections registered with the server.</p>
+        </div>
+        <button id="btn-refresh-clients" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-1.5 rounded-lg border border-gray-700 transition">
+          ↻ Refresh
+        </button>
+      </div>
+
+      <div class="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden shadow">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-gray-950/70 text-gray-400 uppercase tracking-wider border-b border-gray-800 font-semibold">
+              <tr>
+                <th class="px-5 py-3.5">Client Name</th>
+                <th class="px-5 py-3.5">Type</th>
+                <th class="px-5 py-3.5">Status</th>
+                <th class="px-5 py-3.5">Presence</th>
+                <th class="px-5 py-3.5">UUID</th>
+                <th class="px-5 py-3.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="clients-table-body" class="divide-y divide-gray-800/60 text-gray-300">
+              <tr>
+                <td colspan="6" class="px-5 py-8 text-center text-gray-500">Loading client pairings...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 3: Storage & Server Settings -->
+    <div id="tab-storage" class="tab-content space-y-6" style="display: none;">
+      <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 space-y-6 max-w-3xl">
+        <div>
+          <h3 class="text-lg font-bold text-white">Storage & System Settings</h3>
+          <p class="text-xs text-gray-400">Configure file storage destinations for upcoming photo and media backup features, and server identification.</p>
+        </div>
+
+        <form id="settings-form" class="space-y-5">
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1.5">Home Server Name</label>
+            <input type="text" id="cfg-server-name" class="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500" placeholder="Home Base">
+            <p class="text-[11px] text-gray-500 mt-1">Displayed in the Android app, Web Visitor portal, and CLI.</p>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1.5">Files Storage Directory</label>
+              <input type="text" id="cfg-files-path" class="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-2.5 text-sm font-mono text-cyan-300 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500" placeholder="/data/files">
+              <p class="text-[11px] text-gray-500 mt-1">Destination path on disk for shared attachments and files.</p>
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1.5">Backups Storage Directory</label>
+              <input type="text" id="cfg-backups-path" class="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-2.5 text-sm font-mono text-cyan-300 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500" placeholder="/data/backups">
+              <p class="text-[11px] text-gray-500 mt-1">Destination directory for automated mobile photo/media backups.</p>
+            </div>
+          </div>
+
+          <div class="pt-4 border-t border-gray-800">
+            <h4 class="text-sm font-bold text-white mb-2">Change Administrator Password</h4>
+            <div class="max-w-md">
+              <label class="block text-xs font-medium text-gray-400 mb-1">New Password (leave blank to keep current)</label>
+              <input type="password" id="cfg-new-password" class="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-cyan-500" placeholder="••••••••">
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between pt-4">
+            <div id="settings-status-msg" class="text-xs"></div>
+            <button type="submit" id="btn-save-settings" class="bg-cyan-600 hover:bg-cyan-500 text-white font-medium px-5 py-2.5 rounded-xl text-xs transition shadow-lg">
+              Save Configuration
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Tab 4: Invites -->
+    <div id="tab-invites" class="tab-content space-y-4" style="display: none;">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h3 class="text-lg font-bold text-white">Invite Codes & Pairing Links</h3>
+          <p class="text-xs text-gray-400">Generate one-time invite codes to onboard mobile apps, web visitors, or CLI clients.</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <input type="text" id="new-invite-name" placeholder="Contact or Device Name" class="bg-gray-950 border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500">
+          <button id="btn-create-invite" class="bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium px-4 py-2 rounded-xl transition shadow">
+            + Generate Invite
+          </button>
+        </div>
+      </div>
+
+      <div class="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden shadow">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-gray-950/70 text-gray-400 uppercase tracking-wider border-b border-gray-800 font-semibold">
+              <tr>
+                <th class="px-5 py-3.5">Code</th>
+                <th class="px-5 py-3.5">Target Name</th>
+                <th class="px-5 py-3.5">Status</th>
+                <th class="px-5 py-3.5">Created</th>
+                <th class="px-5 py-3.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="invites-table-body" class="divide-y divide-gray-800/60 text-gray-300">
+              <tr>
+                <td colspan="5" class="px-5 py-8 text-center text-gray-500">Loading invite links...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    // State
+    let adminToken = sessionStorage.getItem('whisker_admin_token') || '';
+    let currentOverview = null;
+
+    // Elements
+    const loginModal = document.getElementById('login-modal');
+    const loginForm = document.getElementById('login-form');
+    const loginPassword = document.getElementById('login-password');
+    const loginError = document.getElementById('login-error');
+    const adminDashboard = document.getElementById('admin-dashboard');
+    const headerUserActions = document.getElementById('header-user-actions');
+    const headerServerName = document.getElementById('header-server-name');
+    const btnLogout = document.getElementById('btn-logout');
+
+    // Init
+    if (adminToken) {
+      loadOverview();
+    } else {
+      showLogin();
+    }
+
+    function showLogin() {
+      loginModal.style.display = 'flex';
+      adminDashboard.style.display = 'none';
+      headerUserActions.style.display = 'none';
+      loginPassword.value = '';
+      loginError.classList.add('hidden');
+    }
+
+    function showDashboard() {
+      loginModal.style.display = 'none';
+      adminDashboard.style.display = 'block';
+      headerUserActions.style.display = 'flex';
+    }
+
+    // Login Form Submit
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      loginError.classList.add('hidden');
+      const pwd = loginPassword.value.trim();
+      if (!pwd) return;
+
+      try {
+        const res = await fetch('/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pwd })
+        });
+        const data = await res.json();
+        if (res.ok && data.token) {
+          adminToken = data.token;
+          sessionStorage.setItem('whisker_admin_token', adminToken);
+          loadOverview();
+        } else {
+          loginError.textContent = data.error || 'Invalid administrator password.';
+          loginError.classList.remove('hidden');
+        }
+      } catch (err) {
+        loginError.textContent = 'Failed to connect to Home Server.';
+        loginError.classList.remove('hidden');
+      }
+    });
+
+    // Logout
+    btnLogout.addEventListener('click', () => {
+      adminToken = '';
+      sessionStorage.removeItem('whisker_admin_token');
+      showLogin();
+    });
+
+    // Tab Navigation
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => {
+          b.classList.remove('tab-active');
+          b.classList.add('text-gray-400');
+        });
+        btn.classList.add('tab-active');
+        btn.classList.remove('text-gray-400');
+
+        const target = btn.getAttribute('data-tab');
+        document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
+        document.getElementById(target).style.display = 'block';
+      });
+    });
+
+    // Load Dashboard Overview
+    async function loadOverview() {
+      try {
+        const res = await fetch('/api/admin/overview', {
+          headers: {
+            'Authorization': `Bearer ${adminToken}`,
+            'X-Admin-Token': adminToken
+          }
+        });
+        if (res.status === 401) {
+          adminToken = '';
+          sessionStorage.removeItem('whisker_admin_token');
+          showLogin();
+          return;
+        }
+        if (!res.ok) throw new Error('Failed to load admin overview');
+
+        const data = await res.json();
+        currentOverview = data;
+        showDashboard();
+        renderDashboard(data);
+      } catch (err) {
+        showLogin();
+        loginError.textContent = 'Session expired or could not reach server.';
+        loginError.classList.remove('hidden');
+      }
+    }
+
+    function renderDashboard(data) {
+      // Header and Stats
+      headerServerName.textContent = `Server: ${data.server.name}`;
+      document.getElementById('stat-hosts-count').textContent = data.hosts.length;
+      document.getElementById('stat-clients-count').textContent = data.clients.length;
+      document.getElementById('stat-server-port').textContent = `Port: ${data.server.port}`;
+
+      const adminHost = data.hosts.find(h => h.is_admin);
+      document.getElementById('stat-admin-name').textContent = adminHost ? `Admin: ${adminHost.username}` : 'No Admin Assigned';
+
+      const fcmEl = document.getElementById('stat-fcm-status');
+      if (data.fcm_configured) {
+        fcmEl.innerHTML = '<span class="text-emerald-400">Active</span>';
+      } else {
+        fcmEl.innerHTML = '<span class="text-amber-400">Not Configured</span>';
+      }
+
+      document.getElementById('badge-hosts-count').textContent = data.hosts.length;
+      document.getElementById('badge-clients-count').textContent = data.clients.length;
+
+      // Render Hosts Table
+      renderHostsTable(data.hosts);
+
+      // Render Clients Table
+      renderClientsTable(data.clients);
+
+      // Settings Form values
+      document.getElementById('cfg-server-name').value = data.settings.server_name || '';
+      document.getElementById('cfg-files-path').value = data.settings.files_storage_path || '/data/files';
+      document.getElementById('cfg-backups-path').value = data.settings.backups_storage_path || '/data/backups';
+
+      // Render Invites Table
+      renderInvitesTable(data.invites || []);
+    }
+
+    function renderHostsTable(hosts) {
+      const tbody = document.getElementById('hosts-table-body');
+      if (!hosts || hosts.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="px-5 py-8 text-center text-gray-500">No mobile apps registered yet. Pair an Android app using your Home Server URL.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = hosts.map(h => {
+        const isAdmin = !!h.is_admin;
+        const roleBadge = isAdmin
+          ? `<span class="badge-admin text-[10px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">👑 ADMIN</span>`
+          : `<span class="badge-companion text-[10px] font-medium px-2 py-0.5 rounded-full">COMPANION</span>`;
+
+        const presenceBadge = h.is_online
+          ? `<span class="text-emerald-400 font-medium inline-flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Online</span>`
+          : `<span class="text-gray-500 inline-flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-gray-600"></span> Offline</span>`;
+
+        const directCallBadge = h.allow_direct_calls
+          ? `<span class="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800/40 px-1.5 py-0.5 rounded">Calls ON</span>`
+          : `<span class="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">Calls OFF</span>`;
+
+        const widgetBadge = (h.allow_widget !== 0)
+          ? `<span class="text-[10px] bg-cyan-950 text-cyan-400 border border-cyan-800/40 px-1.5 py-0.5 rounded ml-1">Widget ON</span>`
+          : `<span class="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded ml-1">Widget OFF</span>`;
+
+        const makeAdminBtn = !isAdmin
+          ? `<button onclick="switchAdmin('${h.uuid}', '${escapeHtml(h.username)}')" class="text-xs bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-600/40 px-2.5 py-1 rounded-lg transition mr-2">👑 Make Admin</button>`
+          : `<span class="text-xs text-amber-500 font-semibold mr-2">Primary Admin</span>`;
+
+        const deleteBtn = `<button onclick="deleteHost('${h.uuid}', '${escapeHtml(h.username)}')" class="text-xs bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-600/40 px-2.5 py-1 rounded-lg transition">🗑️ Delete</button>`;
+
+        return `
+          <tr class="hover:bg-gray-800/30 transition">
+            <td class="px-5 py-4 font-medium text-white flex items-center gap-2">
+              <span class="text-base">📱</span>
+              <span>${escapeHtml(h.username || 'Mobile App')}</span>
+            </td>
+            <td class="px-5 py-4">${roleBadge}</td>
+            <td class="px-5 py-4">${presenceBadge}</td>
+            <td class="px-5 py-4">${directCallBadge}${widgetBadge}</td>
+            <td class="px-5 py-4 font-mono text-gray-400 text-[11px]" title="${h.uuid}">${h.uuid.substring(0, 10)}...</td>
+            <td class="px-5 py-4 text-right whitespace-nowrap">${makeAdminBtn}${deleteBtn}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderClientsTable(clients) {
+      const tbody = document.getElementById('clients-table-body');
+      if (!clients || clients.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="px-5 py-8 text-center text-gray-500">No client pairings registered yet.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = clients.map(c => {
+        let typeBadge = `<span class="bg-gray-800 text-gray-300 text-[10px] px-2 py-0.5 rounded font-mono">${c.client_type || 'WEB'}</span>`;
+        if (c.client_type === 'CLI') {
+          typeBadge = `<span class="bg-purple-950 text-purple-400 border border-purple-800/40 text-[10px] px-2 py-0.5 rounded font-mono">CLI AGENT</span>`;
+        } else if (c.client_type === 'EMBED') {
+          typeBadge = `<span class="bg-indigo-950 text-indigo-400 border border-indigo-800/40 text-[10px] px-2 py-0.5 rounded font-mono">EMBED WIDGET</span>`;
+        }
+
+        const isApproved = c.status === 'APPROVED';
+        const statusBadge = isApproved
+          ? `<span class="text-emerald-400 font-medium text-[11px]">Approved</span>`
+          : `<span class="text-amber-400 font-medium text-[11px]">Pending Approval</span>`;
+
+        const presence = c.is_online
+          ? `<span class="text-emerald-400 font-medium">Online</span>`
+          : `<span class="text-gray-500">Offline</span>`;
+
+        const deleteBtn = `<button onclick="deleteClient('${c.uuid}', '${escapeHtml(c.name)}')" class="text-xs bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-600/40 px-2.5 py-1 rounded-lg transition">🗑️ Revoke</button>`;
+
+        return `
+          <tr class="hover:bg-gray-800/30 transition">
+            <td class="px-5 py-4 font-medium text-white">${escapeHtml(c.name || 'Visitor')}</td>
+            <td class="px-5 py-4">${typeBadge}</td>
+            <td class="px-5 py-4">${statusBadge}</td>
+            <td class="px-5 py-4 text-[11px]">${presence}</td>
+            <td class="px-5 py-4 font-mono text-gray-400 text-[11px]" title="${c.uuid}">${c.uuid.substring(0, 10)}...</td>
+            <td class="px-5 py-4 text-right">${deleteBtn}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderInvitesTable(invites) {
+      const tbody = document.getElementById('invites-table-body');
+      if (!invites || invites.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="px-5 py-8 text-center text-gray-500">No active invites. Click "+ Generate Invite" to create one.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = invites.map(inv => {
+        const isUsed = inv.used === 1;
+        const statusBadge = isUsed
+          ? `<span class="text-gray-500 text-[10px] bg-gray-800 px-2 py-0.5 rounded">Used</span>`
+          : `<span class="text-emerald-400 text-[10px] bg-emerald-950 border border-emerald-800/40 px-2 py-0.5 rounded">Active</span>`;
+
+        const dateStr = inv.created_at ? new Date(inv.created_at).toLocaleString() : 'N/A';
+        const inviteUrl = `${window.location.origin}/invite/${inv.code}`;
+
+        const copyBtn = !isUsed
+          ? `<button onclick="copyInvite('${inviteUrl}')" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2.5 py-1 rounded-lg mr-2 transition">📋 Copy</button>`
+          : '';
+        const deleteBtn = `<button onclick="deleteInvite('${inv.code}')" class="text-xs bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-600/40 px-2.5 py-1 rounded-lg transition">🗑️</button>`;
+
+        return `
+          <tr class="hover:bg-gray-800/30 transition">
+            <td class="px-5 py-4 font-mono text-cyan-300 font-bold">${escapeHtml(inv.code)}</td>
+            <td class="px-5 py-4 text-white">${escapeHtml(inv.name || 'General Invite')}</td>
+            <td class="px-5 py-4">${statusBadge}</td>
+            <td class="px-5 py-4 text-gray-400 text-[11px]">${dateStr}</td>
+            <td class="px-5 py-4 text-right">${copyBtn}${deleteBtn}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    // Switch Admin Rights
+    window.switchAdmin = async function(hostUuid, hostName) {
+      if (!confirm(`Are you sure you want to transfer primary Administrator rights to "${hostName}"?`)) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/admin/hosts/switch-admin', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${adminToken}`,
+            'X-Admin-Token': adminToken
+          },
+          body: JSON.stringify({ host_uuid: hostUuid })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          alert(`Primary Admin rights successfully transferred to ${hostName}.`);
+          loadOverview();
+        } else {
+          alert(data.error || 'Failed to switch administrator rights.');
+        }
+      } catch (err) {
+        alert('Network error while switching administrator rights.');
+      }
+    };
+
+    // Delete Host
+    window.deleteHost = async function(hostUuid, hostName) {
+      if (!confirm(`Are you sure you want to permanently delete mobile app "${hostName}"?\nThis will disconnect the device from this server.`)) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/admin/hosts/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${adminToken}`,
+            'X-Admin-Token': adminToken
+          },
+          body: JSON.stringify({ host_uuid: hostUuid })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          loadOverview();
+        } else {
+          alert(data.error || 'Failed to delete mobile app.');
+        }
+      } catch (err) {
+        alert('Network error while deleting host.');
+      }
+    };
+
+    // Delete Client
+    window.deleteClient = async function(clientUuid, clientName) {
+      if (!confirm(`Are you sure you want to revoke and delete client "${clientName}"?`)) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/admin/clients/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${adminToken}`,
+            'X-Admin-Token': adminToken
+          },
+          body: JSON.stringify({ client_uuid: clientUuid })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          loadOverview();
+        } else {
+          alert(data.error || 'Failed to delete client.');
+        }
+      } catch (err) {
+        alert('Network error while deleting client.');
+      }
+    };
+
+    // Save Settings
+    document.getElementById('settings-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const statusMsg = document.getElementById('settings-status-msg');
+      statusMsg.className = 'text-xs text-gray-400';
+      statusMsg.textContent = 'Saving...';
+
+      const sName = document.getElementById('cfg-server-name').value.trim();
+      const fPath = document.getElementById('cfg-files-path').value.trim();
+      const bPath = document.getElementById('cfg-backups-path').value.trim();
+      const newPwd = document.getElementById('cfg-new-password').value.trim();
+
+      try {
+        const payload = {
+          server_name: sName,
+          files_storage_path: fPath,
+          backups_storage_path: bPath
+        };
+        if (newPwd) {
+          payload.new_admin_password = newPwd;
+        }
+
+        const res = await fetch('/api/admin/config', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${adminToken}`,
+            'X-Admin-Token': adminToken
+          },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          statusMsg.className = 'text-xs text-emerald-400';
+          statusMsg.textContent = 'Configuration saved successfully!';
+          if (newPwd) {
+            document.getElementById('cfg-new-password').value = '';
+          }
+          setTimeout(() => { statusMsg.textContent = ''; }, 3000);
+          loadOverview();
+        } else {
+          statusMsg.className = 'text-xs text-red-400';
+          statusMsg.textContent = data.error || 'Failed to save configuration.';
+        }
+      } catch (err) {
+        statusMsg.className = 'text-xs text-red-400';
+        statusMsg.textContent = 'Network error while saving settings.';
+      }
+    });
+
+    // Create Invite
+    document.getElementById('btn-create-invite').addEventListener('click', async () => {
+      const nameInput = document.getElementById('new-invite-name');
+      const name = nameInput.value.trim() || 'Admin Invite';
+      try {
+        const res = await fetch('/api/admin/invites/create', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${adminToken}`,
+            'X-Admin-Token': adminToken
+          },
+          body: JSON.stringify({ name: name })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          nameInput.value = '';
+          loadOverview();
+        } else {
+          alert(data.error || 'Failed to create invite.');
+        }
+      } catch (err) {
+        alert('Network error while creating invite.');
+      }
+    });
+
+    // Delete Invite
+    window.deleteInvite = async function(code) {
+      if (!confirm(`Delete invite code "${code}"?`)) return;
+      try {
+        const res = await fetch('/api/admin/invites/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${adminToken}`,
+            'X-Admin-Token': adminToken
+          },
+          body: JSON.stringify({ code: code })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          loadOverview();
+        }
+      } catch (err) {}
+    };
+
+    window.copyInvite = function(url) {
+      navigator.clipboard.writeText(url).then(() => {
+        alert('Invite link copied to clipboard!\n' + url);
+      }).catch(() => {
+        prompt('Copy invite link:', url);
+      });
+    };
+
+    // Refresh Buttons
+    document.getElementById('btn-refresh-hosts').addEventListener('click', loadOverview);
+    document.getElementById('btn-refresh-clients').addEventListener('click', loadOverview);
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+  </script>
+</body>
+</html>

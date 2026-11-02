@@ -36,10 +36,12 @@ Whether you want a hassle-free personal communication system for external visito
 - **Multi-Server Mobile Client**: Support for connecting a single mobile application to multiple home servers simultaneously, featuring independent controls to connect, disconnect, or mute specific servers (e.g. managing family, work, and community servers in one app).
 - **Web Client UI**: Responsive fluid layout with auto-expanding video on active calls, interactive header status indicator with connectivity modal, and mobile-optimized columnar view.
 - **Embeddable Web Client Widget**: Single `<script src="http://<server-ip>:3000/widget.js"></script>` drop-in widget for personal websites with multi-device session tabs, radio-button mobile device selection, custom visitor usernames, real-time messaging, two-way WebRTC audio/video calling, and transparent host approval.
+- **Model Context Protocol (MCP) Server**: Zero-dependency Python-native MCP server (`whisker/mcp.py` / `whisker mcp` / `whisker-mcp`) communicating over JSON-RPC 2.0 stdio, exposing 9 tools, 3 resources, and prompt templates for Claude Desktop, Cursor, and AI agents. Accompanied by a dedicated [`skills.md`](skills.md) guide.
+- **Web Admin Console & Management Portal (`/admin`)**: Built-in administrative dashboard with password protection (`--admin-password`), real-time device health metrics, mobile app administration (with the ability to transfer primary Administrator rights between registered mobile devices or remove them), client pairing revocation, and configurable storage paths for Files and Backup features.
+- **Ultra-Compact Docker Container & Microsoft WSL Containers Compatibility**: Minimalist OCI container (~50MB base) running on `python:3.11-alpine` with persistent `/data` volume support, OpenSSL FCM cryptographic signing, PID 1 `exec` signal handling, and full compatibility with Microsoft WSL Containers, Docker Desktop, Podman, and Cloud Run / ECS.
 - **Push Notifications**: FCM HTTP v1 push notification tickle integration complete with low-power battery optimization.
 
 ### In Development & Future Roadmap
-- **Model Context Protocol (MCP) Server**: Python-native MCP server extending the Whisker client core with zero external dependencies, exposing tools and resources for AI agent platforms (e.g., Claude Desktop, Cursor) to automate messaging, initiate calls, and inspect event queues.
 - **File & Media Transfer**: Secure attachment and file transfer directly between web visitors/mobile clients and the home server.
 - **Automated Background Photo Backup**: Scheduled automatic background synchronization of camera roll photos and media folders to home server storage.
 - **iOS Mobile Application**: Native iOS client app built with Swift / SwiftUI, featuring WebRTC P2P calling, background APNs (Apple Push Notification service) push tickle support, and call notification alerts.
@@ -51,7 +53,7 @@ Whether you want a hassle-free personal communication system for external visito
 Whisker consists of three primary components:
 
 1. **Android Mobile App**: The primary mobile interface, WebRTC calling endpoint, and notification center for the host.
-2. **Home Server & CLI (`whisker`)**: A unified Python package (`whisker/server.py`, `whisker/cli.py`, `whisker/fcm.py`) that runs the Home Server (backed by SQLite, event queue, WebRTC signaling, FCM push tickles) and CLI client engine.
+2. **Home Server & CLI (`whisker`)**: A unified Python package (`whisker/server.py`, `whisker/cli.py`, `whisker/fcm.py`) that runs the Home Server (backed by SQLite, event queue, WebRTC signaling, FCM push tickles, and the `/admin` console) and CLI client engine.
 3. **Web Visitor Client (`whisker/index.html`)**: An embedded web application served directly by the Home Server allowing instant visitor access, messaging, and audio/video calling without account registration.
 
 > For the full protocol spec, API schema, and security details, see [requirements.md](requirements.md).
@@ -64,17 +66,19 @@ Whisker consists of three primary components:
 
 Before launching, complete the [FCM Push Setup](#fcm-push-setup-whisker-setup-fcm) at the bottom of this document to enable push notifications.
 
-Install the package via `pip` or run directly with Python 3. The `--name` parameter is **obligatory** and determines the Home Server's display name and dedicated database file (`whisker_server_<name>.db`):
+#### Option A: Run Directly with Python
+
+Install the package via `pip` or run directly with Python 3. The `--name` parameter is **obligatory**. You can optionally specify `--admin-password` to secure the Web Admin Console:
 
 ```bash
 pip install .
-whisker server --name "Home Base"
+whisker server --name "Home Base" --admin-password "secret123"
 ```
 
 Or run directly without installation:
 
 ```bash
-python3 -m whisker server --name "Home Base"
+python3 -m whisker server --name "Home Base" --admin-password "secret123"
 ```
 
 To run multiple servers from the same directory without database clashes, specify different names and ports:
@@ -87,11 +91,64 @@ whisker server --name "Home Base" --port 3000
 whisker server --name "Work Office" --port 3001
 ```
 
-### 2. Connect the Android Mobile App
+#### Option B: Run with Ultra-Compact Alpine Docker Container (~50MB / Microsoft WSL Containers)
+
+The official container is fully OCI-compliant and runs out-of-the-box on Docker, Podman, and **Microsoft WSL Containers**. You can launch it using either **Docker Compose** or direct **Docker** commands:
+
+##### 1. One-Command Launch with Docker Compose (Recommended)
+```bash
+docker compose up -d
+```
+
+##### 2. Direct Docker Build & Run
+Whisker provides both `Dockerfile` and `Dockerfile.server` (as well as the `docker/` folder) to guarantee complete portability even on build systems or ZIP exporters that omit extensionless files:
+
+```bash
+# Build the ultra-compact Alpine image (using Dockerfile or Dockerfile.server):
+docker build -t whisker-server .
+# Or explicitly:
+docker build -f Dockerfile.server -t whisker-server .
+
+# Run container with persistent data volume and admin credentials:
+docker run -d \
+  --name whisker \
+  -p 3000:3000 \
+  -v whisker_data:/data \
+  -e SERVER_NAME="Home Base" \
+  -e ADMIN_PASSWORD="secret123" \
+  whisker-server
+```
+
+### 2. Access the Web Admin Console
+
+Navigate to **`http://localhost:3000/admin`** in your browser:
+- Log in with your `--admin-password` (or the default password displayed on server startup).
+- Monitor connected mobile apps and connected clients.
+- Switch primary Administrator rights between registered mobile devices or remove old devices.
+- Configure storage paths for upcoming Files (`/data/files`) and Backup (`/data/backups`) features.
+
+### 3. Connect the Android Mobile App
 
 1. Open the **Whisker** app on Android.
 2. Open **Settings** and enter your **Home Server Address** (e.g. `http://<your-server-ip>:3000`).
 3. Copy the **Home Server Access Key** and **FCM Push Token** displayed in Settings to pair the app with your server.
+
+### 4. Connect AI Agents via Model Context Protocol (MCP) Server
+
+To let Claude Desktop, Cursor, OpenClaw, or custom AI agents interact with your Home Server and mobile device:
+
+```bash
+# Launch the MCP server on stdio:
+whisker mcp
+
+# Or using the dedicated binary:
+whisker-mcp
+
+# Or directly with Python:
+python3 -m whisker.mcp
+```
+
+For complete Claude Desktop / Cursor configuration snippets, available tools, and agent workflows, see the **[skills.md](skills.md)** guide.
 
 ---
 

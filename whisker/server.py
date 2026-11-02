@@ -210,6 +210,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
     active_calls = {}  # call_id -> {call_id, host_uuid, client_uuid, caller_name, status, created_at, updated_at, is_direct, video, initiator}
     streams_lock = threading.RLock()
     calls_lock = threading.RLock()
+    admin_tokens = {}  # token -> expiration timestamp
+    admin_password = None
 
     @classmethod
     def _prune_stale_calls(cls):
@@ -336,7 +338,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
 
     def _send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Push-Token')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Push-Token, X-Admin-Token')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
 
     def do_OPTIONS(self):
@@ -503,11 +505,95 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                     pass
         return "<h1>Whisker Home Server</h1><p>index.html not found.</p>"
 
+    def _get_admin_html(self):
+        possible_paths = [
+            os.path.join(os.path.dirname(__file__), 'admin.html'),
+            os.path.join(os.path.dirname(__file__), '..', 'admin.html'),
+            'admin.html'
+        ]
+        for p in possible_paths:
+            if os.path.isfile(p):
+                try:
+                    with open(p, 'r', encoding='utf-8') as f:
+                        return f.read()
+                except Exception:
+                    pass
+        return "<h1>Whisker Home Server Admin</h1><p>admin.html not found.</p>"
+
+    def _is_admin_authenticated(self, qs=None):
+        auth_hdr = self.headers.get('Authorization', '')
+        token = None
+        if auth_hdr.startswith('Bearer '):
+            token = auth_hdr[7:].strip()
+        if not token:
+            token = self.headers.get('X-Admin-Token', '').strip()
+        if not token and qs and 'token' in qs:
+            token = qs['token'][0].strip()
+        if not token:
+            cookies = self.headers.get('Cookie', '')
+            for part in cookies.split(';'):
+                if '=' in part:
+                    k, v = part.strip().split('=', 1)
+                    if k == 'whisker_admin_token':
+                        token = v.strip()
+                        break
+        if not token:
+            return False
+
+        now = time.time()
+        with WhiskerServerHandler.streams_lock:
+            for t, exp in list(WhiskerServerHandler.admin_tokens.items()):
+                if exp < now:
+                    WhiskerServerHandler.admin_tokens.pop(t, None)
+            return token in WhiskerServerHandler.admin_tokens
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         clean_parts = [p for p in parsed.path.split('/') if p]
         path = '/' + '/'.join(clean_parts)
         qs = urllib.parse.parse_qs(parsed.query)
+
+        # Admin Webpage
+        if path in ['/admin', '/admin.html']:
+            return self._send_html(self._get_admin_html())
+
+        # Admin Overview API
+        if path == '/api/admin/overview':
+            if not self._is_admin_authenticated(qs):
+                return self._send_json({"error": "Unauthorized"}, 401)
+
+            s_name = self.db.get_setting('server_name') or getattr(WhiskerServerHandler, 'server_name', 'Whisker Home Server')
+            files_path = self.db.get_setting('files_storage_path') or '/data/files'
+            backups_path = self.db.get_setting('backups_storage_path') or '/data/backups'
+
+            hosts = self.db.get_hosts()
+            with WhiskerServerHandler.streams_lock:
+                for h in hosts:
+                    h_streams = WhiskerServerHandler.host_streams.get(h['uuid'], set())
+                    h['is_online'] = len(h_streams) > 0
+
+            clients = self.db.get_clients()
+            invites = self.db.get_invites()
+            sa = get_service_account_file()
+            port = self.server.server_port if hasattr(self, 'server') and hasattr(self.server, 'server_port') else 3000
+
+            return self._send_json({
+                "server": {
+                    "name": s_name,
+                    "port": port,
+                    "url": self._get_server_url(),
+                    "initialized": self._is_initialized()
+                },
+                "settings": {
+                    "server_name": s_name,
+                    "files_storage_path": files_path,
+                    "backups_storage_path": backups_path
+                },
+                "hosts": hosts,
+                "clients": clients,
+                "invites": invites,
+                "fcm_configured": bool(sa)
+            })
 
         # GET /api/init-status
         if path == '/api/init-status':
@@ -1034,6 +1120,87 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         clean_parts = [p for p in parsed.path.split('/') if p]
         path = '/' + '/'.join(clean_parts)
         body = self._read_json_body()
+
+        # Admin POST Endpoints
+        if path == '/api/admin/login':
+            pwd = (body.get('password') or '').strip()
+            stored_pw = self.db.get_setting('admin_password') or getattr(WhiskerServerHandler, 'admin_password', None) or 'admin'
+            if pwd and pwd == stored_pw:
+                import uuid as uuid_lib
+                token = f"adm_{int(time.time())}_{uuid_lib.uuid4().hex[:16]}"
+                with WhiskerServerHandler.streams_lock:
+                    WhiskerServerHandler.admin_tokens[token] = time.time() + 86400  # 24h
+                return self._send_json({"success": True, "token": token})
+            return self._send_json({"error": "Invalid administrator password"}, 401)
+
+        if path == '/api/admin/config':
+            if not self._is_admin_authenticated():
+                return self._send_json({"error": "Unauthorized"}, 401)
+            s_name = (body.get('server_name') or '').strip()
+            if s_name:
+                self.db.set_setting('server_name', s_name)
+                WhiskerServerHandler.server_name = s_name
+            f_path = (body.get('files_storage_path') or '').strip()
+            if f_path:
+                self.db.set_setting('files_storage_path', f_path)
+            b_path = (body.get('backups_storage_path') or '').strip()
+            if b_path:
+                self.db.set_setting('backups_storage_path', b_path)
+            new_pwd = (body.get('new_admin_password') or '').strip()
+            if new_pwd:
+                self.db.set_setting('admin_password', new_pwd)
+                WhiskerServerHandler.admin_password = new_pwd
+            return self._send_json({"success": True})
+
+        if path == '/api/admin/hosts/switch-admin':
+            if not self._is_admin_authenticated():
+                return self._send_json({"error": "Unauthorized"}, 401)
+            host_uuid = (body.get('host_uuid') or '').strip()
+            if not host_uuid:
+                return self._send_json({"error": "host_uuid is required"}, 400)
+            success = self.db.transfer_admin(host_uuid)
+            return self._send_json({"success": bool(success), "new_admin_uuid": host_uuid})
+
+        if path == '/api/admin/hosts/delete':
+            if not self._is_admin_authenticated():
+                return self._send_json({"error": "Unauthorized"}, 401)
+            host_uuid = (body.get('host_uuid') or '').strip()
+            if not host_uuid:
+                return self._send_json({"error": "host_uuid is required"}, 400)
+            self.db.delete_host(host_uuid)
+            return self._send_json({"success": True})
+
+        if path == '/api/admin/clients/delete':
+            if not self._is_admin_authenticated():
+                return self._send_json({"error": "Unauthorized"}, 401)
+            client_uuid = (body.get('client_uuid') or '').strip()
+            if not client_uuid:
+                return self._send_json({"error": "client_uuid is required"}, 400)
+            self.db.delete_client_completely(client_uuid)
+            return self._send_json({"success": True})
+
+        if path == '/api/admin/invites/create':
+            if not self._is_admin_authenticated():
+                return self._send_json({"error": "Unauthorized"}, 401)
+            name = (body.get('name') or 'Admin Invite').strip()
+            import random, string
+            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+            admin_host = self.db.get_admin_host()
+            host_uuid = admin_host['uuid'] if admin_host else None
+            self.db.add_invite(code, name, host_uuid)
+            return self._send_json({
+                "success": True,
+                "code": code,
+                "url": f"{self._get_server_url()}/invite/{code}"
+            })
+
+        if path == '/api/admin/invites/delete':
+            if not self._is_admin_authenticated():
+                return self._send_json({"error": "Unauthorized"}, 401)
+            code = (body.get('code') or '').strip()
+            if code:
+                self.db.delete_invite(code)
+            return self._send_json({"success": True})
 
         # Service account JSON upload for remote home servers
         if path in ['/api/upload_service_account', '/api/upload_sa']:
@@ -2224,7 +2391,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 for d in dead_streams:
                     streams.discard(d)
 
-def run_server(port=3000, db_path=None, server_name=None):
+def run_server(port=3000, db_path=None, server_name=None, admin_password=None):
     if not server_name or not str(server_name).strip():
         print("Error: Server name is required to run Whisker Server.")
         print("Specify via '--name <server_name>' (e.g. 'whisker server --name home') or SERVER_NAME environment variable.")
@@ -2242,6 +2409,22 @@ def run_server(port=3000, db_path=None, server_name=None):
     WhiskerServerHandler.db = db
     WhiskerServerHandler.fcm = fcm
 
+    # Admin Password Initialization
+    effective_admin_pwd = (admin_password or '').strip() or os.environ.get('ADMIN_PASSWORD', '').strip()
+    if effective_admin_pwd:
+        db.set_setting('admin_password', effective_admin_pwd)
+        WhiskerServerHandler.admin_password = effective_admin_pwd
+    else:
+        existing_pwd = db.get_setting('admin_password')
+        if not existing_pwd:
+            default_pwd = 'admin'
+            db.set_setting('admin_password', default_pwd)
+            WhiskerServerHandler.admin_password = default_pwd
+        else:
+            WhiskerServerHandler.admin_password = existing_pwd
+
+    current_admin_pwd = db.get_setting('admin_password') or 'admin'
+
     server_address = ('', port)
     httpd = ThreadedHTTPServer(server_address, WhiskerServerHandler)
 
@@ -2256,6 +2439,8 @@ def run_server(port=3000, db_path=None, server_name=None):
     print(f"   - FCM Service Account:  {sa_status}")
     print("------------------------------------------------------------------")
     print(f"   - Landing Web Portal:   http://localhost:{port}")
+    print(f"   - Admin Console:        http://localhost:{port}/admin")
+    print(f"   - Admin Password:       {current_admin_pwd}")
     print(f"   - Mobile App URL:       http://localhost:{port}")
     print("==================================================================")
 

@@ -303,3 +303,22 @@ To ensure robust call state transitions and prevent desynchronized call states (
    - Outbound signaling helpers (`publishOutgoingSdpOffer`, `publishSdpAnswer`, `publishIceCandidate`, `declineOrEndCall`) attach `call_id` / `callId` to all outgoing payloads.
    - `WebRtcCallContainer` WebView JS bridge filters incoming signals by `callId` and propagates `callId` back to native Android networking handlers.
 
+---
+
+## 11. Model Context Protocol (MCP) Server & Container Deployment
+
+### 11.1 Model Context Protocol (MCP) Server Specification (`whisker/mcp.py`)
+- **Transport**: JSON-RPC 2.0 stdio (newline-delimited JSON). Standard output is reserved strictly for JSON-RPC messages; all debug and runtime logging is routed to standard error (`stderr`).
+- **Zero-Dependency Core**: Implemented purely using the Python standard library, ensuring compatibility across all Python 3.8+ environments without external package dependencies.
+- **Capabilities**:
+  - `tools`: 9 tools (`whisker_list_clients`, `whisker_init`, `whisker_info`, `whisker_send_message`, `whisker_get_messages`, `whisker_poll_events`, `whisker_initiate_call`, `whisker_remove_client`, `whisker_server_status`).
+  - `resources`: 3 read-only URIs (`whisker://clients`, `whisker://status`, `whisker://messages`).
+  - `prompts`: Pre-configured prompt templates (`send_alert`, `check_status`).
+- **Database Resolution**: Conforms to the standard single-database automatic resolution and explicit disambiguation (`-u username`, `-s server_name`) rules of the Whisker CLI.
+- **Client Configuration Guide**: Full documentation and integration recipes for Claude Desktop, Cursor, OpenClaw, and LLM harnesses maintained in `skills.md`.
+
+### 11.2 Lightweight Alpine Docker Container Specification
+- **Base Image**: `python:3.11-alpine` for minimal container footprint (~50MB total).
+- **Security & Dependencies**: Installs `openssl` for FCM RSA-SHA256 token signing and `ca-certificates`.
+- **Persistent Storage**: Dedicated `/data` mount point designated as a container `VOLUME` for SQLite databases (`whisker_server.db`) and user data.
+- **Environment Configuration**: Supports dynamic configuration via `SERVER_NAME`, `PORT`, and `DB_FILE` environment variables.

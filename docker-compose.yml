@@ -1,0 +1,21 @@
+services:
+  whisker-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: whisker-server:latest
+    container_name: whisker-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - SERVER_NAME=Home Base
+      - PORT=3000
+      - DB_FILE=/data/whisker_server.db
+      - ADMIN_PASSWORD=admin
+    volumes:
+      - whisker-data:/data
+
+volumes:
+  whisker-data:
+    driver: local

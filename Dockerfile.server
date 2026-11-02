@@ -1,0 +1,30 @@
+# Ultra-compact, OCI-compliant container for Whisker Home Server
+# Fully compatible with Docker, Podman, Kubernetes, Cloud Run, and Microsoft WSL Containers
+FROM python:3.11-alpine
+
+# Install OpenSSL for FCM RSA-SHA256 token signing and ca-certificates
+RUN apk add --no-cache openssl ca-certificates
+
+WORKDIR /app
+
+# Copy application package and assets
+COPY setup.py pyproject.toml README.md ./
+COPY whisker/ ./whisker/
+
+# Create persistent storage directories for SQLite database, media files, and backups
+RUN mkdir -p /data/files /data/backups
+
+# Default runtime configuration
+ENV PYTHONUNBUFFERED=1 \
+    SERVER_NAME="Home Base" \
+    PORT=3000 \
+    DB_FILE="/data/whisker_server.db" \
+    ADMIN_PASSWORD="admin"
+
+# Expose port (binds to 0.0.0.0 for WSL container & Docker bridge networking)
+EXPOSE 3000
+
+VOLUME ["/data"]
+
+# Launch Whisker Home Server with exec to ensure SIGTERM signals pass directly to Python
+CMD ["sh", "-c", "exec python3 -m whisker server --name \"${SERVER_NAME}\" --port \"${PORT}\" --db \"${DB_FILE}\" --admin-password \"${ADMIN_PASSWORD}\""]

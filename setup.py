@@ -18,6 +18,7 @@ setup(
     entry_points={
         "console_scripts": [
             "whisker=whisker.cli:main",
+            "whisker-mcp=whisker.mcp:run_mcp_server",
         ],
     },
 )
