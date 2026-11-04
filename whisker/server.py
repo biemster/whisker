@@ -20,6 +20,44 @@ def sanitize_name(name: str) -> str:
     clean = re.sub(r'_+', '_', clean).strip('_')
     return clean or 'default'
 
+def sanitize_filename(filename: str) -> str:
+    if not filename:
+        return f"file_{int(time.time())}.bin"
+    base = os.path.basename(str(filename).replace('\\', '/')).strip()
+    if not base:
+        return f"file_{int(time.time())}.bin"
+    name, ext = os.path.splitext(base)
+    clean_name = re.sub(r'[^\w\-\.]', '_', name)
+    clean_name = re.sub(r'_+', '_', clean_name).strip('_')
+    if not clean_name:
+        clean_name = "file"
+    clean_ext = re.sub(r'[^\w\-\.]', '', ext)
+    return f"{clean_name}{clean_ext}"
+
+def save_uploaded_file(db, receiver_username, sender_username, original_filename, file_bytes):
+    storage_root = (db.get_setting('files_storage_path') if db else None) or getattr(WhiskerServerHandler, 'files_storage_path', None) or '/data/files'
+    if not os.path.isabs(storage_root) or not os.path.exists(storage_root):
+        try:
+            os.makedirs(storage_root, exist_ok=True)
+        except Exception:
+            storage_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'files'))
+            os.makedirs(storage_root, exist_ok=True)
+
+    rec_user = sanitize_name(receiver_username)
+    snd_user = sanitize_name(sender_username)
+    now_folder = time.strftime('%Y%m%d.%H%M%S')
+    safe_filename = sanitize_filename(original_filename)
+
+    target_dir = os.path.join(storage_root, rec_user, snd_user, now_folder)
+    os.makedirs(target_dir, exist_ok=True)
+
+    full_path = os.path.join(target_dir, safe_filename)
+    with open(full_path, 'wb') as f:
+        f.write(file_bytes)
+
+    rel_path = f"{rec_user}/{snd_user}/{now_folder}/{safe_filename}"
+    return full_path, rel_path, safe_filename, len(file_bytes)
+
 def get_waiting_html():
     return """<!DOCTYPE html>
 <html lang="en">
@@ -338,7 +376,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
 
     def _send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Push-Token, X-Admin-Token')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Push-Token, X-Admin-Token, X-Filename, X-Receiver, X-Client-Uuid, X-Client-Token')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
 
     def do_OPTIONS(self):
@@ -346,10 +384,19 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
 
-    def _read_json_body(self):
+    def _read_raw_body(self):
+        if hasattr(self, '_cached_raw_body') and self._cached_raw_body is not None:
+            return self._cached_raw_body
         content_len = int(self.headers.get('Content-Length', 0))
         if content_len > 0:
-            body_bytes = self.rfile.read(content_len)
+            self._cached_raw_body = self.rfile.read(content_len)
+        else:
+            self._cached_raw_body = b''
+        return self._cached_raw_body
+
+    def _read_json_body(self):
+        body_bytes = self._read_raw_body()
+        if body_bytes:
             try:
                 return json.loads(body_bytes.decode('utf-8'))
             except Exception:
@@ -564,7 +611,6 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
 
             s_name = self.db.get_setting('server_name') or getattr(WhiskerServerHandler, 'server_name', 'Whisker Home Server')
             files_path = self.db.get_setting('files_storage_path') or '/data/files'
-            backups_path = self.db.get_setting('backups_storage_path') or '/data/backups'
 
             hosts = self.db.get_hosts()
             with WhiskerServerHandler.streams_lock:
@@ -586,8 +632,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 },
                 "settings": {
                     "server_name": s_name,
-                    "files_storage_path": files_path,
-                    "backups_storage_path": backups_path
+                    "files_storage_path": files_path
                 },
                 "hosts": hosts,
                 "clients": clients,
@@ -1015,6 +1060,76 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 "previousMessageId": msg['previous_message_id']
             })
 
+        if path in ['/api/file/download', '/api/file'] or path.startswith('/data/') or path.startswith('/files/') or 'sent_files' in path:
+            rel_file = qs.get('path', [''])[0] or qs.get('file', [''])[0] or path
+            if not rel_file:
+                return self._send_json({"error": "Missing file path"}, 400)
+            
+            clean_rel = os.path.normpath(urllib.parse.unquote(rel_file)).lstrip('/')
+            if clean_rel.startswith('..') or '..' in clean_rel.split(os.sep):
+                return self._send_json({"error": "Invalid file path"}, 403)
+
+            storage_root = self.db.get_setting('files_storage_path') or getattr(WhiskerServerHandler, 'files_storage_path', None) or '/data/files'
+            candidate_roots = [
+                storage_root,
+                os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'files')),
+                '/data/files',
+                './data/files'
+            ]
+            full_path = None
+            for root in candidate_roots:
+                if root:
+                    p = os.path.join(root, clean_rel)
+                    if os.path.isfile(p):
+                        full_path = p
+                        break
+
+            # Fallback search if exact path not found: search by basename or stripped-timestamp basename in storage_root
+            if not full_path or not os.path.isfile(full_path):
+                target_base = os.path.basename(clean_rel)
+                target_sanitized = sanitize_filename(target_base)
+                stripped_base = re.sub(r'^\d+_', '', target_base)
+                stripped_sanitized = sanitize_filename(stripped_base)
+                search_targets = {target_base, target_sanitized, stripped_base, stripped_sanitized}
+
+                for root in candidate_roots:
+                    if root and os.path.isdir(root):
+                        for dirpath, _, filenames in os.walk(root):
+                            for fn in filenames:
+                                fn_clean = sanitize_filename(fn)
+                                fn_stripped = sanitize_filename(re.sub(r'^\d+_', '', fn))
+                                if fn in search_targets or fn_clean in search_targets or fn_stripped in search_targets:
+                                    full_path = os.path.join(dirpath, fn)
+                                    break
+                            if full_path:
+                                break
+                    if full_path:
+                        break
+
+            if not full_path or not os.path.isfile(full_path):
+                return self._send_json({"error": "File not found"}, 404)
+
+            import mimetypes
+            ctype, _ = mimetypes.guess_type(full_path)
+            if not ctype:
+                ctype = 'application/octet-stream'
+
+            fname = qs.get('name', [''])[0] or os.path.basename(full_path)
+            try:
+                with open(full_path, 'rb') as f:
+                    content = f.read()
+                self.send_response(200)
+                self._send_cors_headers()
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(content)))
+                disp = 'inline' if (ctype.startswith('image/') or ctype.startswith('text/') or ctype == 'application/pdf') else 'attachment'
+                self.send_header('Content-Disposition', f'{disp}; filename="{fname}"')
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            except Exception as e:
+                return self._send_json({"error": f"Error reading file: {e}"}, 500)
+
         if path == '/api/messages':
             uuid = qs.get('uuid', [''])[0]
             token = qs.get('token', [''])[0]
@@ -1143,9 +1258,6 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             f_path = (body.get('files_storage_path') or '').strip()
             if f_path:
                 self.db.set_setting('files_storage_path', f_path)
-            b_path = (body.get('backups_storage_path') or '').strip()
-            if b_path:
-                self.db.set_setting('backups_storage_path', b_path)
             new_pwd = (body.get('new_admin_password') or '').strip()
             if new_pwd:
                 self.db.set_setting('admin_password', new_pwd)
@@ -1772,12 +1884,35 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             elif resp_type in ['chat_message', 'message'] and (body.get('sender') == 'phone' or 'text' in body):
                 text = body.get('text', '')
                 file_path = body.get('filePath') or body.get('file')
+                if file_path and (file_path.startswith('data:') or (isinstance(file_path, str) and len(file_path) > 100 and not file_path.startswith('/api/file'))):
+                    try:
+                        import base64
+                        b64_content = file_path
+                        if ',' in b64_content:
+                            b64_content = b64_content.split(',', 1)[1]
+                        f_bytes = base64.b64decode(b64_content)
+                        orig_fname = body.get('filename') or body.get('fileName') or text or f"file_{int(time.time())}.bin"
+                        target_rec = target_host.get('username') if target_host else (client_req.get('name') if client_req else client_uuid)
+                        sender_snd = host.get('username') or 'Mobile App'
+                        _, rel_p, safe_fn, _ = save_uploaded_file(self.db, target_rec, sender_snd, orig_fname, f_bytes)
+                        print(f"📁 [Whisker Server File Upload] Sender: '{sender_snd}' -> Receiver: '{target_rec}' | File: '{safe_fn}' ({len(f_bytes)} bytes)")
+                        file_path = f"/api/file/download?path={urllib.parse.quote(rel_p)}&name={urllib.parse.quote(safe_fn)}"
+                        body['filePath'] = file_path
+                        body['file'] = file_path
+                        body['fileName'] = safe_fn
+                        body['filename'] = safe_fn
+                        if not text or text == orig_fname:
+                            text = safe_fn
+                    except Exception as e:
+                        print(f"Base64 auto-save error in /api/host/response: {e}")
                 if client_uuid and (text or file_path):
                     msg_id, prev_id = self.db.add_message(client_uuid, host_uuid, 'phone', text, file_path)
                     body['messageId'] = msg_id
                     body['id'] = msg_id
                     body['previousMessageId'] = prev_id
                     body['event'] = 'message'
+                    body['filePath'] = file_path
+                    body['file'] = file_path
                     body['uuid'] = host_uuid
                     body['clientUuid'] = host_uuid
                     body['name'] = host.get('username') or 'Mobile App'
@@ -2059,11 +2194,231 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 "servername": s_name
             })
 
+        if path == '/api/file/upload':
+            raw_body = self._read_raw_body()
+            content_type = self.headers.get('Content-Type', '')
+            qs = urllib.parse.parse_qs(parsed.query)
+
+            file_bytes = b''
+            filename = ''
+            receiver_str = ''
+            client_uuid = ''
+            client_token = ''
+            text_caption = ''
+
+            if 'multipart/form-data' in content_type:
+                import re
+                boundary_match = re.search(r'boundary=([^;]+)', content_type)
+                if boundary_match:
+                    boundary = boundary_match.group(1).strip().strip('"').encode('utf-8')
+                    parts = raw_body.split(b'--' + boundary)
+                    for part in parts:
+                        if not part or part == b'--\r\n' or part == b'--':
+                            continue
+                        headers_and_content = part.split(b'\r\n\r\n', 1)
+                        if len(headers_and_content) == 2:
+                            part_headers = headers_and_content[0].decode('utf-8', errors='ignore')
+                            part_data = headers_and_content[1].rstrip(b'\r\n')
+                            disp_match = re.search(r'name="([^"]+)"', part_headers)
+                            name_field = disp_match.group(1) if disp_match else ''
+                            fn_match = re.search(r'filename="([^"]+)"', part_headers)
+                            if fn_match:
+                                filename = fn_match.group(1)
+                                file_bytes = part_data
+                            elif name_field == 'file':
+                                file_bytes = part_data
+                            elif name_field in ['filename', 'fileName']:
+                                filename = part_data.decode('utf-8', errors='ignore')
+                            elif name_field in ['receiver', 'contact', 'receiver_uuid', 'target_host_uuid']:
+                                receiver_str = part_data.decode('utf-8', errors='ignore')
+                            elif name_field == 'uuid':
+                                client_uuid = part_data.decode('utf-8', errors='ignore')
+                            elif name_field == 'token':
+                                client_token = part_data.decode('utf-8', errors='ignore')
+                            elif name_field == 'text':
+                                text_caption = part_data.decode('utf-8', errors='ignore')
+            elif isinstance(body, dict) and body:
+                b64_content = body.get('content') or body.get('file') or body.get('data') or ''
+                filename = body.get('filename') or body.get('fileName') or body.get('name') or ''
+                receiver_str = body.get('receiver') or body.get('contact') or body.get('receiver_uuid') or body.get('host_uuid') or ''
+                client_uuid = body.get('uuid') or ''
+                client_token = body.get('token') or ''
+                text_caption = body.get('text') or ''
+
+                if b64_content:
+                    if ',' in b64_content:
+                        b64_content = b64_content.split(',', 1)[1]
+                    import base64
+                    try:
+                        file_bytes = base64.b64decode(b64_content)
+                    except Exception as e:
+                        return self._send_json({"error": f"Invalid base64 encoding: {e}"}, 400)
+            else:
+                file_bytes = raw_body
+                filename = self.headers.get('X-Filename') or qs.get('filename', [''])[0] or qs.get('name', [''])[0]
+                receiver_str = self.headers.get('X-Receiver') or qs.get('receiver', [''])[0] or qs.get('contact', [''])[0]
+                client_uuid = self.headers.get('X-Client-Uuid') or qs.get('uuid', [''])[0]
+                client_token = self.headers.get('X-Client-Token') or qs.get('token', [''])[0]
+                text_caption = qs.get('text', [''])[0]
+
+            if not file_bytes:
+                return self._send_json({"error": "No file content received"}, 400)
+
+            if not filename:
+                filename = f"upload_{int(time.time())}.bin"
+
+            auth_token = self._get_auth_token()
+            is_host_caller = False
+            host_caller = None
+            if auth_token:
+                for h in self.db.get_hosts():
+                    if h.get('pin_token') == auth_token:
+                        host_caller = h
+                        is_host_caller = True
+                        break
+
+            if not is_host_caller and not client_uuid:
+                client_uuid = qs.get('uuid', [''])[0]
+            if not is_host_caller and not client_token:
+                client_token = qs.get('token', [''])[0]
+
+            # Case 1: Caller is Host (mobile app or server admin)
+            if is_host_caller and host_caller:
+                sender_name = host_caller.get('username') or 'Mobile App'
+                sender_uuid = host_caller['uuid']
+
+                target_client = None
+                target_host = None
+                if receiver_str:
+                    target_host = self.db.get_host(receiver_str)
+                    target_client = self.db.get_request(receiver_str)
+                if not target_client and not target_host:
+                    approved_clients = self.db.get_approved_clients_for_host(sender_uuid)
+                    if approved_clients:
+                        target_client = approved_clients[0]
+                    else:
+                        all_c = self.db.get_clients()
+                        if all_c: target_client = all_c[0]
+
+                receiver_username = ''
+                receiver_uuid = ''
+                if target_host:
+                    receiver_username = target_host.get('username') or target_host['uuid']
+                    receiver_uuid = target_host['uuid']
+                elif target_client:
+                    receiver_username = target_client.get('name') or target_client['uuid']
+                    receiver_uuid = target_client['uuid']
+                else:
+                    receiver_username = receiver_str or 'receiver'
+                    receiver_uuid = receiver_str or 'unknown'
+
+                full_path, rel_path, safe_fname, f_size = save_uploaded_file(self.db, receiver_username, sender_name, filename, file_bytes)
+                print(f"📁 [Whisker Server File Upload] Sender: '{sender_name}' -> Receiver: '{receiver_username}' | File: '{safe_fname}' ({f_size} bytes)")
+                download_url = f"/api/file/download?path={urllib.parse.quote(rel_path)}&name={urllib.parse.quote(safe_fname)}"
+                msg_text = text_caption if text_caption else safe_fname
+                msg_id, prev_id = self.db.add_message(receiver_uuid, sender_uuid, 'phone', msg_text, download_url)
+                event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
+
+                payload = {
+                    "event": "message",
+                    "eventId": event_id,
+                    "messageId": msg_id,
+                    "previousMessageId": prev_id,
+                    "uuid": sender_uuid,
+                    "clientUuid": sender_uuid,
+                    "name": sender_name,
+                    "text": msg_text,
+                    "file": download_url,
+                    "filePath": download_url,
+                    "fileName": safe_fname,
+                    "fileSize": f_size,
+                    "timestamp": int(time.time() * 1000),
+                    "server_address": self._get_server_url()
+                }
+
+                if target_host:
+                    self.db.add_host_event(receiver_uuid, event_id, "message", payload)
+                    self._notify_host_streams(receiver_uuid, "message", payload)
+                    if target_host.get('push_token'):
+                        self._send_fcm_tickle(target_host['push_token'], event_id=event_id, event_type="message", username=target_host.get('username'))
+                else:
+                    self.db.add_guest_event(sender_uuid, event_id, receiver_uuid, "message", payload)
+                    self._notify_guest_streams(receiver_uuid, "message", payload)
+
+                return self._send_json({
+                    "success": True,
+                    "file_path": rel_path,
+                    "download_url": download_url,
+                    "url": download_url,
+                    "full_url": f"{self._get_server_url()}{download_url}",
+                    "filename": safe_fname,
+                    "size": f_size,
+                    "messageId": msg_id,
+                    "eventId": event_id,
+                    "receiver": receiver_username
+                })
+
+            # Case 2: Caller is Client / Guest (web, embed, or CLI)
+            if not self._authorize_guest(client_uuid, client_token):
+                return
+
+            req = self.db.get_request(client_uuid)
+            sender_name = req.get('name') if req else 'Guest'
+            target_host = self._resolve_target_host(client_uuid, receiver_str)
+            if not target_host:
+                return self._send_json({"error": "No reachable host found for this client"}, 403)
+
+            host_uuid = target_host['uuid']
+            receiver_username = target_host.get('username') or host_uuid
+            push_token = target_host.get('push_token')
+
+            full_path, rel_path, safe_fname, f_size = save_uploaded_file(self.db, receiver_username, sender_name, filename, file_bytes)
+            print(f"📁 [Whisker Server File Upload] Sender: '{sender_name}' -> Receiver: '{receiver_username}' | File: '{safe_fname}' ({f_size} bytes)")
+            download_url = f"/api/file/download?path={urllib.parse.quote(rel_path)}&name={urllib.parse.quote(safe_fname)}"
+            msg_text = text_caption if text_caption else safe_fname
+            msg_id, prev_id = self.db.add_message(client_uuid, host_uuid, 'guest', msg_text, download_url)
+            event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
+
+            payload = {
+                "event": "message",
+                "eventId": event_id,
+                "messageId": msg_id,
+                "previousMessageId": prev_id,
+                "uuid": client_uuid,
+                "token": client_token,
+                "text": msg_text,
+                "file": download_url,
+                "filePath": download_url,
+                "fileName": safe_fname,
+                "fileSize": f_size,
+                "name": sender_name,
+                "timestamp": int(time.time() * 1000),
+                "server_address": self._get_server_url()
+            }
+            self.db.add_host_event(host_uuid, event_id, "message", payload)
+            self._notify_host_streams(host_uuid, "message", payload)
+
+            if push_token:
+                self._send_fcm_tickle(push_token, event_id=event_id, event_type="message", username=target_host.get('username'))
+
+            return self._send_json({
+                "success": True,
+                "file_path": rel_path,
+                "download_url": download_url,
+                "url": download_url,
+                "full_url": f"{self._get_server_url()}{download_url}",
+                "filename": safe_fname,
+                "size": f_size,
+                "messageId": msg_id,
+                "eventId": event_id,
+                "receiver": receiver_username
+            })
+
         if path == '/api/message':
             uuid = body.get('uuid')
             token = body.get('token')
             text = body.get('text')
-            file_data = body.get('file')
+            file_data = body.get('file') or body.get('filePath')
 
             if not self._authorize_guest(uuid, token):
                 return
@@ -2078,6 +2433,26 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
 
             if not text and not file_data:
                 return self._send_json({"error": "Missing message content"}, 400)
+
+            # Auto-save base64 data to daily rotating folder on home server disk
+            if file_data and (file_data.startswith('data:') or (isinstance(file_data, str) and len(file_data) > 100 and not file_data.startswith('/api/file'))):
+                try:
+                    import base64
+                    b64_content = file_data
+                    if ',' in b64_content:
+                        b64_content = b64_content.split(',', 1)[1]
+                    f_bytes = base64.b64decode(b64_content)
+                    orig_fname = body.get('filename') or body.get('fileName') or text or f"file_{int(time.time())}.bin"
+                    receiver_name = host.get('username') or host_uuid
+                    req_info = self.db.get_request(uuid)
+                    sender_name_info = (body.get('name') or '').strip() or (req_info.get('name') if req_info else 'Guest')
+                    _, rel_path, safe_fname, f_size = save_uploaded_file(self.db, receiver_name, sender_name_info, orig_fname, f_bytes)
+                    print(f"📁 [Whisker Server File Upload] Sender: '{sender_name_info}' -> Receiver: '{receiver_name}' | File: '{safe_fname}' ({f_size} bytes)")
+                    file_data = f"/api/file/download?path={urllib.parse.quote(rel_path)}&name={urllib.parse.quote(safe_fname)}"
+                    if not text or text == orig_fname:
+                        text = safe_fname
+                except Exception as e:
+                    print(f"Base64 auto-storage error in /api/message: {e}")
 
             msg_text = text if text is not None else (file_data if file_data else "")
             msg_id, prev_id = self.db.add_message(uuid, host_uuid, 'guest', msg_text, file_data)
@@ -2375,8 +2750,15 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             for s in dead_streams:
                 WhiskerServerHandler.host_streams[host_uuid].discard(s)
 
-    def _notify_guest_streams(self, uuid, payload):
-        msg = f"data: {json.dumps(payload)}\n\n".encode('utf-8')
+    def _notify_guest_streams(self, uuid, event_type_or_payload, payload=None):
+        if payload is None:
+            actual_payload = event_type_or_payload
+        else:
+            actual_payload = payload
+            if isinstance(actual_payload, dict) and "event" not in actual_payload:
+                actual_payload["event"] = event_type_or_payload
+
+        msg = f"data: {json.dumps(actual_payload)}\n\n".encode('utf-8')
         with WhiskerServerHandler.streams_lock:
             streams = WhiskerServerHandler.guest_streams.get(uuid, set())
             if streams:

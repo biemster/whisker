@@ -448,16 +448,36 @@ class DatabaseManager:
             finally:
                 conn.close()
 
-    def add_guest_event(self, host_uuid, event_id, client_uuid, event_type, payload_dict):
+    def add_guest_event(self, host_uuid, event_id, client_uuid=None, event_type=None, payload_dict=None):
+        # Support both signatures:
+        # add_guest_event(host_uuid, event_id, client_uuid, event_type, payload_dict)
+        # add_guest_event(client_uuid, event_id, event_type, payload_dict)
+        if payload_dict is None:
+            # 4-argument call: client_uuid, event_id, event_type, payload_dict
+            c_uuid = host_uuid
+            e_id = event_id
+            e_type = client_uuid
+            p_dict = event_type
+            h_uuid = None
+            if isinstance(p_dict, dict):
+                h_uuid = p_dict.get('host_uuid') or p_dict.get('uuid')
+        else:
+            # 5-argument call: host_uuid, event_id, client_uuid, event_type, payload_dict
+            h_uuid = host_uuid
+            e_id = event_id
+            c_uuid = client_uuid
+            e_type = event_type
+            p_dict = payload_dict
+
         now = int(time.time() * 1000)
-        payload_str = json.dumps(payload_dict)
+        payload_str = json.dumps(p_dict if p_dict is not None else {})
         with self.lock:
             conn = self.get_connection()
             try:
                 cursor = conn.cursor()
                 cursor.execute(
                     "INSERT INTO guest_events (id, client_uuid, type, payload, created_at, host_uuid) VALUES (?, ?, ?, ?, ?, ?)",
-                    (event_id, client_uuid, event_type, payload_str, now, host_uuid)
+                    (e_id, c_uuid, e_type, payload_str, now, h_uuid)
                 )
                 conn.commit()
             finally:

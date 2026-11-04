@@ -49,6 +49,7 @@ class MainActivity : ComponentActivity() {
         networkManager.registerFcmToken()
         
         handleCallOrChatIntent(intent)
+        handleShareIntent(intent)
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -86,6 +87,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleCallOrChatIntent(intent)
+        handleShareIntent(intent)
     }
 
     override fun onResume() {
@@ -203,6 +205,44 @@ class MainActivity : ComponentActivity() {
             networkManager.cancelCallNotification()
         } else if (isIncomingCall) {
             networkManager.cancelCallNotification()
+        }
+    }
+
+    private fun handleShareIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action
+        if (Intent.ACTION_SEND == action) {
+            val streamUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+            } ?: intent.clipData?.let { cd ->
+                if (cd.itemCount > 0) cd.getItemAt(0).uri else null
+            }
+            if (streamUri != null) {
+                viewModel.setIncomingSharedUris(listOf(streamUri))
+            }
+        } else if (Intent.ACTION_SEND_MULTIPLE == action) {
+            val streamUris = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableArrayListExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+            }
+            if (!streamUris.isNullOrEmpty()) {
+                viewModel.setIncomingSharedUris(streamUris.filterNotNull())
+            } else {
+                val clipUris = mutableListOf<android.net.Uri>()
+                intent.clipData?.let { cd ->
+                    for (i in 0 until cd.itemCount) {
+                        cd.getItemAt(i).uri?.let { clipUris.add(it) }
+                    }
+                }
+                if (clipUris.isNotEmpty()) {
+                    viewModel.setIncomingSharedUris(clipUris)
+                }
+            }
         }
     }
 }

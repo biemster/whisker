@@ -41,6 +41,10 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.InetAddress
 import java.util.UUID
+import android.net.Uri
+import okhttp3.MultipartBody
+import java.io.File
+import java.io.FileOutputStream
 
 data class WebRtcSignal(
     val clientUuid: String,
@@ -2560,6 +2564,231 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 put("timestamp", System.currentTimeMillis())
             }
             publishToClient(clientUuid, payload)
+        }
+    }
+
+    private fun sanitizeFilename(filename: String): String {
+        if (filename.isBlank()) return "file_${System.currentTimeMillis()}.bin"
+        val base = filename.replace('\\', '/').substringAfterLast('/').trim()
+        if (base.isBlank()) return "file_${System.currentTimeMillis()}.bin"
+        val dotIdx = base.lastIndexOf('.')
+        val name = if (dotIdx > 0) base.substring(0, dotIdx) else base
+        val ext = if (dotIdx > 0) base.substring(dotIdx) else ""
+        val cleanName = name.replace(Regex("[^a-zA-Z0-9\\-_.]"), "_").replace(Regex("_+"), "_").trim('_')
+        val finalName = if (cleanName.isBlank()) "file" else cleanName
+        val cleanExt = ext.replace(Regex("[^a-zA-Z0-9\\-_.]"), "")
+        return "$finalName$cleanExt"
+    }
+
+    fun uploadAndSendFile(
+        clientUuid: String,
+        clientName: String,
+        fileUri: Uri,
+        fileName: String,
+        mimeType: String,
+        fileSize: Long,
+        caption: String = "",
+        onProgress: (Float) -> Unit = {},
+        onComplete: (Boolean, String?) -> Unit = { _, _ -> }
+    ) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val inputStream = context.contentResolver.openInputStream(fileUri)
+                if (inputStream == null) {
+                    withContext(Dispatchers.Main) { onComplete(false, "Cannot open file stream") }
+                    return@launch
+                }
+                val fileBytes = inputStream.use { it.readBytes() }
+                val safeFileName = sanitizeFilename(fileName)
+
+                val peer = repository.getRequestByUuid(clientUuid)
+                val peerServerAddress = peer?.serverAddress?.trimEnd('/') ?: ""
+                val currentServers = homeServers.value.ifEmpty { repository.getAllHomeServersSync() }
+                val registeredHomeServer = currentServers.find { it.url.trimEnd('/') == peerServerAddress }
+                    ?: currentServers.find { it.isEnabled }
+                    ?: currentServers.firstOrNull()
+                val cleanUrl = registeredHomeServer?.url?.trimEnd('/') ?: getCleanServerUrl()
+                val pinVal = registeredHomeServer?.apiKey ?: apiKey.value
+
+                var downloadUrl: String? = null
+
+                if (cleanUrl.isNotEmpty()) {
+                    val mediaType = mimeType.ifEmpty { "application/octet-stream" }.toMediaTypeOrNull()
+                    val requestBody = MultipartBody.Builder()
+                        .setType(MultipartBody.FORM)
+                        .addFormDataPart("file", safeFileName, RequestBody.create(mediaType, fileBytes))
+                        .addFormDataPart("filename", safeFileName)
+                        .addFormDataPart("receiver", clientUuid)
+                        .addFormDataPart("receiver_uuid", clientUuid)
+                        .addFormDataPart("target_host_uuid", clientUuid)
+                        .addFormDataPart("text", caption.ifEmpty { safeFileName })
+                        .build()
+
+                    val reqBuilder = Request.Builder()
+                        .url("$cleanUrl/api/file/upload")
+                        .post(requestBody)
+
+                    if (pinVal.isNotEmpty()) {
+                        reqBuilder.header("Authorization", "Bearer $pinVal")
+                    }
+
+                    try {
+                        okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                val bodyStr = resp.body?.string() ?: ""
+                                val respJson = JSONObject(bodyStr)
+                                downloadUrl = respJson.optString("url", respJson.optString("filePath", ""))
+                            } else {
+                                Log.w("GatewayNetworkManager", "Server upload failed with HTTP ${resp.code}")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w("GatewayNetworkManager", "Failed to upload file to server: ${e.message}")
+                    }
+                }
+
+                val effectiveFilePath = if (!downloadUrl.isNullOrEmpty()) {
+                    downloadUrl
+                } else {
+                    // If server upload failed, encode as a data URI so clients/server receive the actual payload
+                    val b64 = android.util.Base64.encodeToString(fileBytes, android.util.Base64.NO_WRAP)
+                    val mime = mimeType.ifEmpty { "application/octet-stream" }
+                    "data:$mime;base64,$b64"
+                }
+
+                // Also keep local disk copy for app's local message viewing
+                val localSavedPath = try {
+                    val dir = File(context.filesDir, "sent_files").apply { mkdirs() }
+                    val localCopy = File(dir, "${System.currentTimeMillis()}_$safeFileName")
+                    localCopy.writeBytes(fileBytes)
+                    localCopy.absolutePath
+                } catch (e: Exception) {
+                    fileUri.toString()
+                }
+
+                val effectiveText = caption.ifEmpty { safeFileName }
+                repository.insertMessage(
+                    Message(
+                        clientUuid = clientUuid,
+                        clientName = clientName,
+                        messageText = effectiveText,
+                        filePath = if (!downloadUrl.isNullOrEmpty()) downloadUrl else localSavedPath,
+                        isIncoming = false,
+                        isRead = true,
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
+
+                if (downloadUrl.isNullOrEmpty()) {
+                    val payload = JSONObject().apply {
+                        put("type", "chat_message")
+                        put("event", "message")
+                        put("sender", "phone")
+                        put("clientUuid", clientUuid)
+                        put("text", effectiveText)
+                        put("filePath", effectiveFilePath)
+                        put("file", effectiveFilePath)
+                        put("filename", safeFileName)
+                        put("fileName", safeFileName)
+                        put("size", fileBytes.size)
+                        put("timestamp", System.currentTimeMillis())
+                    }
+                    publishToClient(clientUuid, payload)
+                }
+
+                withContext(Dispatchers.Main) {
+                    onComplete(true, downloadUrl ?: localSavedPath)
+                }
+            } catch (e: Exception) {
+                Log.e("GatewayNetworkManager", "Error in uploadAndSendFile", e)
+                withContext(Dispatchers.Main) {
+                    onComplete(false, e.message)
+                }
+            }
+        }
+    }
+
+    fun downloadFileToDownloads(
+        context: Context,
+        fileUrlOrPath: String,
+        fileName: String,
+        onComplete: (File?) -> Unit
+    ) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val fullUrl = if (fileUrlOrPath.startsWith("http://") || fileUrlOrPath.startsWith("https://")) {
+                    fileUrlOrPath
+                } else if (fileUrlOrPath.startsWith("/")) {
+                    "${getCleanServerUrl()}$fileUrlOrPath"
+                } else {
+                    "${getCleanServerUrl()}/$fileUrlOrPath"
+                }
+
+                val currentServers = homeServers.value.ifEmpty { repository.getAllHomeServersSync() }
+                val targetServer = currentServers.find { it.isEnabled } ?: currentServers.firstOrNull()
+                val pinVal = targetServer?.apiKey ?: apiKey.value
+
+                val reqBuilder = Request.Builder().url(fullUrl)
+                if (pinVal.isNotEmpty()) {
+                    reqBuilder.header("Authorization", "Bearer $pinVal")
+                }
+
+                val response = okHttpClient.newCall(reqBuilder.build()).execute()
+                if (!response.isSuccessful) {
+                    withContext(Dispatchers.Main) { onComplete(null) }
+                    return@launch
+                }
+
+                val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                if (!downloadsDir.exists()) downloadsDir.mkdirs()
+
+                val safeName = sanitizeFilename(fileName)
+                var targetFile = File(downloadsDir, safeName)
+                var count = 1
+                val nameWithoutExt = safeName.substringBeforeLast('.', safeName)
+                val ext = if (safeName.contains('.')) "." + safeName.substringAfterLast('.') else ""
+                while (targetFile.exists()) {
+                    targetFile = File(downloadsDir, "${nameWithoutExt}_$count$ext")
+                    count++
+                }
+
+                response.body?.byteStream()?.use { input ->
+                    targetFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    onComplete(targetFile)
+                }
+            } catch (e: Exception) {
+                Log.e("GatewayNetworkManager", "Failed to download file", e)
+                withContext(Dispatchers.Main) {
+                    onComplete(null)
+                }
+            }
+        }
+    }
+
+    fun openDownloadedFile(context: Context, file: File, mimeType: String? = null) {
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            val resolvedMime = mimeType ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase()) ?: "*/*"
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, resolvedMime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(Intent.createChooser(intent, "Open with").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+        } catch (e: Exception) {
+            Log.e("GatewayNetworkManager", "Failed to open file: ${e.message}")
+            android.widget.Toast.makeText(context, "Could not open file: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 

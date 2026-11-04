@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.UUID
+import android.net.Uri
+import java.io.File
 
 class GatewayViewModel(
     private val repository: LinkRepository,
@@ -78,6 +80,15 @@ class GatewayViewModel(
 
     val selectedTab = MutableStateFlow(1)
     val selectedChatUuid = MutableStateFlow<String?>(null)
+    val incomingSharedUris = MutableStateFlow<List<Uri>>(emptyList())
+
+    fun setIncomingSharedUris(uris: List<Uri>) {
+        incomingSharedUris.value = uris
+    }
+
+    fun clearIncomingSharedUris() {
+        incomingSharedUris.value = emptyList()
+    }
 
     fun toggleAllowDirectCalls(allowed: Boolean) {
         networkManager.updateDirectCallsAllowed(allowed)
@@ -197,6 +208,41 @@ class GatewayViewModel(
     // Message controls
     fun sendMessage(clientUuid: String, clientName: String, text: String, filePath: String? = null) {
         networkManager.sendLocalMessage(clientUuid, clientName, text, filePath)
+    }
+
+    fun sendFile(
+        clientUuid: String,
+        clientName: String,
+        uri: Uri,
+        fileName: String,
+        mimeType: String,
+        fileSize: Long,
+        caption: String = "",
+        onComplete: (Boolean, String?) -> Unit = { _, _ -> }
+    ) {
+        networkManager.uploadAndSendFile(
+            clientUuid = clientUuid,
+            clientName = clientName,
+            fileUri = uri,
+            fileName = fileName,
+            mimeType = mimeType,
+            fileSize = fileSize,
+            caption = caption,
+            onComplete = onComplete
+        )
+    }
+
+    fun downloadFile(
+        fileUrlOrPath: String,
+        fileName: String,
+        context: Context,
+        onComplete: (File?) -> Unit
+    ) {
+        networkManager.downloadFileToDownloads(context, fileUrlOrPath, fileName, onComplete)
+    }
+
+    fun openFile(context: Context, file: File, mimeType: String? = null) {
+        networkManager.openDownloadedFile(context, file, mimeType)
     }
 
     fun markMessagesRead(clientUuid: String) {

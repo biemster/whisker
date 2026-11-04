@@ -1482,12 +1482,21 @@
                 
                 let textBody = '';
                 if (msg.filePath) {
-                    textBody = '<div class="bg-cyan-950 border border-cyan-800 p-2.5 rounded-xl flex items-center space-x-2 text-cyan-300">' +
-                                   '<span class="text-lg">📎</span>' +
-                                   '<div>' +
-                                       '<p class="font-bold underline cursor-pointer hover:text-white" onclick="downloadAttachment(' + JSON.stringify(msg.text) + ', ' + JSON.stringify(msg.filePath) + ')">' + msg.text + '</p>' +
-                                   '</div>' +
-                               '</div>';
+                    const resolvedPath = (msg.filePath.startsWith('/') ? (HOME_SERVER_URL + msg.filePath) : msg.filePath);
+                    const isImg = msg.filePath.startsWith("data:image/") || msg.filePath.match(/\.(png|jpg|jpeg|webp|gif)/i) || (msg.text && msg.text.match(/\.(png|jpg|jpeg|webp|gif)/i));
+                    if (isImg) {
+                        textBody = '<div class="rounded-xl overflow-hidden border border-cyan-800 bg-cyan-950 p-1.5">' +
+                                       '<img src="' + resolvedPath + '" alt="' + (msg.text || 'Image') + '" class="max-h-48 rounded-lg cursor-pointer hover:opacity-90 transition object-cover" onclick="window.open(\'' + resolvedPath + '\', \'_blank\')" />' +
+                                       (msg.text && msg.text !== msg.filePath && !msg.text.startsWith('data:') ? '<p class="text-xs text-cyan-200 mt-1 px-1">' + msg.text + '</p>' : '') +
+                                   '</div>';
+                    } else {
+                        textBody = '<div class="bg-cyan-950 border border-cyan-800 p-2.5 rounded-xl flex items-center space-x-2 text-cyan-300">' +
+                                       '<span class="text-lg">📎</span>' +
+                                       '<div>' +
+                                           '<p class="font-bold underline cursor-pointer hover:text-white" onclick="downloadAttachment(' + JSON.stringify(msg.text) + ', ' + JSON.stringify(resolvedPath) + ')">' + msg.text + '</p>' +
+                                       '</div>' +
+                                   '</div>';
+                    }
                 } else {
                     textBody = '<div class="p-2.5 rounded-xl ' + (msg.isIncoming ? 'bg-gray-900 text-gray-200 border border-gray-800' : 'bg-cyan-500 text-black font-medium') + '">' +
                                    msg.text +
@@ -1503,9 +1512,11 @@
         }
 
         function downloadAttachment(name, path) {
+            const resolvedPath = path.startsWith('/') ? (HOME_SERVER_URL + path) : path;
             const link = document.createElement('a');
-            link.href = path;
-            link.download = name;
+            link.href = resolvedPath;
+            link.download = name || 'file';
+            link.target = '_blank';
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
@@ -1575,11 +1586,16 @@
         function sendFile(event) {
             const file = event.target.files[0];
             if (!file) return;
+            uploadFile(file);
+        }
+
+        function uploadFile(file) {
+            if (!file) return;
 
             const progress = document.getElementById('fileUploadProgress');
             const fileNameDisplay = document.getElementById('fileNameDisplay');
-            progress.classList.remove('hidden');
-            fileNameDisplay.innerText = file.name;
+            if (progress) progress.classList.remove('hidden');
+            if (fileNameDisplay) fileNameDisplay.innerText = file.name;
 
             const reader = new FileReader();
             reader.onload = function(e) {
@@ -1619,12 +1635,16 @@
                     return res.json();
                 })
                 .then((data) => {
-                    progress.classList.add('hidden');
+                    if (progress) progress.classList.add('hidden');
                     if (data && data.id) {
                         const idx = chatLogs.findIndex(m => m.id === fileMsg.id);
                         if (idx !== -1) {
                             chatLogs[idx].id = data.id;
+                            if (data.url || data.filePath) {
+                                chatLogs[idx].filePath = data.url || data.filePath;
+                            }
                             saveActiveConnectionData();
+                            renderChat();
                         }
                     }
                     if (data && data.host_name && hostName !== data.host_name) {
@@ -1635,12 +1655,39 @@
                     }
                     console.log("File uploaded successfully.");
                 }).catch(err => {
-                    progress.classList.add('hidden');
+                    if (progress) progress.classList.add('hidden');
                     console.error("File upload failed", err);
                 });
             };
             reader.readAsDataURL(file);
         }
+
+        // Setup Drag & Drop on chat window
+        window.addEventListener('DOMContentLoaded', () => {
+            const chatBoxElem = document.getElementById('chatBox');
+            if (chatBoxElem) {
+                ['dragenter', 'dragover'].forEach(eventName => {
+                    chatBoxElem.addEventListener(eventName, (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        chatBoxElem.classList.add('ring-2', 'ring-cyan-400', 'bg-cyan-950/30');
+                    }, false);
+                });
+                ['dragleave', 'drop'].forEach(eventName => {
+                    chatBoxElem.addEventListener(eventName, (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        chatBoxElem.classList.remove('ring-2', 'ring-cyan-400', 'bg-cyan-950/30');
+                    }, false);
+                });
+                chatBoxElem.addEventListener('drop', (e) => {
+                    const dt = e.dataTransfer;
+                    if (dt && dt.files && dt.files.length > 0) {
+                        uploadFile(dt.files[0]);
+                    }
+                }, false);
+            }
+        });
 
         function clearChatHistory() {
             chatLogs = [];

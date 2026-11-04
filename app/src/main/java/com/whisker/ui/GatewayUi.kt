@@ -14,6 +14,13 @@ import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.widget.Toast
+import android.provider.OpenableColumns
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.core.content.FileProvider
+import coil.compose.AsyncImage
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.viewinterop.AndroidView
@@ -76,6 +83,8 @@ import java.text.SimpleDateFormat
 import java.util.*
 import android.graphics.Bitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.Image
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
@@ -111,6 +120,7 @@ fun GatewayDashboard(
     var showAddServerDialog by remember { mutableStateOf(false) }
     var showInviteDialog by remember { mutableStateOf(false) }
     val allInvites by viewModel.allInvites.collectAsState()
+    val incomingSharedUris by viewModel.incomingSharedUris.collectAsState()
 
     val pagerState = rememberPagerState(initialPage = 1) { 3 }
     val coroutineScope = rememberCoroutineScope()
@@ -303,7 +313,8 @@ fun GatewayDashboard(
                             onSendMessage = { uuid, name, text -> viewModel.sendMessage(uuid, name, text) },
                             onMarkAsRead = { viewModel.markMessagesRead(it) },
                             onActiveChatChanged = { viewModel.setSelectedChatUuid(it) },
-                            onRedial = { uuid, name -> viewModel.redialClient(uuid, name) }
+                            onRedial = { uuid, name -> viewModel.redialClient(uuid, name) },
+                            viewModel = viewModel
                         )
                     }
                     2 -> CallLogsTab(
@@ -1007,6 +1018,94 @@ fun GatewayDashboard(
                         viewModel.deleteHomeServer(s)
                         showServerEditDialog = false
                         serverToEdit = null
+                    }
+                }
+            )
+        }
+
+        if (incomingSharedUris.isNotEmpty()) {
+            val approvedClients = requests.filter { it.status == "APPROVED" || it.status == "MOBILE_APPROVED" }
+            AlertDialog(
+                onDismissRequest = { viewModel.clearIncomingSharedUris() },
+                containerColor = Color(0xFF0F172A),
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Default.Share, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Text("Share via Whisker", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    }
+                },
+                text = {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            "Select a recipient for ${incomingSharedUris.size} shared item(s):",
+                            color = Color(0xFFCBD5E1),
+                            fontSize = 13.sp
+                        )
+                        if (approvedClients.isEmpty()) {
+                            Text("No paired connections found. Please authorize or pair a client first.", color = Color.Gray, fontSize = 12.sp)
+                        } else {
+                            approvedClients.forEach { client ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            val urisToShare = incomingSharedUris.toList()
+                                            viewModel.clearIncomingSharedUris()
+                                            viewModel.setSelectedTab(1)
+                                            viewModel.setSelectedChatUuid(client.uuid)
+                                            Toast.makeText(context, "Sending ${urisToShare.size} item(s) to ${client.name}...", Toast.LENGTH_SHORT).show()
+                                            coroutineScope.launch {
+                                                urisToShare.forEach { uri ->
+                                                    var fileName = "shared_file_${System.currentTimeMillis()}"
+                                                    var fileSize = 0L
+                                                    val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                                                    try {
+                                                        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                                                            if (cursor.moveToFirst()) {
+                                                                val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                                                                val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                                                                if (nameIdx != -1) fileName = cursor.getString(nameIdx) ?: fileName
+                                                                if (sizeIdx != -1) fileSize = cursor.getLong(sizeIdx)
+                                                            }
+                                                        }
+                                                    } catch (_: Exception) {}
+                                                    viewModel.sendFile(client.uuid, client.name, uri, fileName, mimeType, fileSize)
+                                                }
+                                            }
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Icon(
+                                            if (client.clientType == "MOBILE") Icons.Default.PhoneAndroid else Icons.Default.Laptop,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                        Column {
+                                            Text(client.name, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                                            Text(client.uuid.take(12) + "...", color = Color.Gray, fontSize = 10.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = { viewModel.clearIncomingSharedUris() }) {
+                        Text("Cancel", color = Color.Gray)
                     }
                 }
             )
@@ -3292,6 +3391,15 @@ fun ApprovalsTab(
 // ==========================================
 // SECURE CHAT TAB
 // ==========================================
+data class PendingSendFile(
+    val uri: Uri,
+    val name: String,
+    val size: Long,
+    val mimeType: String,
+    val isImage: Boolean
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatTab(
     selectedClientUuid: String?,
@@ -3302,9 +3410,93 @@ fun ChatTab(
     onSendMessage: (String, String, String) -> Unit,
     onMarkAsRead: (String) -> Unit,
     onActiveChatChanged: (String?) -> Unit,
-    onRedial: (String, String) -> Unit
+    onRedial: (String, String) -> Unit,
+    viewModel: GatewayViewModel? = null
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var replyText by remember { mutableStateOf("") }
+    var showFilePickerModal by remember { mutableStateOf(false) }
+    var pendingFileToSend by remember { mutableStateOf<PendingSendFile?>(null) }
+    var fullScreenImageUrl by remember { mutableStateOf<String?>(null) }
+    var downloadingMsgId by remember { mutableStateOf<String?>(null) }
+
+    var tempCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var tempCameraFile by remember { mutableStateOf<File?>(null) }
+
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success && tempCameraFile != null && tempCameraUri != null) {
+            val file = tempCameraFile!!
+            val uri = tempCameraUri!!
+            pendingFileToSend = PendingSendFile(
+                uri = uri,
+                name = file.name,
+                size = file.length(),
+                mimeType = "image/jpeg",
+                isImage = true
+            )
+            showFilePickerModal = false
+        }
+    }
+
+    val pickVisualMediaLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            var fileName = "photo_${System.currentTimeMillis()}.jpg"
+            var fileSize = 0L
+            val mimeType = context.contentResolver.getType(uri) ?: "image/jpeg"
+            try {
+                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (nameIdx != -1) fileName = cursor.getString(nameIdx) ?: fileName
+                        if (sizeIdx != -1) fileSize = cursor.getLong(sizeIdx)
+                    }
+                }
+            } catch (_: Exception) {}
+            pendingFileToSend = PendingSendFile(
+                uri = uri,
+                name = fileName,
+                size = fileSize,
+                mimeType = mimeType,
+                isImage = mimeType.startsWith("image/")
+            )
+            showFilePickerModal = false
+        }
+    }
+
+    val openDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            var fileName = "file_${System.currentTimeMillis()}"
+            var fileSize = 0L
+            val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+            try {
+                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (nameIdx != -1) fileName = cursor.getString(nameIdx) ?: fileName
+                        if (sizeIdx != -1) fileSize = cursor.getLong(sizeIdx)
+                    }
+                }
+            } catch (_: Exception) {}
+            val isImg = mimeType.startsWith("image/") || fileName.lowercase().let { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".jpeg") || it.endsWith(".webp") || it.endsWith(".gif") }
+            pendingFileToSend = PendingSendFile(
+                uri = uri,
+                name = fileName,
+                size = fileSize,
+                mimeType = mimeType,
+                isImage = isImg
+            )
+            showFilePickerModal = false
+        }
+    }
 
     val selectedClient = approvedRequests.find { it.uuid == selectedClientUuid }
 
@@ -3549,38 +3741,143 @@ fun ChatTab(
                                         )
 
                                         if (msg.filePath != null && msg.filePath != "null" && msg.filePath.isNotBlank()) {
-                                            // Render as file transfer message
-                                            Card(
-                                                colors = CardDefaults.cardColors(
-                                                    containerColor = if (msg.isIncoming) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
-                                                ),
-                                                border = BorderStroke(
-                                                    1.dp,
-                                                    if (msg.isIncoming) Color.Gray.copy(alpha = 0.2f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
-                                                ),
-                                                shape = RoundedCornerShape(12.dp)
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier.padding(12.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                            val pathStr = msg.filePath
+                                            val isImg = remember(pathStr, msg.messageText) {
+                                                val lower = pathStr.lowercase()
+                                                val txt = msg.messageText.lowercase()
+                                                lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".webp") || lower.endsWith(".gif") ||
+                                                txt.endsWith(".png") || txt.endsWith(".jpg") || txt.endsWith(".jpeg") || txt.endsWith(".webp") || txt.endsWith(".gif") ||
+                                                lower.startsWith("data:image/") || (lower.contains("/api/file/download") && (lower.contains(".png") || lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".webp")))
+                                            }
+
+                                            if (isImg) {
+                                                val cleanServerUrl = viewModel?.networkManager?.getCleanServerUrl() ?: ""
+                                                val imageUrl = remember(pathStr, cleanServerUrl) {
+                                                    if (pathStr.startsWith("http://") || pathStr.startsWith("https://") || pathStr.startsWith("data:") || pathStr.startsWith("content://") || pathStr.startsWith("file://")) {
+                                                        pathStr
+                                                    } else if (pathStr.startsWith("/")) {
+                                                        "$cleanServerUrl$pathStr"
+                                                    } else {
+                                                        pathStr
+                                                    }
+                                                }
+
+                                                Card(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(14.dp))
+                                                        .clickable { fullScreenImageUrl = imageUrl },
+                                                    colors = CardDefaults.cardColors(containerColor = if (msg.isIncoming) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                                                    border = BorderStroke(1.dp, if (msg.isIncoming) Color.Gray.copy(alpha = 0.2f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
                                                 ) {
-                                                    Text("📎", fontSize = 20.sp)
                                                     Column {
-                                                        Text(
-                                                            text = msg.messageText,
-                                                            fontSize = 12.sp,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = Color.White
+                                                        AsyncImage(
+                                                            model = imageUrl,
+                                                            contentDescription = msg.messageText,
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .heightIn(max = 240.dp)
+                                                                .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)),
+                                                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
                                                         )
-                                                        Text(
-                                                            text = if (msg.filePath.startsWith("data:")) "File Attachment Data Stream" else msg.filePath,
-                                                            fontSize = 9.sp,
-                                                            fontFamily = FontFamily.Monospace,
-                                                            color = Color.Gray,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
+                                                        if (msg.messageText.isNotBlank() && msg.messageText != msg.filePath && !msg.messageText.startsWith("data:") && !msg.messageText.startsWith("http")) {
+                                                            Text(
+                                                                text = msg.messageText,
+                                                                fontSize = 12.sp,
+                                                                color = Color.White,
+                                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                val fileName = remember(msg.filePath, msg.messageText) {
+                                                    if (msg.messageText.isNotBlank() && !msg.messageText.startsWith("data:") && !msg.messageText.startsWith("http") && !msg.messageText.startsWith("/")) {
+                                                        msg.messageText
+                                                    } else {
+                                                        pathStr.substringAfterLast('/').substringBefore('?')
+                                                    }
+                                                }
+                                                val ext = fileName.substringAfterLast('.', "").lowercase()
+                                                val fileIcon = when (ext) {
+                                                    "pdf" -> "📄"
+                                                    "zip", "tar", "gz", "7z", "rar" -> "📦"
+                                                    "mp3", "wav", "m4a", "ogg" -> "🎵"
+                                                    "mp4", "mkv", "avi", "mov" -> "🎥"
+                                                    "txt", "md", "json", "py", "kt", "csv" -> "📝"
+                                                    else -> "📎"
+                                                }
+
+                                                Card(
+                                                    colors = CardDefaults.cardColors(
+                                                        containerColor = if (msg.isIncoming) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                                    ),
+                                                    border = BorderStroke(
+                                                        1.dp,
+                                                        if (msg.isIncoming) Color.Gray.copy(alpha = 0.25f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                                                    ),
+                                                    shape = RoundedCornerShape(14.dp),
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(12.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                                    ) {
+                                                        Surface(
+                                                            shape = CircleShape,
+                                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                                            modifier = Modifier.size(42.dp)
+                                                        ) {
+                                                            Box(contentAlignment = Alignment.Center) {
+                                                                Text(fileIcon, fontSize = 20.sp)
+                                                            }
+                                                        }
+                                                        Column(modifier = Modifier.weight(1f)) {
+                                                            Text(
+                                                                text = fileName,
+                                                                fontSize = 13.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = Color.White,
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                            Text(
+                                                                text = "Downloads folder",
+                                                                fontSize = 10.sp,
+                                                                color = Color(0xFF94A3B8)
+                                                            )
+                                                        }
+                                                        val isDownloading = (downloadingMsgId == msg.serverId || (downloadingMsgId != null && downloadingMsgId == msg.filePath))
+                                                        if (isDownloading) {
+                                                            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
+                                                        } else {
+                                                            IconButton(
+                                                                onClick = {
+                                                                    if (viewModel != null) {
+                                                                        downloadingMsgId = msg.serverId.ifEmpty { msg.filePath }
+                                                                        viewModel.downloadFile(msg.filePath, fileName, context) { savedFile ->
+                                                                            downloadingMsgId = null
+                                                                            if (savedFile != null) {
+                                                                                Toast.makeText(context, "Saved to ${savedFile.name} in Downloads", Toast.LENGTH_SHORT).show()
+                                                                                viewModel.openFile(context, savedFile)
+                                                                            } else {
+                                                                                Toast.makeText(context, "Download failed", Toast.LENGTH_SHORT).show()
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                },
+                                                                modifier = Modifier
+                                                                    .size(36.dp)
+                                                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.2f), CircleShape)
+                                                            ) {
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Download,
+                                                                    contentDescription = "Save to Downloads",
+                                                                    tint = MaterialTheme.colorScheme.primary,
+                                                                    modifier = Modifier.size(18.dp)
+                                                                )
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -3642,36 +3939,14 @@ fun ChatTab(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // Quick file payload attach button
-                        var filePickerExpanded by remember { mutableStateOf(false) }
-                        Box {
-                            IconButton(
-                                onClick = { filePickerExpanded = true },
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .background(Color.Black.copy(alpha = 0.3f), CircleShape)
-                            ) {
-                                Icon(Icons.Default.Add, contentDescription = "Attach File", tint = MaterialTheme.colorScheme.primary)
-                            }
-                            DropdownMenu(
-                                expanded = filePickerExpanded,
-                                onDismissRequest = { filePickerExpanded = false }
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("Share Document (LinkConfig.txt)", fontSize = 12.sp) },
-                                    onClick = {
-                                        onSendMessage(client.uuid, client.name, "LinkConfig.txt")
-                                        filePickerExpanded = false
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Share Image (Photo.png)", fontSize = 12.sp) },
-                                    onClick = {
-                                        onSendMessage(client.uuid, client.name, "Photo.png")
-                                        filePickerExpanded = false
-                                    }
-                                )
-                            }
+                        // Quick file & media attach button
+                        IconButton(
+                            onClick = { showFilePickerModal = true },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .background(Color.Black.copy(alpha = 0.3f), CircleShape)
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "Attach File & Media", tint = MaterialTheme.colorScheme.primary)
                         }
 
                         // Text Field
@@ -3716,6 +3991,365 @@ fun ChatTab(
                                 contentDescription = "Transmit parameters",
                                 tint = Color.Black
                             )
+                        }
+                    }
+                }
+
+                // Full Screen File & Media Selector Modal
+                if (showFilePickerModal) {
+                    ModalBottomSheet(
+                        onDismissRequest = { showFilePickerModal = false },
+                        containerColor = Color(0xFF0F172A),
+                        contentColor = Color.White,
+                        modifier = Modifier.fillMaxHeight(0.92f)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 20.dp, vertical = 8.dp)
+                        ) {
+                            // Header
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text(
+                                        "Share Files & Media",
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        "Send to ${client.name}",
+                                        fontSize = 12.sp,
+                                        color = Color.Gray
+                                    )
+                                }
+                                IconButton(onClick = { showFilePickerModal = false }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.LightGray)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            // Action Cards (Camera, Gallery, Storage)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                // Camera
+                                Card(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            val photoDir = File(context.cacheDir, "camera_photos").apply { mkdirs() }
+                                            val newPhoto = File(photoDir, "IMG_${System.currentTimeMillis()}.jpg")
+                                            tempCameraFile = newPhoto
+                                            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", newPhoto)
+                                            tempCameraUri = uri
+                                            takePictureLauncher.launch(uri)
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(14.dp).fillMaxWidth(),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = Color(0xFFEF4444).copy(alpha = 0.2f),
+                                            modifier = Modifier.size(44.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(Icons.Default.CameraAlt, contentDescription = null, tint = Color(0xFFF87171))
+                                            }
+                                        }
+                                        Text("Camera", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    }
+                                }
+
+                                // Gallery
+                                Card(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            pickVisualMediaLauncher.launch(
+                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                                            )
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(14.dp).fillMaxWidth(),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = Color(0xFF3B82F6).copy(alpha = 0.2f),
+                                            modifier = Modifier.size(44.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color(0xFF60A5FA))
+                                            }
+                                        }
+                                        Text("Gallery", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    }
+                                }
+
+                                // Storage / Documents
+                                Card(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            openDocumentLauncher.launch(arrayOf("*/*"))
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(14.dp).fillMaxWidth(),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = Color(0xFF10B981).copy(alpha = 0.2f),
+                                            modifier = Modifier.size(44.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(Icons.Default.Folder, contentDescription = null, tint = Color(0xFF34D399))
+                                            }
+                                        }
+                                        Text("Storage", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(20.dp))
+
+                            // Recent Files on Device (Downloads & Local)
+                            Text(
+                                "Local Storage & Downloads",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFCBD5E1)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            val localFiles = remember {
+                                val list = mutableListOf<File>()
+                                try {
+                                    val dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                                    if (dlDir != null && dlDir.exists() && dlDir.isDirectory) {
+                                        dlDir.listFiles()?.filter { it.isFile && !it.name.startsWith(".") }?.sortedByDescending { it.lastModified() }?.take(15)?.let { list.addAll(it) }
+                                    }
+                                } catch (_: Exception) {}
+                                try {
+                                    val extDir = context.getExternalFilesDir(null)
+                                    if (extDir != null && extDir.exists()) {
+                                        extDir.walkTopDown().filter { it.isFile && !it.name.startsWith(".") }.take(10).forEach { if (!list.contains(it)) list.add(it) }
+                                    }
+                                } catch (_: Exception) {}
+                                list
+                            }
+
+                            if (localFiles.isEmpty()) {
+                                Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Text("📁", fontSize = 32.sp)
+                                        Text("No recent files found in Downloads", fontSize = 12.sp, color = Color.Gray)
+                                        Text("Use Storage or Gallery above to pick any file", fontSize = 11.sp, color = Color.DarkGray)
+                                    }
+                                }
+                            } else {
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxWidth().weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    items(localFiles) { file ->
+                                        val fExt = file.extension.lowercase()
+                                        val isImage = fExt in listOf("jpg", "jpeg", "png", "webp", "gif")
+                                        val fileIcon = when (fExt) {
+                                            "pdf" -> "📄"
+                                            "zip", "tar", "gz" -> "📦"
+                                            "mp3", "wav", "m4a" -> "🎵"
+                                            "mp4", "mkv", "avi" -> "🎥"
+                                            in listOf("jpg", "jpeg", "png", "webp", "gif") -> "🖼️"
+                                            else -> "📎"
+                                        }
+                                        Card(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                                                    val mimeType = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(fExt) ?: "*/*"
+                                                    pendingFileToSend = PendingSendFile(
+                                                        uri = uri,
+                                                        name = file.name,
+                                                        size = file.length(),
+                                                        mimeType = mimeType,
+                                                        isImage = isImage
+                                                    )
+                                                    showFilePickerModal = false
+                                                },
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B).copy(alpha = 0.6f)),
+                                            shape = RoundedCornerShape(10.dp)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(10.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                            ) {
+                                                Text(fileIcon, fontSize = 20.sp)
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(file.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                    val sizeKb = (file.length() / 1024).coerceAtLeast(1)
+                                                    val sizeStr = if (sizeKb > 1024) "${sizeKb / 1024} MB" else "$sizeKb KB"
+                                                    Text("$sizeStr • Downloads", fontSize = 10.sp, color = Color.Gray)
+                                                }
+                                                Icon(Icons.Default.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Confirmation Preview Dialog before transmitting photo/file
+                pendingFileToSend?.let { pending ->
+                    var captionText by remember { mutableStateOf("") }
+                    AlertDialog(
+                        onDismissRequest = { pendingFileToSend = null },
+                        containerColor = Color(0xFF0F172A),
+                        title = {
+                            Text(if (pending.isImage) "Send Photo" else "Send File", color = Color.White, fontWeight = FontWeight.Bold)
+                        },
+                        text = {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                if (pending.isImage) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(200.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(Color.Black),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        AsyncImage(
+                                            model = pending.uri,
+                                            contentDescription = pending.name,
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                                        )
+                                    }
+                                } else {
+                                    Card(
+                                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                            Text("📎", fontSize = 28.sp)
+                                            Column {
+                                                Text(pending.name, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                                val sizeKb = (pending.size / 1024).coerceAtLeast(1)
+                                                val sizeStr = if (sizeKb > 1024) "${sizeKb / 1024} MB" else "$sizeKb KB"
+                                                Text(sizeStr, color = Color.Gray, fontSize = 11.sp)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                OutlinedTextField(
+                                    value = captionText,
+                                    onValueChange = { captionText = it },
+                                    placeholder = { Text("Add a caption...", color = Color.Gray, fontSize = 13.sp) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White,
+                                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                        unfocusedBorderColor = Color.Gray.copy(alpha = 0.4f)
+                                    ),
+                                    maxLines = 3
+                                )
+                            }
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    if (viewModel != null) {
+                                        viewModel.sendFile(
+                                            clientUuid = client.uuid,
+                                            clientName = client.name,
+                                            uri = pending.uri,
+                                            fileName = pending.name,
+                                            mimeType = pending.mimeType,
+                                            fileSize = pending.size,
+                                            caption = captionText.trim()
+                                        )
+                                    } else {
+                                        onSendMessage(client.uuid, client.name, captionText.ifEmpty { pending.name })
+                                    }
+                                    pendingFileToSend = null
+                                    Toast.makeText(context, "Sending ${pending.name}...", Toast.LENGTH_SHORT).show()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                            ) {
+                                Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Send", color = Color.Black, fontWeight = FontWeight.Bold)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { pendingFileToSend = null }) {
+                                Text("Cancel", color = Color.Gray)
+                            }
+                        }
+                    )
+                }
+
+                // Full-screen Image Viewer Lightbox
+                fullScreenImageUrl?.let { imgUrl ->
+                    Dialog(
+                        onDismissRequest = { fullScreenImageUrl = null },
+                        properties = DialogProperties(usePlatformDefaultWidth = false)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.95f))
+                                .clickable { fullScreenImageUrl = null },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            AsyncImage(
+                                model = imgUrl,
+                                contentDescription = "Full view",
+                                modifier = Modifier.fillMaxSize().padding(16.dp),
+                                contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                            )
+                            IconButton(
+                                onClick = { fullScreenImageUrl = null },
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(24.dp)
+                                    .size(40.dp)
+                                    .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                            }
                         }
                     }
                 }

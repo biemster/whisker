@@ -37,13 +37,12 @@ Whether you want a hassle-free personal communication system for external visito
 - **Web Client UI**: Responsive fluid layout with auto-expanding video on active calls, interactive header status indicator with connectivity modal, and mobile-optimized columnar view.
 - **Embeddable Web Client Widget**: Single `<script src="http://<server-ip>:3000/widget.js"></script>` drop-in widget for personal websites with multi-device session tabs, radio-button mobile device selection, custom visitor usernames, real-time messaging, two-way WebRTC audio/video calling, and transparent host approval.
 - **Model Context Protocol (MCP) Server**: Zero-dependency Python-native MCP server (`whisker/mcp.py` / `whisker mcp` / `whisker-mcp`) communicating over JSON-RPC 2.0 stdio, exposing 9 tools, 3 resources, and prompt templates for Claude Desktop, Cursor, and AI agents. Accompanied by a dedicated [`skills.md`](skills.md) guide.
-- **Web Admin Console & Management Portal (`/admin`)**: Built-in administrative dashboard with password protection (`--admin-password`), real-time device health metrics, mobile app administration (with the ability to transfer primary Administrator rights between registered mobile devices or remove them), client pairing revocation, and configurable storage paths for Files and Backup features.
+- **Web Admin Console & Management Portal (`/admin`)**: Built-in administrative dashboard with password protection (`--admin-password`), real-time device health metrics, mobile app administration (with the ability to transfer primary Administrator rights between registered mobile devices or remove them), client pairing revocation, and configurable File Storage Directory for files, media, and backups.
 - **Ultra-Compact Docker Container & Microsoft WSL Containers Compatibility**: Minimalist OCI container (~50MB base) running on `python:3.11-alpine` with persistent `/data` volume support, OpenSSL FCM cryptographic signing, PID 1 `exec` signal handling, and full compatibility with Microsoft WSL Containers, Docker Desktop, Podman, and Cloud Run / ECS.
+- **File & Media Transfer & Backup**: High-speed, self-hosted file and media transfer between Android mobile apps, Web visitor portals, embed widgets, and CLI clients. Incoming files on the Home Server are safely stored in date-rotated vaults (`<storage_root>/<receiver>/<YYYYMMDD.HHMMSS>/<filename>`), configurable via the Web Admin Console. Mobile apps feature a full-screen file/media picker with direct Camera capture & confirmation preview, system-wide Android Share target support (`ACTION_SEND` / `ACTION_SEND_MULTIPLE`), inline image thumbnails with fullscreen lightbox, and one-tap download to device Downloads folder.
 - **Push Notifications**: FCM HTTP v1 push notification tickle integration complete with low-power battery optimization.
 
 ### In Development & Future Roadmap
-- **File & Media Transfer**: Secure attachment and file transfer directly between web visitors/mobile clients and the home server.
-- **Automated Background Photo Backup**: Scheduled automatic background synchronization of camera roll photos and media folders to home server storage.
 - **iOS Mobile Application**: Native iOS client app built with Swift / SwiftUI, featuring WebRTC P2P calling, background APNs (Apple Push Notification service) push tickle support, and call notification alerts.
 
 ---
@@ -125,7 +124,7 @@ Navigate to **`http://localhost:3000/admin`** in your browser:
 - Log in with your `--admin-password` (or the default password displayed on server startup).
 - Monitor connected mobile apps and connected clients.
 - Switch primary Administrator rights between registered mobile devices or remove old devices.
-- Configure storage paths for upcoming Files (`/data/files`) and Backup (`/data/backups`) features.
+- Configure the File Storage Directory (`/data/files`) for shared files, photos, and backups.
 
 ### 3. Connect the Android Mobile App
 
@@ -219,6 +218,29 @@ Each client connection to a home server is isolated in its own dedicated databas
   # Listen with camera/mic configured for incoming calls:
   whisker listen -u "Alice" --video /dev/video0 --audio default --save-streams
   ```
+- **Send a File & Media Attachment**:
+  ```bash
+  # Send any file or media to your paired mobile host or peer:
+  whisker send-file path/to/document.pdf
+
+  # Specify sender username and server:
+  whisker send-file -u "Alice" -s "Family Server" ~/Pictures/photo.jpg
+
+  # Target specific peer device by UUID or name:
+  whisker send-file -u "Alice" -c "Office Phone" presentation.key
+  ```
+- **Run CLI as Continuous Automated Backup Vault Service**:
+  The backup feature is unified with the CLI client. To turn any PC, NAS, Raspberry Pi, or server into an automated backup vault for your mobile phones:
+  ```bash
+  # 1. Pair a client with username "backup" (or your preferred vault name):
+  whisker init "http://<server-ip>:3000/invite/INVITE123" --name "backup"
+
+  # 2. Run continuous backup service:
+  whisker listen -u "backup"
+  # Or explicitly specify custom backup storage directory:
+  whisker listen -u "backup" --storage-dir /mnt/nas/mobile_backups
+  ```
+  Whenever any mobile phone or web user sends a photo, video, document, or backup package to the "backup" contact, the CLI instantly downloads and archives it in `./backups/<sender>/<timestamp>_<filename>` (or the specified `--storage-dir`), maintaining a complete offline backup archive on your hardware.
 - **Client Configuration & Server Status**:
   ```bash
   whisker info

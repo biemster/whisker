@@ -924,7 +924,13 @@
 
       <!-- Footer / Input -->
       <div class="whisker-footer" id="whisker-footer">
-        <input type="text" id="whisker-input" class="whisker-chat-input" placeholder="Type a message..." maxlength="1000">
+        <input type="file" id="whisker-file-input" style="display:none;" />
+        <button id="whisker-btn-attach" class="whisker-attach-btn" title="Attach file or photo" style="background:transparent;border:none;cursor:pointer;color:#94a3b8;padding:6px 8px;display:flex;align-items:center;justify-content:center;transition:color 0.2s;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+          </svg>
+        </button>
+        <input type="text" id="whisker-input" class="whisker-chat-input" placeholder="Type a message or drop file..." maxlength="1000">
         <button id="whisker-send" class="whisker-send-btn" title="Send message">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -1008,6 +1014,8 @@
   const bodyContainer = document.getElementById('whisker-body');
   const chatInput = document.getElementById('whisker-input');
   const btnSend = document.getElementById('whisker-send');
+  const btnAttach = document.getElementById('whisker-btn-attach');
+  const fileInput = document.getElementById('whisker-file-input');
   const footer = document.getElementById('whisker-footer');
 
   const callOverlay = document.getElementById('whisker-call-overlay');
@@ -1364,6 +1372,91 @@
     }
   });
 
+  if (btnAttach && fileInput) {
+    btnAttach.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files[0]) {
+        handleFileUpload(e.target.files[0]);
+        fileInput.value = '';
+      }
+    });
+  }
+
+  // Drag and drop onto chat body
+  ['dragenter', 'dragover'].forEach(name => {
+    bodyContainer.addEventListener(name, (e) => {
+      e.preventDefault();
+      bodyContainer.style.background = 'rgba(6, 182, 212, 0.08)';
+      bodyContainer.style.outline = '2px dashed #06b6d4';
+    }, false);
+  });
+  ['dragleave', 'drop'].forEach(name => {
+    bodyContainer.addEventListener(name, (e) => {
+      e.preventDefault();
+      bodyContainer.style.background = '';
+      bodyContainer.style.outline = '';
+    }, false);
+  });
+  bodyContainer.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFileUpload(e.dataTransfer.files[0]);
+    }
+  });
+
+  async function handleFileUpload(file) {
+    const session = getActiveSession();
+    if (!session) return;
+    if (!session.client_token || session.client_status !== 'APPROVED') {
+      alert("Please wait for your connection request to be approved before transferring files.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = async function(evt) {
+      const b64Data = evt.target.result;
+      const isImg = file.type.startsWith('image/');
+      const newMsg = {
+        id: 'local_' + Date.now(),
+        sender: 'guest',
+        text: file.name,
+        filePath: b64Data,
+        fileName: file.name,
+        fileSize: file.size,
+        timestamp: Date.now()
+      };
+      session.messages.push(newMsg);
+      saveSessions();
+      renderMessages();
+      scrollToBottom();
+
+      try {
+        const res = await fetch(`${serverUrl}/api/file/upload`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uuid: session.client_uuid,
+            token: session.client_token,
+            filename: file.name,
+            content: b64Data,
+            name: session.client_name,
+            contact: session.target_host_uuid,
+            text: file.name
+          })
+        });
+        const data = await res.json();
+        if (data && data.url) {
+          newMsg.filePath = data.url;
+          saveSessions();
+          renderMessages();
+        }
+      } catch (err) {
+        console.warn('[Whisker Widget] File upload failed:', err);
+      }
+    };
+    reader.readAsDataURL(file);
+  }
+
   async function handleSendMessage() {
     const session = getActiveSession();
     if (!session) return;
@@ -1413,8 +1506,40 @@
       const isSent = (m.sender === 'guest' || m.sender === 'client' || m.sender === 'user');
       div.className = `whisker-msg ${isSent ? 'whisker-msg-sent' : 'whisker-msg-received'}`;
       const timeStr = new Date(m.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      const fileUrl = m.filePath || m.file;
+      const isImage = fileUrl && (/\.(jpe?g|png|gif|webp|bmp|svg)($|\?)/i.test(fileUrl) || fileUrl.startsWith('data:image/'));
+
+      let contentHtml = '';
+      if (fileUrl) {
+        const fullUrl = fileUrl.startsWith('http') || fileUrl.startsWith('data:') ? fileUrl : `${serverUrl}${fileUrl}`;
+        const fileName = escapeHtml(m.fileName || m.text || 'Attachment');
+        if (isImage) {
+          contentHtml = `
+            <div>
+              <a href="${fullUrl}" target="_blank" rel="noopener">
+                <img src="${fullUrl}" alt="${fileName}" style="max-width: 100%; max-height: 180px; border-radius: 8px; display: block; margin-bottom: 4px; border: 1px solid rgba(255,255,255,0.1); object-fit: contain; background: #000;" />
+              </a>
+              ${m.text && m.text !== fileName ? `<div style="font-size:12px;margin-top:2px;">${escapeHtml(m.text)}</div>` : ''}
+            </div>
+          `;
+        } else {
+          contentHtml = `
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+              <span style="font-size:20px;">📎</span>
+              <div style="overflow:hidden;flex:1;">
+                <div style="font-weight:600;font-size:12px;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;">${fileName}</div>
+                <a href="${fullUrl}" download="${fileName}" target="_blank" style="font-size:11px;color:#38bdf8;text-decoration:underline;">Download File</a>
+              </div>
+            </div>
+          `;
+        }
+      } else {
+        contentHtml = `<div>${escapeHtml(m.text || '')}</div>`;
+      }
+
       div.innerHTML = `
-        <div>${escapeHtml(m.text || '')}</div>
+        ${contentHtml}
         <div class="whisker-msg-time">${timeStr}</div>
       `;
       messagesContainer.appendChild(div);

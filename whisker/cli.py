@@ -29,6 +29,22 @@ def sanitize_name(name: str) -> str:
     return clean or 'default'
 
 
+def sanitize_filename(filename: str) -> str:
+    """Sanitize a filename to prevent invalid URL characters, spaces, and percent encoding."""
+    if not filename:
+        return f"file_{int(time.time())}.bin"
+    base = os.path.basename(str(filename).replace('\\', '/')).strip()
+    if not base:
+        return f"file_{int(time.time())}.bin"
+    name, ext = os.path.splitext(base)
+    clean_name = re.sub(r'[^\w\-\.]', '_', name)
+    clean_name = re.sub(r'_+', '_', clean_name).strip('_')
+    if not clean_name:
+        clean_name = "file"
+    clean_ext = re.sub(r'[^\w\-\.]', '', ext)
+    return f"{clean_name}{clean_ext}"
+
+
 def format_client_db_name(username: str, server_name: str) -> str:
     """Returns the standardized client database filename: whisker_client_<username>_<servername>.db"""
     u = sanitize_name(username)
@@ -451,6 +467,63 @@ def do_send(msg, contact=None, username=None, server_name=None, custom_db=None):
         sys.exit(1)
 
 
+def do_send_file(file_path, contact=None, username=None, server_name=None, custom_db=None):
+    """Sends a local file to the host/contact through the home server."""
+    if not os.path.isfile(file_path):
+        print(f"Error: File '{file_path}' does not exist.")
+        sys.exit(1)
+
+    target = resolve_client_db(username=username, server_name=server_name, custom_db=custom_db)
+
+    server_url = target['server_url']
+    uuid = target['uuid']
+    token = target['token']
+    client_display_name = target['username']
+    host_name = target.get('host_name') or 'Host'
+    host_uuid = contact or target.get('host_uuid') or ''
+
+    filename = sanitize_filename(os.path.basename(file_path))
+    file_size = os.path.getsize(file_path)
+
+    try:
+        import base64
+        with open(file_path, 'rb') as f:
+            file_bytes = f.read()
+
+        b64_content = base64.b64encode(file_bytes).decode('utf-8')
+        payload = {
+            "uuid": uuid,
+            "token": token,
+            "filename": filename,
+            "content": b64_content,
+            "name": client_display_name,
+            "text": filename
+        }
+        if host_uuid:
+            payload["contact"] = host_uuid
+            payload["receiver"] = host_uuid
+
+        req_data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(
+            f"{server_url}/api/file/upload",
+            data=req_data,
+            headers={'Content-Type': 'application/json'}
+        )
+        print(f"Uploading '{filename}' ({file_size} bytes) to {host_name} via {target['server_name']}...")
+        with urllib.request.urlopen(req) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+            if 'error' in res_data:
+                print(f"Error: {res_data['error']}")
+            else:
+                download_url = res_data.get('url') or res_data.get('download_url') or ''
+                print(f"✓ File '{filename}' successfully sent to '{host_name}' via '{target['server_name']}'.")
+                if download_url:
+                    print(f"  Download URL: {server_url}{download_url}")
+    except Exception as e:
+        print(f"Failed to send file to {host_name}: {e}")
+        sys.exit(1)
+
+
 def do_call(contact=None, username=None, server_name=None, video_source=None, audio_source=None, save_streams=False, custom_db=None):
     """Initiates an audio/video WebRTC call to the host."""
     target = resolve_client_db(username=username, server_name=server_name, custom_db=custom_db)
@@ -592,7 +665,7 @@ def do_call(contact=None, username=None, server_name=None, video_source=None, au
             pass
 
 
-def _listen_stream_worker(target, label, video_source=None, audio_source=None, save_streams=False):
+def _listen_stream_worker(target, label, video_source=None, audio_source=None, save_streams=False, storage_dir=None):
     server_url = target['server_url']
     uuid = target['uuid']
     token = target['token']
@@ -604,6 +677,7 @@ def _listen_stream_worker(target, label, video_source=None, audio_source=None, s
 
     active_call_session = None
     call_loop = None
+    processed_event_keys = set()
 
     while True:
         try:
@@ -621,6 +695,19 @@ def _listen_stream_worker(target, label, video_source=None, audio_source=None, s
                             raw_data = json.loads(data_str)
                             inner_payload = raw_data.get('payload') if isinstance(raw_data.get('payload'), dict) else raw_data
                             event_type = inner_payload.get('event') or inner_payload.get('type') or raw_data.get('event') or raw_data.get('type') or ''
+
+                            # Deduplicate stream events
+                            evt_key = inner_payload.get('eventId') or inner_payload.get('messageId') or raw_data.get('eventId') or raw_data.get('messageId')
+                            if not evt_key:
+                                file_target_tmp = inner_payload.get('filePath') or inner_payload.get('file') or raw_data.get('filePath') or raw_data.get('file')
+                                if file_target_tmp:
+                                    evt_key = file_target_tmp
+                            if evt_key:
+                                if evt_key in processed_event_keys:
+                                    continue
+                                processed_event_keys.add(evt_key)
+                                if len(processed_event_keys) > 2000:
+                                    processed_event_keys.clear()
 
                             is_incoming_call = (
                                 event_type in ['webrtc_call_initiate', 'call', 'call_initiate'] or
@@ -642,7 +729,52 @@ def _listen_stream_worker(target, label, video_source=None, audio_source=None, s
                             )
 
                             if event_type in ['chat_message', 'message']:
-                                if (inner_payload.get('sender') or raw_data.get('sender')) == 'phone':
+                                sender_val = inner_payload.get('name') or inner_payload.get('sender') or raw_data.get('name') or raw_data.get('sender') or 'sender'
+                                file_target = inner_payload.get('filePath') or inner_payload.get('file') or raw_data.get('filePath') or raw_data.get('file')
+                                file_name = inner_payload.get('fileName') or raw_data.get('fileName') or inner_payload.get('text') or 'attachment.bin'
+                                if file_target:
+                                    rec_user = sanitize_name(target.get('username') or 'client')
+                                    snd_user = sanitize_name(sender_val)
+                                    now_folder = time.strftime('%Y%m%d.%H%M%S')
+                                    base_dir = storage_dir or './downloads'
+                                    effective_dir = os.path.join(base_dir, rec_user, snd_user, now_folder)
+                                    os.makedirs(effective_dir, exist_ok=True)
+                                    safe_name = sanitize_filename(file_name)
+                                    out_path = os.path.join(effective_dir, safe_name)
+                                    try:
+                                        if file_target.startswith('data:'):
+                                            import base64
+                                            b64_part = file_target.split(',', 1)[1] if ',' in file_target else file_target
+                                            data_bytes = base64.b64decode(b64_part)
+                                            with open(out_path, 'wb') as f_out:
+                                                f_out.write(data_bytes)
+                                            print(f"\n📥 [{label} File Received] Saved '{safe_name}' ({len(data_bytes)} bytes) to '{out_path}'")
+                                        else:
+                                            if file_target.startswith('http://') or file_target.startswith('https://'):
+                                                parsed_u = urllib.parse.urlparse(file_target)
+                                                clean_path = urllib.parse.quote(urllib.parse.unquote(parsed_u.path), safe='/')
+                                                clean_query = urllib.parse.quote(urllib.parse.unquote(parsed_u.query), safe='=&/?%')
+                                                dl_url = f"{parsed_u.scheme}://{parsed_u.netloc}{clean_path}" + (f"?{clean_query}" if clean_query else "")
+                                            else:
+                                                clean_target = file_target if file_target.startswith('/') else f"/{file_target}"
+                                                if '?' in clean_target:
+                                                    p_part, q_part = clean_target.split('?', 1)
+                                                    clean_p = urllib.parse.quote(urllib.parse.unquote(p_part), safe='/')
+                                                    clean_q = urllib.parse.quote(urllib.parse.unquote(q_part), safe='=&/?%')
+                                                    dl_url = f"{server_url}{clean_p}?{clean_q}"
+                                                else:
+                                                    clean_p = urllib.parse.quote(urllib.parse.unquote(clean_target), safe='/')
+                                                    dl_url = f"{server_url}{clean_p}"
+
+                                            dl_req = urllib.request.Request(dl_url)
+                                            with urllib.request.urlopen(dl_req) as dl_resp:
+                                                data_bytes = dl_resp.read()
+                                            with open(out_path, 'wb') as f_out:
+                                                f_out.write(data_bytes)
+                                            print(f"\n📥 [{label} File Received] Downloaded '{safe_name}' ({len(data_bytes)} bytes) to '{out_path}'")
+                                    except Exception as dl_err:
+                                        print(f"\n⚠️ [{label}] Error saving received file '{safe_name}': {dl_err}")
+                                elif sender_val == 'phone' or sender_val != target.get('uuid'):
                                     print(f"\n[{label}] {inner_payload.get('text') or raw_data.get('text')}")
                             elif event_type == 'call_accepted':
                                 print(f"\n[{label} Call] Host accepted the call.")
@@ -738,8 +870,8 @@ def _listen_stream_worker(target, label, video_source=None, audio_source=None, s
                 active_call_session.hangup()
 
 
-def do_listen(contact=None, username=None, server_name=None, listen_all=False, video_source=None, audio_source=None, save_streams=False, custom_db=None):
-    """Listens for SSE real-time events and auto-answers incoming calls."""
+def do_listen(contact=None, username=None, server_name=None, listen_all=False, video_source=None, audio_source=None, save_streams=False, custom_db=None, storage_dir=None):
+    """Listens for SSE real-time events, automatically downloads received files/backups, and auto-answers incoming calls."""
     if listen_all:
         dbs = get_all_client_dbs('.')
         if not dbs:
@@ -751,7 +883,7 @@ def do_listen(contact=None, username=None, server_name=None, listen_all=False, v
             lbl = f"{d['username']}@{d['server_name']}"
             t = threading.Thread(
                 target=_listen_stream_worker,
-                args=(d, lbl, video_source, audio_source, save_streams),
+                args=(d, lbl, video_source, audio_source, save_streams, storage_dir),
                 daemon=True
             )
             t.start()
@@ -767,9 +899,10 @@ def do_listen(contact=None, username=None, server_name=None, listen_all=False, v
     if contact:
         target['host_uuid'] = contact
     label = f"{target['username']}@{target['server_name']}"
-    print(f"Listening for events as '{target['username']}' on '{target['server_name']}' ({target['server_url']}) [DB: {target['file']}] (Press Ctrl+C to stop)...")
+    save_info = f" [Auto-saving files to '{storage_dir or './downloads'}']"
+    print(f"Listening for events as '{target['username']}' on '{target['server_name']}' ({target['server_url']}){save_info} (Press Ctrl+C to stop)...")
     try:
-        _listen_stream_worker(target, label, video_source=video_source, audio_source=audio_source, save_streams=save_streams)
+        _listen_stream_worker(target, label, video_source=video_source, audio_source=audio_source, save_streams=save_streams, storage_dir=storage_dir)
     except KeyboardInterrupt:
         print("\nStopped listening.")
 
@@ -841,11 +974,15 @@ Usage:
   {base} send [-u USER] [-s SERVER] [-c CONTACT] [--db DB_FILE] <message>
       Send message to paired host
 
+  {base} send-file [-u USER] [-s SERVER] [-c CONTACT] [--db DB_FILE] <file_path>
+      Upload and send file or photo attachment to paired host
+
   {base} call [-u USER] [-s SERVER] [-c CONTACT] [-v DEV] [-a DEV] [--save-streams]
       Initiate WebRTC call (saves to <caller>.<callee>.<unixepoch>.mp4 with --save-streams)
 
-  {base} listen [-u USER] [-s SERVER] [-c CONTACT] [-v DEV] [-a DEV] [--save-streams] [--all]
-      Listen for SSE events & auto-answer incoming calls
+  {base} listen [-u USER] [-s SERVER] [-c CONTACT] [-v DEV] [-a DEV] [--save-streams] [--all] [--storage-dir DIR]
+      Listen for SSE events, automatically download incoming files/photos, and auto-answer calls.
+      Run with '-u backup' to act as an automated continuous backup vault.
 
   {base} info [-u USER] [-s SERVER] [-c CONTACT] [--db DB_FILE]
       Show client configuration and home server status
@@ -939,6 +1076,16 @@ def main():
         args = parser.parse_args(sys.argv[2:])
         do_send(" ".join(args.message), contact=args.contact, username=args.username, server_name=args.server_name, custom_db=args.db)
 
+    elif cmd in ['send-file', 'sendfile']:
+        parser = argparse.ArgumentParser(prog=get_cmd_prog(cmd), description="Upload and send file or photo to Home Server host")
+        parser.add_argument('-u', '--user', '--username', '-C', '--client', dest='username', type=str, default=None, help="Client username to send as")
+        parser.add_argument('-s', '--server', '--server-name', '--servername', dest='server_name', type=str, default=None, help="Home server name to connect to")
+        parser.add_argument('-c', '--contact', type=str, default=None, help="Target specific host contact UUID or name")
+        parser.add_argument('--db', '-d', type=str, default=None, help="Custom client database file")
+        parser.add_argument('file_path', help="Local file path to upload and transmit")
+        args = parser.parse_args(sys.argv[2:])
+        do_send_file(args.file_path, contact=args.contact, username=args.username, server_name=args.server_name, custom_db=args.db)
+
     elif cmd == 'call':
         parser = argparse.ArgumentParser(prog=get_cmd_prog(cmd), description="Initiate WebRTC call to Home Server host")
         parser.add_argument('-u', '--user', '--username', '-C', '--client', dest='username', type=str, default=None, help="Client username to call as")
@@ -952,7 +1099,7 @@ def main():
         do_call(contact=args.contact, username=args.username, server_name=args.server_name, video_source=args.video, audio_source=args.audio, save_streams=args.save_streams, custom_db=args.db)
 
     elif cmd == 'listen':
-        parser = argparse.ArgumentParser(prog=get_cmd_prog(cmd), description="Listen for SSE events from Home Server")
+        parser = argparse.ArgumentParser(prog=get_cmd_prog(cmd), description="Listen for SSE events and auto-download incoming files")
         parser.add_argument('-u', '--user', '--username', '-C', '--client', dest='username', type=str, default=None, help="Client username to listen as")
         parser.add_argument('-s', '--server', '--server-name', '--servername', dest='server_name', type=str, default=None, help="Home server name to connect to")
         parser.add_argument('-c', '--contact', type=str, default=None, help="Target specific host contact UUID or name")
@@ -960,9 +1107,10 @@ def main():
         parser.add_argument('-a', '--audio', type=str, default=None, help="Audio source to stream if a call arrives")
         parser.add_argument('--save-streams', action='store_true', help="Save incoming and outgoing streams to MP4 file")
         parser.add_argument('--all', action='store_true', help="Listen to events across all local client databases simultaneously")
+        parser.add_argument('--storage-dir', '--backup-dir', '--output-dir', '-o', dest='storage_dir', type=str, default=None, help="Directory to save received files (defaults to ./downloads)")
         parser.add_argument('--db', '-d', type=str, default=None, help="Custom client database file")
         args = parser.parse_args(sys.argv[2:])
-        do_listen(contact=args.contact, username=args.username, server_name=args.server_name, listen_all=args.all, video_source=args.video, audio_source=args.audio, save_streams=args.save_streams, custom_db=args.db)
+        do_listen(contact=args.contact, username=args.username, server_name=args.server_name, listen_all=args.all, video_source=args.video, audio_source=args.audio, save_streams=args.save_streams, custom_db=args.db, storage_dir=args.storage_dir)
 
     elif cmd == 'info':
         parser = argparse.ArgumentParser(prog=get_cmd_prog(cmd), description="Show client info and server status")
