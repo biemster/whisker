@@ -14,6 +14,7 @@ import urllib.parse
 import threading
 import time
 import traceback
+import socket
 
 if __package__ is None or __package__ == '':
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -156,6 +157,40 @@ TOOLS = [
                 "db_file": {
                     "type": "string",
                     "description": "Direct path to client database file"
+                }
+            }
+        }
+    },
+    {
+        "name": "whisker_wait_new_messages",
+        "description": "Blocks on the Home Server's SSE event stream (/api/events) until a new message from the host mobile device arrives (sender='phone') or timeout is reached. Returns only new, deduplicated host messages.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "username": {
+                    "type": "string",
+                    "description": "Client username"
+                },
+                "server_name": {
+                    "type": "string",
+                    "description": "Home server name"
+                },
+                "contact": {
+                    "type": "string",
+                    "description": "Filter messages by host contact UUID"
+                },
+                "db_file": {
+                    "type": "string",
+                    "description": "Direct path to client database file"
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Maximum seconds to wait on the SSE event stream before returning (default: 60)"
+                },
+                "known_message_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional list of message IDs already seen by the caller for strict deduplication"
                 }
             }
         }
@@ -509,13 +544,141 @@ def handle_get_messages(args: dict) -> dict:
     req = urllib.request.Request(url)
     with urllib.request.urlopen(req, timeout=8) as response:
         res_data = json.loads(response.read().decode('utf-8'))
-        messages = res_data.get('messages', [])
+        if isinstance(res_data, list):
+            messages = res_data
+        elif isinstance(res_data, dict):
+            messages = res_data.get('messages', [])
+        else:
+            messages = []
         return {
             "count": len(messages),
             "messages": messages,
             "client_uuid": uuid,
             "server_name": target['server_name']
         }
+
+
+def handle_wait_new_messages(args: dict) -> dict:
+    target = resolve_client_db(
+        username=args.get('username'),
+        server_name=args.get('server_name'),
+        custom_db=args.get('db_file')
+    )
+    server_url = target['server_url']
+    uuid = target['uuid']
+    token = target['token']
+    timeout_seconds = int(args.get('timeout_seconds', 60))
+    contact_filter = args.get('contact')
+    known_ids = set(args.get('known_message_ids') or [])
+
+    def fetch_current_messages(limit=50):
+        qp = {'uuid': uuid, 'token': token, 'limit': str(limit)}
+        if contact_filter:
+            qp['contact'] = contact_filter
+        u = f"{server_url}/api/messages?{urllib.parse.urlencode(qp)}"
+        req = urllib.request.Request(u)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                return data.get('messages', [])
+            return []
+
+    # Filter messages according to correctness rules:
+    # 1. sender must be 'phone' (messages from mobile host)
+    # 2. ignore agent's own messages (sender == 'guest' or 'client')
+    # 3. message ID not in seen/known set
+    def filter_new_host_messages(msgs, seen_set):
+        new_msgs = []
+        for m in msgs:
+            sender = (m.get('sender') or '').strip().lower()
+            m_id = m.get('id')
+            if sender == 'phone' and m_id not in seen_set:
+                new_msgs.append(m)
+        return new_msgs
+
+    # Seed initial seen IDs from existing history if none provided
+    initial_msgs = fetch_current_messages(limit=100)
+    seen_ids = set(known_ids)
+    if not known_ids:
+        # First-run seed: mark existing message IDs as seen
+        for m in initial_msgs:
+            if m.get('id'):
+                seen_ids.add(m['id'])
+    else:
+        # Catch-up check: if caller provided known_ids, check if any host messages arrived in the meantime
+        pending = filter_new_host_messages(initial_msgs, seen_ids)
+        if pending:
+            return {
+                "count": len(pending),
+                "messages": pending,
+                "client_uuid": uuid,
+                "server_name": target['server_name'],
+                "timed_out": False
+            }
+
+    # Block on SSE event stream (/api/events)
+    sse_url = f"{server_url}/api/events?{urllib.parse.urlencode({'uuid': uuid, 'token': token})}"
+    deadline = time.time() + max(1, timeout_seconds)
+    reconnect_delay = 2
+
+    while time.time() < deadline:
+        remaining_time = max(1.0, deadline - time.time())
+        # Set socket timeout safely: at least 30s or remaining_time + 5s
+        sock_timeout = max(30.0, remaining_time + 5.0)
+        req = urllib.request.Request(sse_url, headers={"Accept": "text/event-stream"})
+        try:
+            with urllib.request.urlopen(req, timeout=sock_timeout) as resp:
+                for raw_line in resp:
+                    if time.time() >= deadline:
+                        break
+                    line = raw_line.decode('utf-8', 'replace').strip()
+                    if not line.startswith("data:"):
+                        continue
+                    # Any data event: verify against /api/messages and filter sender=='phone'
+                    cur_msgs = fetch_current_messages(limit=50)
+                    new_host = filter_new_host_messages(cur_msgs, seen_ids)
+                    if new_host:
+                        return {
+                            "count": len(new_host),
+                            "messages": new_host,
+                            "client_uuid": uuid,
+                            "server_name": target['server_name'],
+                            "timed_out": False
+                        }
+        except (TimeoutError, socket.timeout):
+            # Normal socket timeout check against overall deadline
+            if time.time() >= deadline:
+                break
+        except Exception:
+            # Reconnect with small backoff if time permits
+            if time.time() + reconnect_delay >= deadline:
+                break
+            time.sleep(reconnect_delay)
+
+    # Final check before timeout return
+    try:
+        final_msgs = fetch_current_messages(limit=50)
+        final_new = filter_new_host_messages(final_msgs, seen_ids)
+        if final_new:
+            return {
+                "count": len(final_new),
+                "messages": final_new,
+                "client_uuid": uuid,
+                "server_name": target['server_name'],
+                "timed_out": False
+            }
+    except Exception:
+        pass
+
+    return {
+        "count": 0,
+        "messages": [],
+        "client_uuid": uuid,
+        "server_name": target['server_name'],
+        "timed_out": True
+    }
 
 
 def handle_poll_events(args: dict) -> dict:
@@ -527,7 +690,7 @@ def handle_poll_events(args: dict) -> dict:
     server_url = target['server_url']
     uuid = target['uuid']
 
-    url = f"{server_url}/api/embed/session?uuid={urllib.parse.quote(uuid)}"
+    url = f"{server_url}/api/guest/session?uuid={urllib.parse.quote(uuid)}"
     req = urllib.request.Request(url)
     with urllib.request.urlopen(req, timeout=5) as response:
         session_data = json.loads(response.read().decode('utf-8'))
@@ -632,6 +795,7 @@ TOOL_HANDLERS = {
     "whisker_info": handle_info,
     "whisker_send_message": handle_send_message,
     "whisker_get_messages": handle_get_messages,
+    "whisker_wait_new_messages": handle_wait_new_messages,
     "whisker_poll_events": handle_poll_events,
     "whisker_initiate_call": handle_initiate_call,
     "whisker_remove_client": handle_remove_client,

@@ -19,6 +19,7 @@ setup(
         "console_scripts": [
             "whisker=whisker.cli:main",
             "whisker-mcp=whisker.mcp:run_mcp_server",
+            "whisker-watch=whisker.watcher:main",
         ],
     },
 )
