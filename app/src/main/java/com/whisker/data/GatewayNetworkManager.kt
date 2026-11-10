@@ -40,6 +40,7 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.InetAddress
+import java.net.URLEncoder
 import java.util.UUID
 import android.net.Uri
 import okhttp3.MultipartBody
@@ -155,6 +156,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
     private var lastRegisteredToken: String? = null
     private var lastRegisteredServerUrl: String? = null
     private var lastRegisteredApiKey: String? = null
+    private val registeredTokensByServer = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     val allHomeServers = repository.allHomeServers
     val homeServers = MutableStateFlow<List<HomeServer>>(emptyList())
@@ -187,11 +189,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
         // Restore cached push token if available
         val savedFcmToken = prefs.getString("fcm_token", null)
-        if (!savedFcmToken.isNullOrEmpty() && !savedFcmToken.startsWith("device-push-token-")) {
+        if (!savedFcmToken.isNullOrEmpty() && !savedFcmToken.startsWith("device-push-token-") && !savedFcmToken.startsWith("Fetching")) {
             pushToken.value = savedFcmToken
+            scope.launch(Dispatchers.IO) {
+                val initialServers = repository.getAllHomeServersSync()
+                for (s in initialServers) {
+                    registerPushTokenForServer(s)
+                }
+            }
         } else {
             pushToken.value = ""
-            prefs.edit().remove("fallback_device_push_token").remove("fcm_token").apply()
         }
 
         // Restore or initialize hostUsername
@@ -325,9 +332,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 for (remotePeer in localClients.filter { it.serverAddress != "local" && !servers.any { s -> s.url == it.serverAddress } && it.status == "APPROVED" && it.token.isNotEmpty() }) {
                     try {
                         val remoteUrl = remotePeer.serverAddress.trimEnd('/')
+                        val peerJson = JSONObject().apply {
+                            put("action", "events")
+                            put("uuid", remotePeer.uuid)
+                            put("token", remotePeer.token)
+                        }
+                        val mediaTypeJson = "application/json; charset=utf-8".toMediaTypeOrNull()
+                        val peerPayload = RequestBody.create(mediaTypeJson, peerJson.toString())
                         val remoteReq = Request.Builder()
-                            .url("$remoteUrl/api/guest/events?uuid=${remotePeer.uuid}&token=${remotePeer.token}")
-                            .get()
+                            .url("$remoteUrl/api/host")
+                            .post(peerPayload)
                             .build()
                         okHttpClient.newCall(remoteReq).execute().use { remoteResp ->
                             if (remoteResp.isSuccessful) {
@@ -369,55 +383,72 @@ class GatewayNetworkManager(private val context: Context, private val repository
             }
         }
 
-        // Authoritative admin & identity check via /api/host/me
-        try {
-            val meReq = Request.Builder()
-                .url("$cleanUrl/api/host/me")
-                .header("Authorization", "Bearer $pinVal")
-                .get()
-                .build()
-            okHttpClient.newCall(meReq).execute().use { meResp ->
-                if (meResp.isSuccessful) {
-                    val meBody = meResp.body?.string() ?: ""
-                    val meJson = JSONObject(meBody)
-                    val meAdmin = meJson.optInt("is_admin", 0) == 1 || meJson.optBoolean("is_admin", false)
-                    val meRole = meJson.optString("role", if (meAdmin) "ADMIN" else (if (currentServer.isMember) "MEMBER" else "COMPANION"))
-                    val meUuid = meJson.optString("uuid", "")
-                    val sName = meJson.optString("server_name", meJson.optString("servername", "")).ifBlank { currentServer.name }
-                    val latest = repository.getHomeServerById(server.id) ?: currentServer
-                    if (latest.isAdmin != meAdmin || latest.serverRole != meRole || (meUuid.isNotEmpty() && latest.registeredUuid != meUuid) || latest.name != sName) {
-                        val updatedHost = latest.copy(
-                            registeredUuid = if (meUuid.isNotEmpty()) meUuid else latest.registeredUuid,
-                            isAdmin = meAdmin,
-                            serverRole = meRole,
-                            name = sName
-                        )
-                        repository.updateHomeServer(updatedHost)
-                        currentServer = updatedHost
-                    }
-                } else if (meResp.code == 401 && currentServer.isHost) {
-                    registerMobileWithServer(currentServer)
-                }
-            }
-        } catch (_: Exception) {}
+        val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
+        val fcmHashPrefKey = "fcm_hash_${cleanUrl.hashCode()}"
+        val cachedFcmHash = prefs.getString(fcmHashPrefKey, "") ?: ""
 
         var fetchSuccess = false
 
         try {
-            val eventsUrl = if (!tickleEventId.isNullOrEmpty()) "$cleanUrl/api/host/events?eventId=$tickleEventId" else "$cleanUrl/api/host/events"
-            Log.d("GatewayNetworkManager", "Polling Home Server (${server.name}): $eventsUrl")
-            val request = Request.Builder()
-                .url(eventsUrl)
+            val currentToken = pushToken.value.takeIf { it.isNotEmpty() && !it.startsWith("Fetching") && !it.startsWith("device-push-token-") }
+                ?: prefs.getString("fcm_token", null)?.takeIf { !it.startsWith("device-push-token-") && !it.startsWith("Fetching") }
+
+            val syncBodyJson = JSONObject().apply {
+                put("action", "sync")
+                if (!tickleEventId.isNullOrEmpty()) {
+                    put("eventId", tickleEventId)
+                }
+                if (cachedFcmHash.isNotEmpty()) {
+                    put("fcm_hash", cachedFcmHash)
+                }
+                if (!currentToken.isNullOrEmpty()) {
+                    put("push_token", currentToken)
+                    put("pushToken", currentToken)
+                }
+            }
+            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+            val requestBody = RequestBody.create(mediaType, syncBodyJson.toString())
+
+            Log.d("GatewayNetworkManager", "Syncing Home Server (${server.name}): $cleanUrl/api/host via POST JSON")
+            val requestBuilder = Request.Builder()
+                .url("$cleanUrl/api/host")
                 .header("Authorization", "Bearer $pinVal")
-                .get()
-                .build()
+                .post(requestBody)
+
+            if (cachedFcmHash.isNotEmpty()) {
+                requestBuilder.header("If-None-Match", "\"$cachedFcmHash\"")
+            }
+
+            val request = requestBuilder.build()
 
             okHttpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     fetchSuccess = true
+                    val bodyStr = response.body?.string() ?: ""
+                    val rootJson = JSONObject(bodyStr)
 
-                    val body = response.body?.string() ?: ""
-                    val eventsArray = JSONArray(body)
+                    // 1. Process identity ("me")
+                    val meJson = rootJson.optJSONObject("me")
+                    if (meJson != null) {
+                        val meAdmin = meJson.optInt("is_admin", 0) == 1 || meJson.optBoolean("is_admin", false)
+                        val meRole = meJson.optString("role", if (meAdmin) "ADMIN" else (if (currentServer.isMember) "MEMBER" else "COMPANION"))
+                        val meUuid = meJson.optString("uuid", "")
+                        val sName = meJson.optString("server_name", meJson.optString("servername", "")).ifBlank { currentServer.name }
+                        val latest = repository.getHomeServerById(server.id) ?: currentServer
+                        if (latest.isAdmin != meAdmin || latest.serverRole != meRole || (meUuid.isNotEmpty() && latest.registeredUuid != meUuid) || latest.name != sName) {
+                            val updatedHost = latest.copy(
+                                registeredUuid = if (meUuid.isNotEmpty()) meUuid else latest.registeredUuid,
+                                isAdmin = meAdmin,
+                                serverRole = meRole,
+                                name = sName
+                            )
+                            repository.updateHomeServer(updatedHost)
+                            currentServer = updatedHost
+                        }
+                    }
+
+                    // 2. Process events queue ("events")
+                    val eventsArray = rootJson.optJSONArray("events") ?: JSONArray()
                     for (i in 0 until eventsArray.length()) {
                         val eventObj = eventsArray.getJSONObject(i)
                         val id = eventObj.getString("id")
@@ -436,7 +467,6 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                         iterator.remove()
                                     }
                                 }
-                                val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
                                 prefs.edit().putStringSet("processed_event_ids", processedEventIds.toSet()).apply()
                                 false
                             }
@@ -459,29 +489,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         ackEventOnServer(cleanUrl, pinVal, id)
                     }
 
-                    syncFcmForServer(server)
-                } else if ((response.code == 401 || response.code == 403) && currentServer.isHost) {
-                    val (registered, regUuid) = registerMobileWithServer(currentServer)
-                    if (registered) {
-                        fetchSuccess = true
-                        syncFcmForServer(currentServer)
-                    }
-                }
-            }
-
-            // Sync client presences
-            val presenceReq = Request.Builder()
-                .url("$cleanUrl/api/host/clients")
-                .header("Authorization", "Bearer $pinVal")
-                .get()
-                .build()
-
-            okHttpClient.newCall(presenceReq).execute().use { response ->
-                if (response.isSuccessful) {
-                    fetchSuccess = true
-                    val body = response.body?.string() ?: "[]"
-                    val clientsArray = JSONArray(body)
-
+                    // 3. Process clients presence ("clients")
+                    val clientsArray = rootJson.optJSONArray("clients") ?: JSONArray()
                     val onlineUuids = mutableSetOf<String>()
                     val serverClients = mutableMapOf<String, JSONObject>()
 
@@ -561,6 +570,37 @@ class GatewayNetworkManager(private val context: Context, private val repository
                             repository.insertRequest(newRequest)
                         }
                     }
+
+                    // 4. Process ETag-cached FCM settings ("fcm")
+                    val fcmJson = rootJson.optJSONObject("fcm")
+                    if (fcmJson != null) {
+                        val newHash = fcmJson.optString("hash", "")
+                        val isUnchanged = fcmJson.optBoolean("unchanged", false)
+                        if (!isUnchanged && fcmJson.optBoolean("configured", false)) {
+                            val senderId = fcmJson.optString("sender_id", "")
+                            val projectId = fcmJson.optString("project_id", "")
+                            val appId = fcmJson.optString("app_id", "")
+                            val apiKey = fcmJson.optString("api_key", "")
+
+                            val currentSenderId = prefs.getString("fcm_sender_id", null)
+                            val currentApiKey = prefs.getString("fcm_api_key", null)
+                            val needsConfigUpdate = !senderId.isNullOrEmpty() && (senderId != currentSenderId || (!apiKey.isNullOrEmpty() && apiKey != currentApiKey))
+                            if (needsConfigUpdate) {
+                                Log.d("FCMInit", "[FCM Config Sync] Updated FCM configuration from POST /api/host! Sender ID: $senderId, Project ID: $projectId")
+                                saveFcmConfig(senderId, projectId, appId, apiKey)
+                            } else if (pushToken.value.isEmpty()) {
+                                registerFcmToken()
+                            }
+                        }
+                        if (newHash.isNotEmpty()) {
+                            prefs.edit().putString(fcmHashPrefKey, newHash).apply()
+                        }
+                    }
+                } else if ((response.code == 401 || response.code == 403) && currentServer.isHost) {
+                    val (registered, regUuid) = registerMobileWithServer(currentServer)
+                    if (registered) {
+                        fetchSuccess = true
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -601,8 +641,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
             if (candidate == current) continue
             try {
                 val testReq = Request.Builder()
-                    .url("$candidate/api/host/events")
-                    .header("Authorization", "Bearer $pinVal")
+                    .url("$candidate/api/public")
                     .get()
                     .build()
                 okHttpClient.newCall(testReq).execute().use { res ->
@@ -624,31 +663,38 @@ class GatewayNetworkManager(private val context: Context, private val repository
         val cleanUrl = serverUrlVal.trim().removeSuffix("/")
         if (cleanUrl.isEmpty() || !cleanUrl.startsWith("http")) return
         try {
+            val syncBodyJson = JSONObject().apply {
+                put("action", "sync")
+            }
+            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+            val requestBody = RequestBody.create(mediaType, syncBodyJson.toString())
             val request = Request.Builder()
-                .url("$cleanUrl/api/host/fcm_config")
+                .url("$cleanUrl/api/host")
                 .header("Authorization", "Bearer $pinVal")
-                .get()
+                .post(requestBody)
                 .build()
 
             okHttpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     val bodyStr = response.body?.string() ?: ""
                     val json = JSONObject(bodyStr)
-                    val configured = json.optBoolean("configured", false)
+                    val fcmObj = json.optJSONObject("fcm") ?: json
+                    val configured = fcmObj.optBoolean("configured", false)
                     if (configured) {
-                        val senderId = json.optString("sender_id", "")
-                        val projectId = json.optString("project_id", "")
-                        val appId = json.optString("app_id", "")
-                        val apiKey = json.optString("api_key", "")
+                        val senderId = fcmObj.optString("sender_id", "")
+                        val projectId = fcmObj.optString("project_id", "")
+                        val appId = fcmObj.optString("app_id", "")
+                        val apiKey = fcmObj.optString("api_key", "")
 
                         val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
                         val currentSenderId = prefs.getString("fcm_sender_id", null)
                         val currentApiKey = prefs.getString("fcm_api_key", null)
-
-                        val needsUpdate = !senderId.isNullOrEmpty() && (senderId != currentSenderId || (!apiKey.isNullOrEmpty() && apiKey != currentApiKey) || pushToken.value.isEmpty())
-                        if (needsUpdate) {
+                        val needsConfigUpdate = !senderId.isNullOrEmpty() && (senderId != currentSenderId || (!apiKey.isNullOrEmpty() && apiKey != currentApiKey))
+                        if (needsConfigUpdate) {
                             Log.d("FCMInit", "[FCM Config Sync] Received FCM configuration from Home Server! Sender ID: $senderId, Project ID: $projectId, API Key: ${apiKey.take(6)}...")
                             saveFcmConfig(senderId, projectId, appId, apiKey)
+                        } else if (pushToken.value.isEmpty()) {
+                            registerFcmToken()
                         }
                     }
                 }
@@ -667,24 +713,30 @@ class GatewayNetworkManager(private val context: Context, private val repository
         val pinVal = server.apiKey
         if (cleanUrl.isEmpty() || !cleanUrl.startsWith("http")) return
         try {
+            val syncBodyJson = JSONObject().apply {
+                put("action", "sync")
+            }
+            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+            val requestBody = RequestBody.create(mediaType, syncBodyJson.toString())
             val request = Request.Builder()
-                .url("$cleanUrl/api/host/fcm_config")
+                .url("$cleanUrl/api/host")
                 .header("Authorization", "Bearer $pinVal")
-                .get()
+                .post(requestBody)
                 .build()
 
             okHttpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     val bodyStr = response.body?.string() ?: ""
                     val json = JSONObject(bodyStr)
-                    val configured = json.optBoolean("configured", false)
+                    val fcmObj = json.optJSONObject("fcm") ?: json
+                    val configured = fcmObj.optBoolean("configured", false)
                     if (configured) {
-                        val senderId = json.optString("sender_id", "")
-                        val projectId = json.optString("project_id", "")
-                        val appId = json.optString("app_id", "")
-                        val apiKey = json.optString("api_key", "")
+                        val senderId = fcmObj.optString("sender_id", "")
+                        val projectId = fcmObj.optString("project_id", "")
+                        val appId = fcmObj.optString("app_id", "")
+                        val apiKey = fcmObj.optString("api_key", "")
 
-                        val sName = json.optString("server_name", "").ifEmpty { json.optString("servername", "") }
+                        val sName = fcmObj.optString("server_name", "").ifEmpty { fcmObj.optString("servername", "") }
                         val nameToUse = if (sName.isNotEmpty() && (server.name == "Home Server" || server.name.isEmpty())) sName else server.name
 
                         if (senderId.isNotEmpty() && (senderId != server.senderId || apiKey != server.fcmApiKey || nameToUse != server.name)) {
@@ -718,46 +770,15 @@ class GatewayNetworkManager(private val context: Context, private val repository
         val pinVal = server.apiKey
         if (cleanUrl.isEmpty() || pinVal.isEmpty()) return
 
-        if (server.senderId.isNotEmpty() && server.senderId.all { it.isDigit() }) {
-            try {
-                val appName = "fcm_srv_${server.id.take(8)}"
-                val senderId = server.senderId
-                val projectId = if (server.projectId.isNotEmpty()) server.projectId else "whisker-project"
-                val appId = if (server.appId.isNotEmpty()) server.appId else "1:$senderId:android:whisker"
-                val apiKey = if (server.fcmApiKey.isNotEmpty()) server.fcmApiKey else "AIzaSyWhiskerAutoConfiguredKey"
-
-                val existingApps = com.google.firebase.FirebaseApp.getApps(context.applicationContext)
-                val targetApp = existingApps.find { it.name == appName } ?: run {
-                    val options = com.google.firebase.FirebaseOptions.Builder()
-                        .setApplicationId(appId)
-                        .setApiKey(apiKey)
-                        .setProjectId(projectId)
-                        .setGcmSenderId(senderId)
-                        .build()
-                    com.google.firebase.FirebaseApp.initializeApp(context.applicationContext, options, appName)
-                }
-
-                targetApp.get(com.google.firebase.messaging.FirebaseMessaging::class.java).token.addOnCompleteListener { task ->
-                    if (task.isSuccessful && !task.result.isNullOrEmpty()) {
-                        val token = task.result
-                        Log.d("FCMInit", "Obtained server-specific FCM token for ${server.name}: ${token.take(12)}...")
-                        registerPushTokenOnServer(cleanUrl, pinVal, token)
-                        if (token != server.fcmToken) {
-                            scope.launch {
-                                repository.updateHomeServer(server.copy(fcmToken = token))
-                            }
-                        }
-                    } else {
-                        registerPushTokenOnServer(cleanUrl, pinVal, pushToken.value)
-                    }
-                }
-                return
-            } catch (e: Exception) {
-                Log.w("FCMInit", "Dedicated FirebaseApp initialization for ${server.name} fallback: ${e.message}")
-            }
+        val activeToken = when {
+            pushToken.value.isNotEmpty() && !pushToken.value.startsWith("Fetching") && !pushToken.value.startsWith("device-push-token-") -> pushToken.value
+            server.fcmToken.isNotEmpty() && !server.fcmToken.startsWith("device-push-token-") -> server.fcmToken
+            else -> context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE).getString("fcm_token", "") ?: ""
         }
 
-        registerPushTokenOnServer(cleanUrl, pinVal, pushToken.value)
+        if (activeToken.isNotEmpty() && !activeToken.startsWith("device-push-token-") && !activeToken.startsWith("Fetching")) {
+            registerPushTokenOnServer(cleanUrl, pinVal, activeToken)
+        }
     }
 
     suspend fun registerMobileWithServer(server: HomeServer): Pair<Boolean, String> {
@@ -769,6 +790,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
             val cleanUser = server.clientIdentity.trim().ifEmpty { hostUsername.value.ifEmpty { Build.MODEL ?: "Mobile Device" } }
             val token = if (server.fcmToken.isNotEmpty()) server.fcmToken else pushToken.value
             val body = JSONObject().apply {
+                put("action", "register_mobile")
                 put("username", cleanUser)
                 put("pin_token", pinVal)
                 put("push_token", token)
@@ -776,7 +798,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
             val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
             val requestBody = RequestBody.create(mediaType, body.toString())
             val request = Request.Builder()
-                .url("$cleanUrl/api/register_mobile")
+                .url("$cleanUrl/api/host")
+                .header("Authorization", "Bearer $pinVal")
                 .post(requestBody)
                 .build()
             okHttpClient.newCall(request).execute().use { response ->
@@ -805,10 +828,13 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     }
                     if (server.allowDirectCalls) {
                         try {
-                            val payload = JSONObject().apply { put("allow_direct_calls", true) }
+                            val payload = JSONObject().apply {
+                                put("action", "direct_calls")
+                                put("allow_direct_calls", true)
+                            }
                             val directBody = RequestBody.create(mediaType, payload.toString())
                             val dcReq = Request.Builder()
-                                .url("$cleanUrl/api/host/direct_calls")
+                                .url("$cleanUrl/api/host")
                                 .header("Authorization", "Bearer $pinVal")
                                 .post(directBody)
                                 .build()
@@ -816,10 +842,13 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         } catch (_: Exception) {}
                     }
                     try {
-                        val widgetPayload = JSONObject().apply { put("allow_widget", server.allowWidgetAccess) }
+                        val widgetPayload = JSONObject().apply {
+                            put("action", "widget_access")
+                            put("allow_widget", server.allowWidgetAccess)
+                        }
                         val widgetBody = RequestBody.create(mediaType, widgetPayload.toString())
                         val wReq = Request.Builder()
-                            .url("$cleanUrl/api/host/widget_access")
+                            .url("$cleanUrl/api/host")
                             .header("Authorization", "Bearer $pinVal")
                             .post(widgetBody)
                             .build()
@@ -950,21 +979,28 @@ class GatewayNetworkManager(private val context: Context, private val repository
         val activeToken = if (pushTokenVal.isNotEmpty()) pushTokenVal else pushToken.value
         if (activeToken.isEmpty() || activeToken == "undefined" || activeToken == "null" || activeToken.startsWith("Fetching") || activeToken.startsWith("Searching") || activeToken.startsWith("device-push-token-")) return
 
+        val cacheKey = "$cleanUrl|$pinVal"
+        if (registeredTokensByServer[cacheKey] == activeToken) {
+            return
+        }
+
         try {
             val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
             val body = JSONObject().apply {
+                put("action", "register_push")
                 put("pushToken", activeToken)
                 put("fcmToken", activeToken)
             }
             val requestBody = RequestBody.create(mediaType, body.toString())
             val request = Request.Builder()
-                .url("$cleanUrl/api/host/register_push")
+                .url("$cleanUrl/api/host")
                 .header("Authorization", "Bearer $pinVal")
                 .header("X-Push-Token", activeToken)
                 .post(requestBody)
                 .build()
             okHttpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
+                    registeredTokensByServer[cacheKey] = activeToken
                     lastRegisteredServerUrl = cleanUrl
                     lastRegisteredApiKey = pinVal
                     lastRegisteredToken = activeToken
@@ -987,11 +1023,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
         try {
             val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
             val body = JSONObject().apply {
+                put("action", "ack")
                 put("eventId", eventId)
             }
             val requestBody = RequestBody.create(mediaType, body.toString())
             val request = Request.Builder()
-                .url("$cleanUrl/api/host/ack")
+                .url("$cleanUrl/api/host")
                 .header("Authorization", "Bearer $pinVal")
                 .post(requestBody)
                 .build()
@@ -1420,10 +1457,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 break
             }
 
+            val msgBody = JSONObject().apply {
+                put("action", "get_message")
+                put("message_id", currentId)
+            }
+            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+            val requestBody = RequestBody.create(mediaType, msgBody.toString())
             val request = Request.Builder()
-                .url("$cleanUrl/api/host/message?id=$currentId")
+                .url("$cleanUrl/api/host")
                 .header("Authorization", "Bearer $pinVal")
-                .get()
+                .post(requestBody)
                 .build()
 
             var msgObj: JSONObject? = null
@@ -1518,14 +1561,16 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val pType = payload.optString("type", payload.optString("event", ""))
                     val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
 
-                    val targetEndpoint = when {
-                        pType in listOf("chat_message", "message") -> "$remoteUrl/api/message"
-                        pType in listOf("webrtc_call_initiate", "call") -> "$remoteUrl/api/call"
-                        pType in listOf("webrtc_call_hangup", "call_ended", "hangup") -> "$remoteUrl/api/hangup"
-                        else -> "$remoteUrl/api/signal"
+                    val targetEndpoint = "$remoteUrl/api/host"
+                    val actionStr = when {
+                        pType in listOf("chat_message", "message") -> "message"
+                        pType in listOf("webrtc_call_initiate", "call") -> "call"
+                        pType in listOf("webrtc_call_hangup", "call_ended", "hangup") -> "hangup"
+                        else -> "signal"
                     }
 
                     val remotePayload = JSONObject().apply {
+                        put("action", actionStr)
                         put("uuid", peer.uuid)
                         put("token", peer.token)
                         put("type", pType)
@@ -1565,11 +1610,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 val cleanUrl = targetServer?.url?.trimEnd('/') ?: getCleanServerUrl()
                 val pinVal = targetServer?.apiKey ?: apiKey.value
 
-                Log.d("GatewayNetworkManager", "Posting host reply signal to server (${targetServer?.name ?: "default"}): $cleanUrl/api/host/response")
+                Log.d("GatewayNetworkManager", "Posting host reply signal to server (${targetServer?.name ?: "default"}): $cleanUrl/api/host")
+                payload.put("action", "response")
                 val request = Request.Builder()
-                    .url("$cleanUrl/api/host/response")
+                    .url("$cleanUrl/api/host")
                     .header("Authorization", "Bearer $pinVal")
-                    .post(requestBody)
+                    .post(RequestBody.create(mediaType, payload.toString()))
                     .build()
 
                 okHttpClient.newCall(request).execute().use { response ->
@@ -1615,6 +1661,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 val existingMemberServer = allServers.find { it.url.removeSuffix("/") == targetBase.removeSuffix("/") && it.isMember }
 
                 val json = JSONObject().apply {
+                    put("action", "claim_invite")
                     put("code", code)
                     put("name", hostUsername.value)
                     put("client_type", "MOBILE")
@@ -1628,7 +1675,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 }
                 val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
                 val req = Request.Builder()
-                    .url("$targetBase/api/claim_invite")
+                    .url("$targetBase/api/public")
                     .post(RequestBody.create(mediaType, json.toString()))
                     .build()
 
@@ -1791,11 +1838,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 try {
                     val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
                     val body = JSONObject().apply {
+                        put("action", "fcm_config")
                         put("api_key", cleanKey)
                     }
                     val requestBody = RequestBody.create(mediaType, body.toString())
                     val request = Request.Builder()
-                        .url("$serverUrlVal/api/host/fcm_config")
+                        .url("$serverUrlVal/api/host")
                         .header("Authorization", "Bearer $pinVal")
                         .post(requestBody)
                         .build()
@@ -1809,17 +1857,19 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
     fun saveFcmConfig(senderId: String, projectId: String, appId: String, apiKey: String) {
         val prefs = context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE)
+        val currentSenderId = prefs.getString("fcm_sender_id", null)
+        val currentApiKey = prefs.getString("fcm_api_key", null)
+        val changed = (senderId.trim() != currentSenderId) || (apiKey.trim() != currentApiKey)
+
         prefs.edit()
             .putString("fcm_sender_id", senderId.trim())
             .putString("fcm_project_id", projectId.trim())
             .putString("fcm_app_id", appId.trim())
             .putString("fcm_api_key", apiKey.trim())
-            .remove("fcm_token")
-            .remove("fallback_device_push_token")
             .apply()
 
-        Log.d("FCMInit", "Saved custom FCM configuration. Re-registering FCM token...")
-        registerFcmToken(forceRefresh = true)
+        Log.d("FCMInit", "Saved custom FCM configuration (changed=$changed). Initializing FCM...")
+        registerFcmToken(forceRefresh = changed)
     }
 
     fun registerFcmToken(forceRefresh: Boolean = false) {
@@ -1828,15 +1878,11 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
         if (customSenderId.isNullOrEmpty()) {
             Log.d("FCMInit", "FCM Sender ID is missing in prefs. Waiting for Home Server config...")
-            pushToken.value = ""
             return
         }
 
         val cachedToken = savedPrefs.getString("fcm_token", null)
-
-        if (forceRefresh) {
-            savedPrefs.edit().remove("fcm_token").apply()
-        } else if (!cachedToken.isNullOrEmpty() && !cachedToken.startsWith("device-push-token-")) {
+        if (!cachedToken.isNullOrEmpty() && !cachedToken.startsWith("device-push-token-") && !forceRefresh) {
             pushToken.value = cachedToken
             updatePushToken(cachedToken)
             return
@@ -1844,23 +1890,9 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
         try {
             initializeFirebase()
-
-            if (forceRefresh) {
-                try {
-                    com.google.firebase.messaging.FirebaseMessaging.getInstance().deleteToken().addOnCompleteListener {
-                        fetchFreshToken()
-                    }
-                } catch (e: Exception) {
-                    Log.w("FCMInit", "deleteToken failed or ignored: ${e.message}")
-                    fetchFreshToken()
-                }
-            } else {
-                fetchFreshToken()
-            }
+            fetchFreshToken()
         } catch (e: Exception) {
             Log.e("FCMInit", "[FCM Exception] Calling FirebaseMessaging failed: ${e.message}", e)
-            pushToken.value = ""
-            savedPrefs.edit().remove("fcm_token").remove("fallback_device_push_token").apply()
         }
     }
 
@@ -1924,13 +1956,15 @@ class GatewayNetworkManager(private val context: Context, private val repository
             val cleanUser = if (hostUsername.value.isNotEmpty()) hostUsername.value else (Build.MODEL ?: "Mobile Device")
             val token = pushToken.value
             val body = JSONObject().apply {
+                put("action", "register_mobile")
                 put("username", cleanUser)
                 put("pin_token", pinVal)
                 put("push_token", token)
             }
             val requestBody = RequestBody.create(mediaType, body.toString())
             val request = Request.Builder()
-                .url("$serverUrlVal/api/register_mobile")
+                .url("$serverUrlVal/api/host")
+                .header("Authorization", "Bearer $pinVal")
                 .post(requestBody)
                 .build()
             okHttpClient.newCall(request).execute().use { response ->
@@ -1994,13 +2028,15 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 // Register mobile app (Pairing request)
                 val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
                 val body = JSONObject().apply {
+                    put("action", "register_mobile")
                     put("username", cleanUser)
                     put("pin_token", pinVal)
                     put("push_token", pushToken.value)
                 }
                 val requestBody = RequestBody.create(mediaType, body.toString())
                 val request = Request.Builder()
-                    .url("$cleanUrl/api/register_mobile")
+                    .url("$cleanUrl/api/host")
+                    .header("Authorization", "Bearer $pinVal")
                     .post(requestBody)
                     .build()
                 okHttpClient.newCall(request).execute().use { response ->
@@ -2083,15 +2119,25 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 val sPin = s.apiKey.ifEmpty { apiKey.value }
                 if (sUrl.isEmpty() || sPin.isEmpty()) continue
                 try {
+                    val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+                    val body = JSONObject().apply {
+                        put("action", "invites")
+                    }
+                    val requestBody = RequestBody.create(mediaType, body.toString())
                     val request = Request.Builder()
-                        .url("$sUrl/api/host/invites")
+                        .url("$sUrl/api/host")
                         .header("Authorization", "Bearer $sPin")
-                        .get()
+                        .post(requestBody)
                         .build()
                     okHttpClient.newCall(request).execute().use { response ->
                         val responseStr = response.body?.string()
                         if (response.isSuccessful && responseStr != null) {
-                            val jsonArray = org.json.JSONArray(responseStr)
+                            val jsonArray = try {
+                                val jsonObj = JSONObject(responseStr)
+                                jsonObj.optJSONArray("invites") ?: org.json.JSONArray()
+                            } catch (e: Exception) {
+                                org.json.JSONArray(responseStr)
+                            }
                             for (i in 0 until jsonArray.length()) {
                                 val obj = jsonArray.getJSONObject(i)
                                 val code = obj.optString("code")
@@ -2127,13 +2173,21 @@ class GatewayNetworkManager(private val context: Context, private val repository
             val serverUrlVal = targetServer?.url?.trimEnd('/') ?: serverUrl.value.trimEnd('/')
             val pinVal = targetServer?.apiKey?.ifEmpty { apiKey.value } ?: apiKey.value
             try {
+                val currentToken = pushToken.value.takeIf { it.isNotEmpty() && !it.startsWith("Fetching") && !it.startsWith("device-push-token-") }
+                    ?: context.getSharedPreferences("whisker_prefs", Context.MODE_PRIVATE).getString("fcm_token", null)?.takeIf { !it.startsWith("device-push-token-") && !it.startsWith("Fetching") }
+
                 val body = JSONObject().apply {
+                    put("action", "create_invite")
                     put("name", name)
                     put("code", code)
+                    if (!currentToken.isNullOrEmpty()) {
+                        put("push_token", currentToken)
+                        put("pushToken", currentToken)
+                    }
                 }
                 val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), body.toString())
                 val request = Request.Builder()
-                    .url("$serverUrlVal/api/host/create_invite")
+                    .url("$serverUrlVal/api/host")
                     .header("Authorization", "Bearer $pinVal")
                     .post(requestBody)
                     .build()
@@ -2168,11 +2222,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 if (sUrl.isEmpty() || sPin.isEmpty()) continue
                 try {
                     val body = JSONObject().apply {
+                        put("action", "delete_invite")
                         put("code", code)
                     }
                     val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), body.toString())
                     val request = Request.Builder()
-                        .url("$sUrl/api/host/delete_invite")
+                        .url("$sUrl/api/host")
                         .header("Authorization", "Bearer $sPin")
                         .post(requestBody)
                         .build()
@@ -2208,12 +2263,13 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 if (serverUrlVal.isEmpty() || pinVal.isEmpty()) continue
                 try {
                     val body = JSONObject().apply {
+                        put("action", "delete_client")
                         put("uuid", uuid)
                         put("clientUuid", uuid)
                     }
                     val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), body.toString())
                     val request = Request.Builder()
-                        .url("$serverUrlVal/api/host/delete_client")
+                        .url("$serverUrlVal/api/host")
                         .header("Authorization", "Bearer $pinVal")
                         .post(requestBody)
                         .build()
@@ -2253,11 +2309,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
             if (cleanUrl.isNotEmpty() && cleanUrl.startsWith("http")) {
                 try {
                     val payload = JSONObject().apply {
+                        put("action", "direct_calls")
                         put("allow_direct_calls", allowed)
                     }
                     val body = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), payload.toString())
                     val request = Request.Builder()
-                        .url("$cleanUrl/api/host/direct_calls")
+                        .url("$cleanUrl/api/host")
                         .header("Authorization", "Bearer $pinVal")
                         .post(body)
                         .build()
@@ -2280,11 +2337,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
             if (cleanUrl.isNotEmpty() && cleanUrl.startsWith("http")) {
                 try {
                     val payload = JSONObject().apply {
+                        put("action", "widget_access")
                         put("allow_widget", allowed)
                     }
                     val body = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), payload.toString())
                     val request = Request.Builder()
-                        .url("$cleanUrl/api/host/widget_access")
+                        .url("$cleanUrl/api/host")
                         .header("Authorization", "Bearer $pinVal")
                         .post(body)
                         .build()
@@ -2307,11 +2365,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
             scope.launch(Dispatchers.IO) {
                 try {
                     val payload = JSONObject().apply {
+                        put("action", "direct_calls")
                         put("allow_direct_calls", allowed)
                     }
                     val body = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), payload.toString())
                     val request = Request.Builder()
-                        .url("$cleanUrl/api/host/direct_calls")
+                        .url("$cleanUrl/api/host")
                         .header("Authorization", "Bearer $pinVal")
                         .post(body)
                         .build()
@@ -2616,6 +2675,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                     val mediaType = mimeType.ifEmpty { "application/octet-stream" }.toMediaTypeOrNull()
                     val requestBody = MultipartBody.Builder()
                         .setType(MultipartBody.FORM)
+                        .addFormDataPart("action", "file_upload")
                         .addFormDataPart("file", safeFileName, RequestBody.create(mediaType, fileBytes))
                         .addFormDataPart("filename", safeFileName)
                         .addFormDataPart("receiver", clientUuid)
@@ -2625,7 +2685,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         .build()
 
                     val reqBuilder = Request.Builder()
-                        .url("$cleanUrl/api/file/upload")
+                        .url("$cleanUrl/api/host")
                         .post(requestBody)
 
                     if (pinVal.isNotEmpty()) {
@@ -2672,7 +2732,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         clientUuid = clientUuid,
                         clientName = clientName,
                         messageText = effectiveText,
-                        filePath = if (!downloadUrl.isNullOrEmpty()) downloadUrl else localSavedPath,
+                        filePath = localSavedPath,
                         isIncoming = false,
                         isRead = true,
                         timestamp = System.currentTimeMillis()
@@ -2728,7 +2788,21 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 val targetServer = currentServers.find { it.isEnabled } ?: currentServers.firstOrNull()
                 val pinVal = targetServer?.apiKey ?: apiKey.value
 
-                val reqBuilder = Request.Builder().url(fullUrl)
+                val isHostApi = fullUrl.endsWith("/api/host") || fileUrlOrPath.contains("/api/host") || !fileUrlOrPath.startsWith("http")
+                val reqBuilder = if (isHostApi) {
+                    val cleanHostUrl = "${getCleanServerUrl()}/api/host"
+                    val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+                    val body = JSONObject().apply {
+                        put("action", "file_download")
+                        put("file", fileUrlOrPath.removePrefix("/api/host").trimStart('/'))
+                        put("name", fileName)
+                    }
+                    Request.Builder()
+                        .url(cleanHostUrl)
+                        .post(RequestBody.create(mediaType, body.toString()))
+                } else {
+                    Request.Builder().url(fullUrl)
+                }
                 if (pinVal.isNotEmpty()) {
                     reqBuilder.header("Authorization", "Bearer $pinVal")
                 }

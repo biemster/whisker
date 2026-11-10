@@ -26,7 +26,7 @@ The system consists of three primary components:
 ### 2.2 Core Functionality
 - **Home Server Connectivity**:
   - Connects to the Home Server via standard HTTP/HTTPS API routes.
-  - Pure FCM Signaling & Battery Efficiency: When the app is in the background or dormant, persistent background connections (such as continuous SSE background streams or background polling loops) are explicitly prohibited to maximize battery life. Background event fetching is triggered strictly on-demand when an FCM push tickle notification is received. The app connects to the Home Server to fetch pending events (`/api/host/events`), processes the events, and immediately returns to a low-power sleep state.
+  - Pure FCM Signaling & Battery Efficiency: When the app is in the background or dormant, persistent background connections (such as continuous SSE background streams or background polling loops) are explicitly prohibited to maximize battery life. Background event fetching is triggered strictly on-demand when an FCM push tickle notification is received. The app connects to the Home Server to fetch pending events and sync data (`/api/host`), processes the events, and immediately returns to a low-power sleep state.
   - Active Foreground Health & Client Presence Polling: When the mobile app is open and active in the foreground, the app runs a lightweight foreground polling loop to query client online statuses and verify server health, keeping the real-time Connection bubble and guest online indicators up-to-date.
   - No Battery Optimization Exemption Required: Every feature and background/Doze wakeup function must work out-of-the-box on standard Android power management without requiring battery optimization exemptions (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) or special whitelisting.
 - **WebRTC Calling & Video**:
@@ -39,7 +39,7 @@ The system consists of three primary components:
   - Maintains guest client profiles and active messaging threads.
 - **Real-Time Messaging & Historical Chain Sync**:
   - Bidirectional text chat with approved guest clients.
-  - Automatically syncs complete message history chains using `previousMessageId` links and `/api/host/message` queries when receiving new message event notifications.
+  - Automatically syncs complete message history chains using `previousMessageId` links and `/api/host?message_id=` queries when receiving new message event notifications.
   - Message status delivery indicators and thread organization.
 
 ### 2.3 Settings Modal UI & Configuration
@@ -70,45 +70,71 @@ The system consists of three primary components:
   - `host_events`: Event ID, event type (`visitor`, `message`, `call`, `invite_claimed`), JSON payload, timestamp.
   - `settings`: Key-value configuration pairs (including host access PIN and FCM push token).
 
-### 3.2 Host API Endpoints (`/api/host/*` and Host Management)
-- `POST /api/register_mobile`: Registers or pairs a mobile app with the Home Server (`username`, `pin_token`, `push_token`). The first paired device is automatically granted Admin status (`APPROVED`, `is_admin: 1`); subsequent mobile devices are registered as `PENDING` and enqueue a `mobile_pairing_request` host event for admin approval. [Access: Public / Host Pairing]
-- `POST /api/host/register_push`: Registers or updates the mobile app's FCM push token with the Home Server. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `GET /api/host/fcm_config`: Retrieves FCM project configuration (Project ID, Sender ID, App ID, API Key) derived from `whisker-push-sa.json` for initial mobile app pairing. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/fcm_config`: Updates the FCM API key in the server settings. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/direct_calls`: Enables or disables direct visitor calling without prior approval for this host (`allow_direct_calls: true/false`). [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `GET /api/host/events`: Fetches pending `host_events` queued for the host upon FCM tickle notification. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/ack`: Acknowledges and clears processed host events from the server queue by `eventId`. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `GET /api/host/message`: Retrieves specific message details and `previousMessageId` chain references by message `id` (`/api/host/message?id=<id>`). [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/create_invite`: Generates single-use guest invite links/codes with optional reserved guest name. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `GET /api/host/invites`: Retrieves list of active guest invite codes created by the host. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/delete_invite`: Revokes and deletes an active guest invite code by `code`. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `GET /api/host/clients`: Retrieves registered guest clients and companion mobile hosts with live online presence status. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/delete_client`: Removes an approved caller or companion mobile host (aliases: `/api/host/remove_client`, `/api/host/remove_contact`, `/api/host/delete_host`). Purges database records, revokes host-client approvals, evicts active in-memory streams, and logs removal events. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/claim_remote_invite`: Connects/federates to a remote Whisker Home Server by claiming an invite code from the remote server and establishing a paired client record. [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
-- `POST /api/host/response`: Unified endpoint for host actions:
-  - `registration_response`: Approves guest visitor access requests.
-  - `mobile_pairing_response`: Approves, rejects, or deletes companion mobile app pairing requests.
-  - `chat_message` / `message`: Sends text chat or media file messages to guest clients or companion mobile peers.
-  - `webrtc_call_initiate` / `call`: Initiates outgoing WebRTC call offers to companion mobile peers or guests.
-  - `webrtc_call_answer` / `webrtc_ice_candidate` / `signal`: Submits call answer SDP or ICE candidates.
-  - `webrtc_call_hangup` / `hangup`: Terminates or declines active WebRTC calls.
-  - `delete_client` / `remove_contact`: Removes client or mobile contact approval.
-  [Access: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)]
+### 3.2 Two-Endpoint REST Architecture & Host API (`/api/host`)
+Whisker implements a consolidated, high-efficiency Two-Endpoint REST model for host synchronization and actions. Rather than issuing multiple fragmented HTTP requests or embedding parameters in URLs, host communication is streamlined strictly into:
 
-### 3.3 Guest & Web Client API Endpoints (`/api/*`)
-- `GET /api/init-status`: Checks if the Home Server has been initialized with at least one paired mobile host. [Access: Public Unauthenticated]
-- `GET /api/info`: Returns Home Server health status, mobile app connectivity (`host_connected`, `host_reachable`), push configuration status, and direct calling availability (`allow_direct_calls`, `direct_call_hosts`). [Access: Public Unauthenticated]
-- `POST /api/register`: Submits a visitor access request (`uuid`, `name`, `reason`), creating a `PENDING` request record, enqueuing a `visitor` host event, and triggering an FCM tickle to hosts. [Access: Public Unauthenticated]
-- `POST /api/claim_invite`: Claims a single-use invite code and receives a valid guest `uuid`, `token`, `name`, `host_uuid`, and `host_name`. [Access: Public Unauthenticated (Requires valid Invite Code)]
-- `GET /api/messages`: Retrieves message history for an approved guest client (`/api/messages?uuid=<uuid>&token=<token>`). [Access: Guest Auth (`uuid` + `token` parameter verification)]
-- `GET /api/message`: Retrieves specific message details by ID with previous message chain link (`/api/message?id=<id>&uuid=<uuid>&token=<token>`). [Access: Guest Auth (`uuid` + `token` parameter verification)]
-- `POST /api/message`: Delivers a guest chat message or media attachment to the host event queue. Supports optional `contact` / `host_uuid` parameter to route to a specific approved host. [Access: Guest Auth (`uuid` + `token` parameter verification)]
-- `POST /api/call`: Submits a WebRTC call offer SDP from a guest client. Supports direct calling without prior registration when direct calls are enabled on the host, or standard approved guest calling targeted via `contact` / `host_uuid`. [Access: Guest Auth or Public Direct Call]
-- `POST /api/signal`: Submits WebRTC ICE candidate signals from a guest client. [Access: Guest Auth or Public Direct Call]
-- `POST /api/hangup`: Submits a hangup signal from a guest client. [Access: Guest Auth or Public Direct Call]
-- `GET /api/events`: SSE stream for guest clients to receive real-time host replies (chat messages, call accept/reject SDPs, ICE candidates, hangup). [Access: Guest Subscriber (`uuid` parameter)]
-- `GET /api/guest/events`: Polling endpoint for guest/federated clients to fetch and clear pending events (alias: `/api/guest/pending_events`). [Access: Guest Auth (`uuid` + `token` parameter verification)]
-- `GET /api/client/hosts`: Retrieves list of approved hosts available for this guest client on the server (`/api/client/hosts?uuid=<uuid>&token=<token>`). [Access: Guest Auth (`uuid` + `token` parameter verification)]
+1. **`POST /api/host` (Unified Host Sync & Action Dispatcher with Clean URL + JSON Body)**:
+   - **Access**: Host Auth (`Authorization: Bearer <HOME_SERVER_ACCESS_KEY>`)
+   - **Strict Body Parameter Rule**: All query parameters are abolished. Parameters such as `fcm_hash`, `eventId`, `message_id`, etc., flow exclusively through the JSON request body.
+   - **Actions**:
+     - `action: "sync"` (or empty): Combines host identity (`me`), pending server events (`events`), connected client presence statuses (`clients`), invites, and FCM configuration (`fcm`) into a single round-trip.
+       - **JSON Body**:
+         ```json
+         {
+           "action": "sync",
+           "fcm_hash": "<cached_fcm_hash>",
+           "eventId": "<optional_event_id>"
+         }
+         ```
+       - **ETag & Hash Caching**: When `fcm_hash` in the request body matches the server's current configuration, the server returns `fcm: {"hash": "<hash>", "unchanged": true}`, saving bandwidth.
+     - `action: "register_mobile"`: Pairs or registers mobile host credentials with the Home Server (`username`, `pin_token`, `push_token`). First device automatically initializes the server and gains Admin status; companion devices register as `PENDING` and notify the admin. (Legacy route `POST /api/register_mobile` is completely abolished and returns 404).
+     - `action: "get_message"`: Fetches a single message from the message chain by ID (`message_id`).
+     - `action: "ack"`: Acknowledges and clears processed events from the server queue (`eventId`).
+     - `action: "register_push"`: Registers or updates the mobile app's FCM push token with the server (`push_token`).
+     - `action: "direct_calls"`: Toggles visitor direct calling permission (`allow_direct_calls: true/false`).
+     - `action: "widget_access"`: Toggles embedded visitor widget access (`allow_widget: true/false`).
+     - `action: "create_invite"`: Creates single-use guest invite links and codes (`reserved_name`).
+     - `action: "delete_invite"`: Revokes an active invite code (`code`).
+     - `action: "delete_client"`: Removes an approved guest client or companion host (`client_uuid`).
+     - `action: "response"`: Dispatches signaling, chat messages, call accepts/hangup, or approval decisions (`type`, `payload`, `target_uuid`).
+
+2. **`GET /api/host` (Fallback GET Sync)**:
+   - Also supported for backwards compatibility or lightweight checks, delegating to the unified sync builder.
+
+3. **E2EE Readiness**:
+   - Message payloads within `events` and responses natively support optional cryptographic envelope fields (`cipher_text`, `encryption_type`, `key_id`, `public_key`) alongside standard plaintext fields for seamless forward compatibility with end-to-end encryption.
+
+### 3.3 Public Discovery & Guest Endpoints (`/api/public` & `/api/*`)
+1. **`GET /api/public` (Unified Public Discovery & Health)**:
+   - **Access**: Public Unauthenticated
+   - **Purpose**: Consolidated discovery endpoint combining server health, mobile app presence, direct calling rules, admin initialization status, and list of available direct hosts.
+   - **Response Structure**:
+     ```json
+     {
+       "status": "ok",
+       "server_name": "Home Base",
+       "version": "1.0.0",
+       "initialized": true,
+       "admin_paired": true,
+       "host_connected": true,
+       "allow_direct_calls": true,
+       "direct_call_hosts": ["Host Name"],
+       "available_hosts": [ { "uuid": "...", "name": "Host Name", "online": true } ],
+       "fcm_configured": true
+     }
+     ```
+
+2. **Guest Operations & WebRTC Signaling**:
+   - `POST /api/register`: Submits a visitor access request (`uuid`, `name`, `reason`).
+   - `POST /api/claim_invite`: Claims a single-use invite code to receive guest credentials.
+   - `GET /api/messages`: Retrieves message history for an approved guest (`uuid`, `token`).
+   - `GET /api/message`: Retrieves specific message details by ID with previous message chain link.
+   - `POST /api/message`: Delivers a guest chat message or media attachment (supports optional E2EE fields: `cipher_text`, `encryption_type`, `key_id`).
+   - `POST /api/call`: Submits a WebRTC call offer SDP.
+   - `POST /api/signal`: Submits WebRTC ICE candidate signals.
+   - `POST /api/hangup`: Submits a call hangup signal.
+   - `GET /api/events`: SSE stream for guest clients to receive real-time host replies.
+   - `GET /api/guest/events`: Polling endpoint for guest/federated clients.
 
 ---
 
@@ -158,7 +184,7 @@ The system consists of three primary components:
 7. `whisker listen [-c <contact>] [--all]`:
    - Listens to live SSE events from `GET /api/events`. Supports listening to the active connection, a specific targeted contact (`-c`), or across all saved connections simultaneously (`--all`).
 8. `whisker info [-c <contact>]`:
-   - Displays client configuration and queries Home Server `GET /api/info` to check mobile app reachability and push status.
+   - Displays client configuration and queries Home Server `GET /api/public` to check mobile app reachability and push status.
 
 ---
 
@@ -167,15 +193,15 @@ The system consists of three primary components:
 1. **Host Authentication & Dynamic Pairing**:
    - The Mobile Gateway App authenticates to the Home Server using the **Home Server Access Key** sent in the `Authorization: Bearer <HOME_SERVER_ACCESS_KEY>` HTTP header.
    - On initial setup, the Home Server starts in uninitialized pairing mode. When the Mobile Gateway App makes its first API call, the Home Server pairs and locks onto the app's randomly generated Access Key (persisting it in the `settings` database).
-   - Once paired, the Home Server restricts all subsequent `/api/host/*` host operations to requests carrying this exact Access Key, ensuring only one mobile app instance is linked and preventing unauthorized third-party access.
+   - Once paired, the Home Server restricts all subsequent `/api/host` host operations to requests carrying this exact Access Key, ensuring only one mobile app instance is linked and preventing unauthorized third-party access.
 2. **Guest Authentication**:
    - Guests are issued a unique `uuid` and `token` upon registration approval or invite code claim.
    - Guest requests require valid `uuid` and `token` pairs verified against approved database records.
 3. **Pure FCM Push Tickle Architecture & Battery Preservation**:
    - When a guest posts a call, message, or invite claim event, the Home Server enqueues the event and triggers an FCM HTTP v1 "tickle" payload via Google's OAuth2 service account credentials (`whisker-push-sa.json`) to wake up or notify the Whisker Mobile Gateway App.
    - FCM HTTP v1 authentication uses Google OAuth2 JWT tokens dynamically generated from `whisker-push-sa.json` (created via `whisker setup-fcm`). Legacy FCM server keys are deprecated and removed.
-   - Zero Metadata in Push Messages: Push notifications sent via FCM are strictly empty tickles containing no payload data (no call SDP, contact names, tokens, or client UUIDs). They serve solely as a wake-up impulse informing the mobile device to fetch pending host events from `/api/host/events` on the Home Server.
-   - The Mobile App relies strictly on FCM push notifications to trigger fetching pending events from `/api/host/events` on-demand when in the background or dormant. Continuous background SSE streams and background polling loops are explicitly prohibited to conserve mobile device battery.
+   - Zero Metadata in Push Messages: Push notifications sent via FCM are strictly empty tickles containing no payload data (no call SDP, contact names, tokens, or client UUIDs). They serve solely as a wake-up impulse informing the mobile device to fetch pending host events from `/api/host` on the Home Server.
+   - The Mobile App relies strictly on FCM push notifications to trigger fetching pending events from `/api/host` on-demand when in the background or dormant. Continuous background SSE streams and background polling loops are explicitly prohibited to conserve mobile device battery.
    - When the mobile app is open in the foreground, a lightweight foreground presence/health polling loop is permitted to maintain accurate real-time connection bubbles and client online status indicators.
    - No battery optimization exemption is required for standard operation.
 
@@ -243,7 +269,7 @@ Whisker supports full-duplex messaging, media transfer, and WebRTC audio/video c
 2. **Cross-Server (Indirect / Remote Home Server Federation)**:
    - When connecting mobile apps across different Home Servers, Home Server A acts as a client on Home Server B and vice versa, establishing a symmetric bidirectional channel.
    - **Invite Mechanism**: Connection uses the same invite structure as standard visitors (`http://<remote-server-address>/invite/<invite-code>`).
-   - **Claim Flow**: The local mobile app enters or scans the invite URL via the **Connect Peer via Invite** dialog (`/api/host/claim_remote_invite` or direct client claim). The local client claims the invite on the remote server, obtaining a guest `uuid` and `token` alongside the remote server's address.
+   - **Claim Flow**: The local mobile app enters or scans the invite URL via the **Connect Peer via Invite** dialog (`POST /api/host` with action `claim_remote_invite` or direct client claim). The local client claims the invite on the remote server, obtaining a guest `uuid` and `token` alongside the remote server's address.
    - **Outbound Signaling & Messaging**: When messaging or calling a remote mobile peer, the local app issues HTTP requests (`POST /api/message`, `POST /api/call`, `POST /api/signal`, `POST /api/hangup`) directly to the remote server's API endpoints using the claimed guest credentials.
    - **Inbound Event Polling & Push**: Remote events from the peer server are fetched via `/api/guest/events?uuid=<guest_uuid>` and synced into the local Room database.
    - **UI Representation**: In both mobile apps, the contact card and chat header display `📱 Mobile App`, the remote Home Server name and address (e.g. `Office (http://100.64.0.5:3000)`), and a subtle `🔀 Indirect` indicator.
@@ -322,3 +348,23 @@ To ensure robust call state transitions and prevent desynchronized call states (
 - **Security & Dependencies**: Installs `openssl` for FCM RSA-SHA256 token signing and `ca-certificates`.
 - **Persistent Storage**: Dedicated `/data` mount point designated as a container `VOLUME` for SQLite databases (`whisker_server.db`) and user data.
 - **Environment Configuration**: Supports dynamic configuration via `SERVER_NAME`, `PORT`, and `DB_FILE` environment variables.
+
+---
+
+## 12. End-to-End Encryption (E2EE) & Project Roadmap
+
+### 12.1 Cryptographic Message Envelope Design
+To enable zero-knowledge end-to-end encryption between hosts and clients, the message data model and JSON serialization protocol support optional cryptographic envelope attributes:
+- `cipher_text`: Base64-encoded encrypted payload ciphertext.
+- `encryption_type`: Algorithm identifier (e.g., `"x25519-chacha20-poly1305"` or `"aes-256-gcm"`).
+- `key_id`: Identifier for the recipient's public key or active ratchet session.
+- `public_key`: Ephemeral sender public key used for Diffie-Hellman key derivation.
+
+When an encrypted message is exchanged, the Home Server acts solely as a zero-knowledge relay, forwarding the opaque ciphertext and envelope metadata through the unified `/api/host` event queue and `/api/message` endpoints without accessing the plaintext contents.
+
+### 12.2 Implementation Roadmap Priority
+The Whisker feature roadmap sequence is formally scheduled as follows:
+1. **Core Two-Endpoint REST Architecture & ETag Caching** *(Completed)*
+2. **End-to-End Encryption (E2EE) for Messages** *(Next milestone, prior to iOS)*
+3. **Native iOS Mobile Application** *(Subsequent milestone)*
+4. **Decentralized Multi-Server Federation & DHT Mesh**

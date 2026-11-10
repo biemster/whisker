@@ -41,7 +41,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         val tickleEventId = remoteMessage.data["eventId"] ?: remoteMessage.data["id"] ?: ""
         val tickleServerAddr = remoteMessage.data["server_address"] ?: ""
         try {
-            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+            CoroutineScope(Dispatchers.IO).launch {
                 networkManager.fetchPendingEventsFromServerSuspended(
                     tickleEventId = tickleEventId.takeIf { it.isNotEmpty() },
                     targetServerUrl = tickleServerAddr.takeIf { it.isNotEmpty() }

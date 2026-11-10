@@ -40,9 +40,11 @@ Whether you want a hassle-free personal communication system for external visito
 - **Web Admin Console & Management Portal (`/admin`)**: Built-in administrative dashboard with password protection (`--admin-password`), real-time device health metrics, mobile app administration (with the ability to transfer primary Administrator rights between registered mobile devices or remove them), client pairing revocation, and configurable File Storage Directory for files, media, and backups.
 - **Ultra-Compact Docker Container & Microsoft WSL Containers Compatibility**: Minimalist OCI container (~50MB base) running on `python:3.11-alpine` with persistent `/data` volume support, OpenSSL FCM cryptographic signing, PID 1 `exec` signal handling, and full compatibility with Microsoft WSL Containers, Docker Desktop, Podman, and Cloud Run / ECS.
 - **File & Media Transfer & Backup**: High-speed, self-hosted file and media transfer between Android mobile apps, Web visitor portals, embed widgets, and CLI clients. Incoming files on the Home Server are safely stored in date-rotated vaults (`<storage_root>/<receiver>/<YYYYMMDD.HHMMSS>/<filename>`), configurable via the Web Admin Console. Mobile apps feature a full-screen file/media picker with direct Camera capture & confirmation preview, system-wide Android Share target support (`ACTION_SEND` / `ACTION_SEND_MULTIPLE`), inline image thumbnails with fullscreen lightbox, and one-tap download to device Downloads folder.
+- **Two-Endpoint REST Architecture (`/api/public` & `/api/host`)**: Streamlined communication protocol consolidating device discovery, client presence, event delivery, and ETag-cached FCM configuration into unified, ultra-low-overhead JSON endpoints.
 - **Push Notifications**: FCM HTTP v1 push notification tickle integration complete with low-power battery optimization.
 
 ### In Development & Future Roadmap
+- **End-to-End Encryption (E2EE) for Messages**: Cryptographic envelope design (`cipher_text`, `encryption_type`, `key_id`) enabling zero-knowledge end-to-end encrypted messaging between mobile apps and clients.
 - **iOS Mobile Application**: Native iOS client app built with Swift / SwiftUI, featuring WebRTC P2P calling, background APNs (Apple Push Notification service) push tickle support, and call notification alerts.
 
 ---
@@ -52,7 +54,7 @@ Whether you want a hassle-free personal communication system for external visito
 Whisker consists of three primary components:
 
 1. **Android Mobile App**: The primary mobile interface, WebRTC calling endpoint, and notification center for the host.
-2. **Home Server & CLI (`whisker`)**: A unified Python package (`whisker/server.py`, `whisker/cli.py`, `whisker/fcm.py`) that runs the Home Server (backed by SQLite, event queue, WebRTC signaling, FCM push tickles, and the `/admin` console) and CLI client engine.
+2. **Home Server & CLI (`whisker`)**: A unified Python package (`whisker/server.py`, `whisker/cli.py`, `whisker/fcm.py`, `whisker/watcher.py`) that runs the Home Server (backed by SQLite, two-endpoint REST API, event queue, WebRTC signaling, FCM push tickles, and the `/admin` console) and CLI client engine.
 3. **Web Visitor Client (`whisker/index.html`)**: An embedded web application served directly by the Home Server allowing instant visitor access, messaging, and audio/video calling without account registration.
 
 > For the full protocol spec, API schema, and security details, see [requirements.md](requirements.md).

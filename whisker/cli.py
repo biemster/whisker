@@ -332,12 +332,12 @@ def do_init(invite_url, username=None, server_name=None, custom_db=None):
                 print("Invalid invite URL format. Expected: http://server:3000/invite/CODE or http://server:3000?code=CODE")
                 sys.exit(1)
 
-        req_payload = {"code": code, "client_type": "CLI"}
+        req_payload = {"action": "claim_invite", "code": code, "client_type": "CLI"}
         if username and str(username).strip():
             req_payload["name"] = str(username).strip()
 
         req_data = json.dumps(req_payload).encode('utf-8')
-        req = urllib.request.Request(f"{server_url}/api/claim_invite", data=req_data, headers={'Content-Type': 'application/json'})
+        req = urllib.request.Request(f"{server_url}/api/public", data=req_data, headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             if 'error' in res_data:
@@ -353,7 +353,7 @@ def do_init(invite_url, username=None, server_name=None, custom_db=None):
 
             if not final_server:
                 try:
-                    with urllib.request.urlopen(f"{server_url}/api/info", timeout=4) as info_resp:
+                    with urllib.request.urlopen(f"{server_url}/api/public", timeout=4) as info_resp:
                         info_data = json.loads(info_resp.read().decode('utf-8'))
                         final_server = info_data.get('server_name') or info_data.get('servername')
                 except Exception:
@@ -438,6 +438,7 @@ def do_send(msg, contact=None, username=None, server_name=None, custom_db=None):
 
     try:
         payload = {
+            "action": "message",
             "uuid": uuid,
             "token": token,
             "text": msg,
@@ -448,7 +449,7 @@ def do_send(msg, contact=None, username=None, server_name=None, custom_db=None):
             payload["host_uuid"] = host_uuid
 
         req_data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(f"{server_url}/api/message", data=req_data, headers={'Content-Type': 'application/json'})
+        req = urllib.request.Request(f"{server_url}/api/host", data=req_data, headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             if 'error' in res_data:
@@ -492,6 +493,7 @@ def do_send_file(file_path, contact=None, username=None, server_name=None, custo
 
         b64_content = base64.b64encode(file_bytes).decode('utf-8')
         payload = {
+            "action": "file_upload",
             "uuid": uuid,
             "token": token,
             "filename": filename,
@@ -505,7 +507,7 @@ def do_send_file(file_path, contact=None, username=None, server_name=None, custo
 
         req_data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(
-            f"{server_url}/api/file/upload",
+            f"{server_url}/api/host",
             data=req_data,
             headers={'Content-Type': 'application/json'}
         )
@@ -556,11 +558,15 @@ def do_call(contact=None, username=None, server_name=None, video_source=None, au
     call_start_timestamp = time.time()
 
     def sse_worker():
-        query = urllib.parse.urlencode({'uuid': uuid, 'token': token})
-        url = f"{server_url}/api/events?{query}"
+        sse_payload = json.dumps({'action': 'events', 'uuid': uuid, 'token': token}).encode('utf-8')
+        url = f"{server_url}/api/host"
         while not stop_event.is_set():
             try:
-                req = urllib.request.Request(url, headers={'Accept': 'text/event-stream'})
+                req = urllib.request.Request(
+                    url,
+                    data=sse_payload,
+                    headers={'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
+                )
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     while not stop_event.is_set():
                         line = resp.readline()
@@ -614,14 +620,18 @@ def do_call(contact=None, username=None, server_name=None, video_source=None, au
     sse_thread.start()
 
     def status_poller_worker():
+        s_payload = json.dumps({'action': 'call_status', 'call_id': session.call_id, 'uuid': uuid}).encode('utf-8')
+        s_url = f"{server_url}/api/host"
         while not stop_event.is_set():
             time.sleep(1.0)
             if stop_event.is_set() or not session.is_active:
                 break
             try:
-                q = urllib.parse.urlencode({'call_id': session.call_id, 'uuid': uuid})
-                s_url = f"{server_url}/api/call/status?{q}"
-                s_req = urllib.request.Request(s_url)
+                s_req = urllib.request.Request(
+                    s_url,
+                    data=s_payload,
+                    headers={'Content-Type': 'application/json'}
+                )
                 with urllib.request.urlopen(s_req, timeout=3) as s_resp:
                     st_data = json.loads(s_resp.read().decode('utf-8'))
                     st = (st_data.get('status') or '').upper()
@@ -672,8 +682,8 @@ def _listen_stream_worker(target, label, video_source=None, audio_source=None, s
     host_name = target.get('host_name') or label
     name = target.get('username') or 'Whisker CLI'
 
-    query = urllib.parse.urlencode({'uuid': uuid, 'token': token})
-    url = f"{server_url}/api/events?{query}"
+    listen_payload = json.dumps({'action': 'events', 'uuid': uuid, 'token': token}).encode('utf-8')
+    url = f"{server_url}/api/host"
 
     active_call_session = None
     call_loop = None
@@ -681,7 +691,11 @@ def _listen_stream_worker(target, label, video_source=None, audio_source=None, s
 
     while True:
         try:
-            req = urllib.request.Request(url, headers={'Accept': 'text/event-stream'})
+            req = urllib.request.Request(
+                url,
+                data=listen_payload,
+                headers={'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
+            )
             with urllib.request.urlopen(req, timeout=30) as response:
                 while True:
                     line = response.readline()
@@ -766,7 +780,12 @@ def _listen_stream_worker(target, label, video_source=None, audio_source=None, s
                                                     clean_p = urllib.parse.quote(urllib.parse.unquote(clean_target), safe='/')
                                                     dl_url = f"{server_url}{clean_p}"
 
-                                            dl_req = urllib.request.Request(dl_url)
+                                            dl_payload = json.dumps({'action': 'file_download', 'path': file_target, 'name': safe_name}).encode('utf-8')
+                                            dl_req = urllib.request.Request(
+                                                f"{server_url}/api/host",
+                                                data=dl_payload,
+                                                headers={'Content-Type': 'application/json'}
+                                            )
                                             with urllib.request.urlopen(dl_req) as dl_resp:
                                                 data_bytes = dl_resp.read()
                                             with open(out_path, 'wb') as f_out:
@@ -926,7 +945,7 @@ def do_info(contact=None, username=None, server_name=None, custom_db=None):
     print(f"Database File:   {target['file']}")
 
     try:
-        req = urllib.request.Request(f"{server_url}/api/info")
+        req = urllib.request.Request(f"{server_url}/api/public")
         with urllib.request.urlopen(req, timeout=5) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             print("\n--- Home Server Status ---")

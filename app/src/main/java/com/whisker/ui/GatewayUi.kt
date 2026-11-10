@@ -2513,7 +2513,7 @@ fun HomeServerEditDialog(
         if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 try {
-                    val conn = java.net.URL("$trimmed/api/init-status").openConnection() as java.net.HttpURLConnection
+                    val conn = java.net.URL("$trimmed/api/public").openConnection() as java.net.HttpURLConnection
                     conn.connectTimeout = 3000
                     conn.readTimeout = 3000
                     if (conn.responseCode == 200) {
@@ -2639,7 +2639,7 @@ fun HomeServerEditDialog(
                                     testResult = null
                                     try {
                                         val base = inputUrl.trim().removeSuffix("/")
-                                        val urlObj = java.net.URL("$base/api/init-status")
+                                        val urlObj = java.net.URL("$base/api/public")
                                         val conn = urlObj.openConnection() as java.net.HttpURLConnection
                                         conn.connectTimeout = 4000
                                         conn.readTimeout = 4000
@@ -3747,16 +3747,15 @@ fun ChatTab(
                                                 val txt = msg.messageText.lowercase()
                                                 lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".webp") || lower.endsWith(".gif") ||
                                                 txt.endsWith(".png") || txt.endsWith(".jpg") || txt.endsWith(".jpeg") || txt.endsWith(".webp") || txt.endsWith(".gif") ||
-                                                lower.startsWith("data:image/") || (lower.contains("/api/file/download") && (lower.contains(".png") || lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".webp")))
+                                                lower.startsWith("data:image/") || (lower.contains("/api/host") && (lower.contains(".png") || lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".webp")))
                                             }
 
                                             if (isImg) {
-                                                val cleanServerUrl = viewModel?.networkManager?.getCleanServerUrl() ?: ""
-                                                val imageUrl = remember(pathStr, cleanServerUrl) {
+                                                val imageUrl = remember(pathStr) {
                                                     if (pathStr.startsWith("http://") || pathStr.startsWith("https://") || pathStr.startsWith("data:") || pathStr.startsWith("content://") || pathStr.startsWith("file://")) {
                                                         pathStr
-                                                    } else if (pathStr.startsWith("/")) {
-                                                        "$cleanServerUrl$pathStr"
+                                                    } else if (pathStr.startsWith("/") || File(pathStr).exists()) {
+                                                        "file://$pathStr"
                                                     } else {
                                                         pathStr
                                                     }

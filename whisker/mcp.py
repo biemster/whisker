@@ -163,7 +163,7 @@ TOOLS = [
     },
     {
         "name": "whisker_wait_new_messages",
-        "description": "Blocks on the Home Server's SSE event stream (/api/events) until a new message from the host mobile device arrives (sender='phone') or timeout is reached. Returns only new, deduplicated host messages.",
+        "description": "Blocks on the Home Server's SSE event stream (POST /api/host with JSON body action=events) until a new message from the host mobile device arrives (sender='phone') or timeout is reached. Returns only new, deduplicated host messages.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -375,13 +375,13 @@ def handle_init(args: dict) -> dict:
     else:
         raise ValueError("Invalid invite URL format. Expected: http://server:3000/invite/CODE")
 
-    req_payload = {"code": code, "client_type": "MCP"}
+    req_payload = {"action": "claim_invite", "code": code, "client_type": "MCP"}
     if username and str(username).strip():
         req_payload["name"] = str(username).strip()
 
     req_data = json.dumps(req_payload).encode('utf-8')
     req = urllib.request.Request(
-        f"{server_url}/api/claim_invite",
+        f"{server_url}/api/public",
         data=req_data,
         headers={'Content-Type': 'application/json'}
     )
@@ -399,7 +399,7 @@ def handle_init(args: dict) -> dict:
 
         if not final_server:
             try:
-                with urllib.request.urlopen(f"{server_url}/api/info", timeout=4) as info_resp:
+                with urllib.request.urlopen(f"{server_url}/api/public", timeout=4) as info_resp:
                     info_data = json.loads(info_resp.read().decode('utf-8'))
                     final_server = info_data.get('server_name') or info_data.get('servername')
             except Exception:
@@ -442,7 +442,7 @@ def handle_info(args: dict) -> dict:
     )
 
     server_url = target['server_url']
-    req = urllib.request.Request(f"{server_url}/api/info")
+    req = urllib.request.Request(f"{server_url}/api/public")
     server_info = {}
     try:
         with urllib.request.urlopen(req, timeout=5) as response:
@@ -483,6 +483,7 @@ def handle_send_message(args: dict) -> dict:
     host_uuid = args.get('contact') or target.get('host_uuid') or ''
 
     payload = {
+        "action": "message",
         "uuid": uuid,
         "token": token,
         "text": msg,
@@ -494,7 +495,7 @@ def handle_send_message(args: dict) -> dict:
 
     req_data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(
-        f"{server_url}/api/message",
+        f"{server_url}/api/host",
         data=req_data,
         headers={'Content-Type': 'application/json'}
     )
@@ -533,6 +534,7 @@ def handle_get_messages(args: dict) -> dict:
     limit = int(args.get('limit', 50))
 
     query_params = {
+        'action': 'messages',
         'uuid': uuid,
         'token': token,
         'limit': str(limit)
@@ -540,8 +542,9 @@ def handle_get_messages(args: dict) -> dict:
     if args.get('contact'):
         query_params['contact'] = args['contact']
 
-    url = f"{server_url}/api/messages?{urllib.parse.urlencode(query_params)}"
-    req = urllib.request.Request(url)
+    url = f"{server_url}/api/host"
+    req_data = json.dumps(query_params).encode('utf-8')
+    req = urllib.request.Request(url, data=req_data, headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=8) as response:
         res_data = json.loads(response.read().decode('utf-8'))
         if isinstance(res_data, list):
@@ -572,11 +575,12 @@ def handle_wait_new_messages(args: dict) -> dict:
     known_ids = set(args.get('known_message_ids') or [])
 
     def fetch_current_messages(limit=50):
-        qp = {'uuid': uuid, 'token': token, 'limit': str(limit)}
+        qp = {'action': 'messages', 'uuid': uuid, 'token': token, 'limit': str(limit)}
         if contact_filter:
             qp['contact'] = contact_filter
-        u = f"{server_url}/api/messages?{urllib.parse.urlencode(qp)}"
-        req = urllib.request.Request(u)
+        u = f"{server_url}/api/host"
+        req_data = json.dumps(qp).encode('utf-8')
+        req = urllib.request.Request(u, data=req_data, headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode('utf-8'))
             if isinstance(data, list):
@@ -618,8 +622,9 @@ def handle_wait_new_messages(args: dict) -> dict:
                 "timed_out": False
             }
 
-    # Block on SSE event stream (/api/events)
-    sse_url = f"{server_url}/api/events?{urllib.parse.urlencode({'uuid': uuid, 'token': token})}"
+    # Block on SSE event stream (/api/host with action=events)
+    sse_url = f"{server_url}/api/host"
+    sse_body = json.dumps({'action': 'events', 'uuid': uuid, 'token': token}).encode('utf-8')
     deadline = time.time() + max(1, timeout_seconds)
     reconnect_delay = 2
 
@@ -627,7 +632,7 @@ def handle_wait_new_messages(args: dict) -> dict:
         remaining_time = max(1.0, deadline - time.time())
         # Set socket timeout safely: at least 30s or remaining_time + 5s
         sock_timeout = max(30.0, remaining_time + 5.0)
-        req = urllib.request.Request(sse_url, headers={"Accept": "text/event-stream"})
+        req = urllib.request.Request(sse_url, data=sse_body, headers={"Content-Type": "application/json", "Accept": "text/event-stream"})
         try:
             with urllib.request.urlopen(req, timeout=sock_timeout) as resp:
                 for raw_line in resp:
@@ -636,7 +641,7 @@ def handle_wait_new_messages(args: dict) -> dict:
                     line = raw_line.decode('utf-8', 'replace').strip()
                     if not line.startswith("data:"):
                         continue
-                    # Any data event: verify against /api/messages and filter sender=='phone'
+                    # Any data event: verify against /api/host messages and filter sender=='phone'
                     cur_msgs = fetch_current_messages(limit=50)
                     new_host = filter_new_host_messages(cur_msgs, seen_ids)
                     if new_host:
@@ -690,8 +695,9 @@ def handle_poll_events(args: dict) -> dict:
     server_url = target['server_url']
     uuid = target['uuid']
 
-    url = f"{server_url}/api/guest/session?uuid={urllib.parse.quote(uuid)}"
-    req = urllib.request.Request(url)
+    url = f"{server_url}/api/host"
+    req_body = json.dumps({'action': 'sync', 'uuid': uuid, 'token': target.get('token', '')}).encode('utf-8')
+    req = urllib.request.Request(url, data=req_body, headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=5) as response:
         session_data = json.loads(response.read().decode('utf-8'))
         return {
@@ -779,7 +785,7 @@ def handle_server_status(args: dict) -> dict:
     if not (server_url.startswith('http://') or server_url.startswith('https://')):
         server_url = f"http://{server_url}"
 
-    req = urllib.request.Request(f"{server_url}/api/info")
+    req = urllib.request.Request(f"{server_url}/api/public")
     with urllib.request.urlopen(req, timeout=5) as response:
         data = json.loads(response.read().decode('utf-8'))
         return {

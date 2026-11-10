@@ -1148,6 +1148,17 @@
     }
   });
 
+  function getWidgetHeaders(session, extraHeaders) {
+    const h = { 'Content-Type': 'application/json' };
+    if (session && session.client_token) {
+      h['Authorization'] = `Bearer ${session.client_token}`;
+    }
+    if (extraHeaders) {
+      Object.assign(h, extraHeaders);
+    }
+    return h;
+  }
+
   let currentAvailableHosts = [];
 
   // Display New Session / Device Picker
@@ -1181,14 +1192,14 @@
     hostsRadioList.innerHTML = `<div style="text-align: center; color: #94a3b8; font-size: 12px; padding: 12px;">Searching for mobile devices...</div>`;
 
     try {
-      const resp = await fetch(`${serverUrl}/api/widget/hosts`);
+      const resp = await fetch(`${serverUrl}/api/public`);
       if (resp.ok) {
         const data = await resp.json();
         if (data.server_name) {
           serverName = data.server_name;
           titleEl.textContent = serverName;
         }
-        const hosts = data.hosts || [];
+        const hosts = data.available_hosts || data.hosts || [];
         renderHostsRadios(hosts);
       } else {
         renderHostsRadios([]);
@@ -1290,10 +1301,11 @@
 
     // Register with Home Server with target_host BEFORE creating the session
     try {
-      const resp = await fetch(`${serverUrl}/api/register`, {
+      const resp = await fetch(`${serverUrl}/api/public`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          action: 'register_visitor',
           uuid: newUuid,
           name: rawName,
           reason: `Website visitor on ${window.location.hostname || 'web'}`,
@@ -1431,10 +1443,11 @@
       scrollToBottom();
 
       try {
-        const res = await fetch(`${serverUrl}/api/file/upload`, {
+        const res = await fetch(`${serverUrl}/api/host`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getWidgetHeaders(session),
           body: JSON.stringify({
+            action: 'file_upload',
             uuid: session.client_uuid,
             token: session.client_token,
             filename: file.name,
@@ -1479,10 +1492,11 @@
     // If approved, send message to Home Server
     if (session.client_token && session.client_status === 'APPROVED') {
       try {
-        await fetch(`${serverUrl}/api/message`, {
+        await fetch(`${serverUrl}/api/host`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getWidgetHeaders(session),
           body: JSON.stringify({
+            action: 'message',
             uuid: session.client_uuid,
             token: session.client_token,
             name: session.client_name,
@@ -1579,7 +1593,11 @@
     if (!session || !session.client_uuid) return;
 
     try {
-      const res = await fetch(`${serverUrl}/api/embed/session?uuid=${encodeURIComponent(session.client_uuid)}`);
+      const res = await fetch(`${serverUrl}/api/host`, {
+        method: 'POST',
+        headers: getWidgetHeaders(session),
+        body: JSON.stringify({ action: 'sync', uuid: session.client_uuid, token: session.client_token || '' })
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.server_name) {
@@ -1609,7 +1627,11 @@
   async function syncMessagesFromServer(session) {
     if (!session || !session.client_uuid || !session.client_token) return;
     try {
-      const res = await fetch(`${serverUrl}/api/messages?uuid=${encodeURIComponent(session.client_uuid)}&token=${encodeURIComponent(session.client_token)}`);
+      const res = await fetch(`${serverUrl}/api/host`, {
+        method: 'POST',
+        headers: getWidgetHeaders(session),
+        body: JSON.stringify({ action: 'messages', uuid: session.client_uuid, token: session.client_token })
+      });
       if (res.ok) {
         const srvMsgs = await res.json();
         if (Array.isArray(srvMsgs) && srvMsgs.length > 0) {
@@ -1640,39 +1662,65 @@
   }
 
   // SSE Stream for Real-time Events
-  function connectSse() {
+  let sseAbortController = null;
+  async function connectSse() {
     const session = getActiveSession();
     if (!session || !session.client_uuid) return;
 
-    if (sseSource) {
-      sseSource.close();
-      sseSource = null;
+    if (sseAbortController) {
+      sseAbortController.abort();
+      sseAbortController = null;
     }
+    sseAbortController = new AbortController();
 
-    const sseUrl = `${serverUrl}/api/events?uuid=${encodeURIComponent(session.client_uuid)}${session.client_token ? `&token=${encodeURIComponent(session.client_token)}` : ''}`;
     try {
-      sseSource = new EventSource(sseUrl);
-
-      sseSource.onmessage = (event) => {
-        if (!event.data || event.data === ': keep-alive') return;
-        try {
-          const payload = JSON.parse(event.data);
-          handleIncomingEvent(payload, session);
-        } catch (err) {}
-      };
-
-      sseSource.onerror = () => {
-        if (!pollInterval) {
-          pollInterval = setInterval(pollSessionAndEvents, 8000);
+      const res = await fetch(`${serverUrl}/api/host`, {
+        method: 'POST',
+        headers: getWidgetHeaders(session, { 'Accept': 'text/event-stream' }),
+        body: JSON.stringify({ action: 'events', uuid: session.client_uuid, token: session.client_token || '' }),
+        signal: sseAbortController.signal
+      });
+      if (!res.ok) {
+        if (!pollInterval) { pollInterval = setInterval(pollSessionAndEvents, 8000); }
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split('\n\n');
+        buffer = blocks.pop();
+        for (const block of blocks) {
+          const dataLine = block.split('\n').find(l => l.startsWith('data:'));
+          if (dataLine) {
+            const jsonStr = dataLine.slice(5).trim();
+            if (jsonStr && jsonStr !== ': keep-alive') {
+              try {
+                const payload = JSON.parse(jsonStr);
+                handleIncomingEvent(payload, session);
+              } catch (e) {}
+            }
+          }
         }
-      };
-    } catch (e) {}
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError' && !pollInterval) {
+        pollInterval = setInterval(pollSessionAndEvents, 8000);
+      }
+    }
   }
 
   async function pollSessionAndEvents() {
     sessions.forEach(async (sess) => {
       try {
-        const res = await fetch(`${serverUrl}/api/embed/session?uuid=${encodeURIComponent(sess.client_uuid)}`);
+        const res = await fetch(`${serverUrl}/api/host`, {
+          method: 'POST',
+          headers: getWidgetHeaders(sess),
+          body: JSON.stringify({ action: 'sync', uuid: sess.client_uuid, token: sess.client_token || '' })
+        });
         if (res.ok) {
           const data = await res.json();
           if (data.status === 'APPROVED' && data.token && sess.client_status !== 'APPROVED') {
@@ -1762,10 +1810,11 @@
     session.messages.forEach(async (m) => {
       if (m.sender === 'guest' && m.id && m.id.startsWith('local_')) {
         try {
-          await fetch(`${serverUrl}/api/message`, {
+          await fetch(`${serverUrl}/api/host`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getWidgetHeaders(session),
             body: JSON.stringify({
+              action: 'message',
               uuid: session.client_uuid,
               token: session.client_token,
               name: session.client_name,
@@ -1835,10 +1884,11 @@
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        fetch(`${serverUrl}/api/signal`, {
+        fetch(`${serverUrl}/api/host`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getWidgetHeaders(session),
           body: JSON.stringify({
+            action: 'signal',
             event: 'signal',
             type: 'webrtc_ice_candidate',
             uuid: session.client_uuid,
@@ -1862,10 +1912,11 @@
     await pc.setLocalDescription(offer);
 
     try {
-      await fetch(`${serverUrl}/api/call`, {
+      await fetch(`${serverUrl}/api/host`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getWidgetHeaders(session),
         body: JSON.stringify({
+          action: 'call',
           event: 'call',
           uuid: session.client_uuid,
           token: session.client_token,
@@ -1931,10 +1982,11 @@
     pc = new RTCPeerConnection(rtcConfig);
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        fetch(`${serverUrl}/api/signal`, {
+        fetch(`${serverUrl}/api/host`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getWidgetHeaders(session),
           body: JSON.stringify({
+            action: 'signal',
             event: 'signal',
             type: 'webrtc_ice_candidate',
             uuid: session.client_uuid,
@@ -1961,10 +2013,11 @@
         await pc.setLocalDescription(answer);
         startCallTimer();
 
-        await fetch(`${serverUrl}/api/signal`, {
+        await fetch(`${serverUrl}/api/host`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getWidgetHeaders(session),
           body: JSON.stringify({
+            action: 'signal',
             event: 'signal',
             type: 'webrtc_call_answer',
             uuid: session.client_uuid,
@@ -1988,10 +2041,11 @@
     stopRingTone();
     incomingDialog.style.display = 'none';
 
-    fetch(`${serverUrl}/api/signal`, {
+    fetch(`${serverUrl}/api/host`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getWidgetHeaders(session),
       body: JSON.stringify({
+        action: 'signal',
         event: 'signal',
         type: 'webrtc_call_hangup',
         uuid: session.client_uuid,
@@ -2040,10 +2094,11 @@
     const session = getActiveSession();
 
     if (sendHangup && currentCallId && session) {
-      fetch(`${serverUrl}/api/signal`, {
+      fetch(`${serverUrl}/api/host`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getWidgetHeaders(session),
         body: JSON.stringify({
+          action: 'signal',
           event: 'signal',
           type: 'webrtc_call_hangup',
           uuid: session.client_uuid,

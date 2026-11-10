@@ -598,6 +598,7 @@ class WhiskerWebRTCSession:
             "sdpMLineIndex": candidate.sdpMLineIndex
         }
         payload = {
+            "action": "signal",
             "event": "signal",
             "type": "webrtc_ice_candidate",
             "uuid": self.client_uuid,
@@ -606,7 +607,7 @@ class WhiskerWebRTCSession:
             "call_id": self.call_id,
             "candidate": candidate_dict
         }
-        self._post_json("/api/signal", payload)
+        self._post_json("/api/host", payload)
 
     async def _check_disconnected_timeout(self):
         try:
@@ -759,6 +760,7 @@ class WhiskerWebRTCSession:
 
         # Send call offer to server - video is always True for full A/V negotiation
         payload = {
+            "action": "call",
             "event": "call",
             "uuid": self.client_uuid,
             "token": self.client_token,
@@ -769,7 +771,7 @@ class WhiskerWebRTCSession:
             "sdp": self.pc.localDescription.sdp
         }
         print(f"📞 [WebRTC Calling] Initiating Audio+Video call to '{self.host_name}' (Call ID: {self.call_id})...")
-        res = self._post_json("/api/call", payload)
+        res = self._post_json("/api/host", payload)
         if res and res.get("error"):
             print(f"❌ Call error: {res['error']}")
             self.hangup(notify_server=False)
@@ -822,8 +824,9 @@ class WhiskerWebRTCSession:
         answer = await self.pc.createAnswer()
         await self.pc.setLocalDescription(answer)
 
-        # Send answer to server via /api/signal
+        # Send answer to server via /api/host
         payload = {
+            "action": "signal",
             "event": "signal",
             "type": "webrtc_call_answer",
             "uuid": self.client_uuid,
@@ -833,7 +836,7 @@ class WhiskerWebRTCSession:
             "sdp": self.pc.localDescription.sdp
         }
         print(f"📞 [WebRTC Answer] Answering Audio+Video call from '{self.host_name}' (Call ID: {self.call_id})...")
-        self._post_json("/api/signal", payload)
+        self._post_json("/api/host", payload)
         return True
 
     async def handle_remote_answer(self, answer_sdp):
@@ -890,6 +893,7 @@ class WhiskerWebRTCSession:
         if notify_server and self.server_url and self.client_uuid:
             try:
                 payload = {
+                    "action": "hangup",
                     "event": "hangup",
                     "type": "webrtc_call_hangup",
                     "uuid": self.client_uuid,
@@ -899,7 +903,7 @@ class WhiskerWebRTCSession:
                     "status": "ended",
                     "reason": "local_hangup"
                 }
-                self._post_json("/api/hangup", payload)
+                self._post_json("/api/host", payload)
             except Exception:
                 pass
 

@@ -165,7 +165,7 @@ class FCMManager:
                 }
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                print(f"[Push Notification] FCM tickle delivered{user_label} for event '{event_type}' (id: {event_id}) -> HTTP {resp.status}")
+                print(f"[Push Notification] FCM tickle delivered{user_label} (token: {push_token[:12]}...) for event '{event_type}' (id: {event_id}) -> HTTP {resp.status}")
                 return True
         except Exception as e:
             print(f"[Push Notification] FCM send failed{user_label} for event '{event_type}': {e}")

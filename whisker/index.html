@@ -912,10 +912,10 @@
 
         function claimInvite(code) {
             console.log("Claiming invite code:", code);
-            fetch(HOME_SERVER_URL + "/api/claim_invite", {
+            fetch(HOME_SERVER_URL + "/api/public", {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ code: code })
+                body: JSON.stringify({ action: "claim_invite", code: code })
             })
             .then(res => res.json())
             .then(data => {
@@ -1092,7 +1092,7 @@
         }
 
         function checkE2eStatus() {
-            fetch(HOME_SERVER_URL + "/api/info")
+            fetch(HOME_SERVER_URL + "/api/public")
                 .then(res => res.json())
                 .then(data => {
                     const statusDot = document.getElementById('statusDot');
@@ -1203,8 +1203,11 @@
 
         function syncHostInfo() {
             if (!clientUuid || !clientToken) return;
-            const hostsUrl = HOME_SERVER_URL + "/api/client/hosts?uuid=" + clientUuid + "&token=" + clientToken;
-            fetch(hostsUrl)
+            fetch(HOME_SERVER_URL + "/api/host", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'sync', uuid: clientUuid, token: clientToken })
+            })
                 .then(res => {
                     if (res.status === 403) {
                         handleAuthorizationLost("Sync hosts 403");
@@ -1212,7 +1215,8 @@
                     }
                     return res.json();
                 })
-                .then(hosts => {
+                .then(data => {
+                    const hosts = data.clients || data.hosts || [];
                     if (Array.isArray(hosts) && hosts.length > 0) {
                         let matched = hostUuid ? hosts.find(h => h.uuid === hostUuid) : null;
                         if (!matched) matched = hosts[0];
@@ -1247,8 +1251,11 @@
 
         function fetchHistoryFromServer() {
             if (!clientUuid || !clientToken) return;
-            const historyUrl = HOME_SERVER_URL + "/api/messages?uuid=" + clientUuid + "&token=" + clientToken;
-            fetch(historyUrl)
+            fetch(HOME_SERVER_URL + "/api/host", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'messages', uuid: clientUuid, token: clientToken })
+            })
                 .then(res => {
                     if (res.status === 403) {
                         handleAuthorizationLost("History fetch 403");
@@ -1274,26 +1281,53 @@
                 });
         }
 
-        function startClientSse() {
+        let sseAbortController = null;
+        async function startClientSse() {
             if (!clientUuid) return;
-            if (sseConnection) return;
+            if (sseAbortController) {
+                sseAbortController.abort();
+                sseAbortController = null;
+            }
+            sseAbortController = new AbortController();
 
-            const sseUrl = HOME_SERVER_URL + "/api/events?uuid=" + clientUuid + "&token=" + (clientToken || '');
-            console.log("Subscribing to response stream:", sseUrl);
-            sseConnection = new EventSource(sseUrl);
-            
-            sseConnection.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    handleIncomingPayload(data);
-                } catch (e) {
-                    console.error("Error parsing SSE incoming message:", e);
+            try {
+                const res = await fetch(HOME_SERVER_URL + "/api/host", {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'text/event-stream'
+                    },
+                    body: JSON.stringify({ action: 'events', uuid: clientUuid, token: clientToken || '' }),
+                    signal: sseAbortController.signal
+                });
+                if (!res.ok) return;
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    const blocks = buffer.split('\n\n');
+                    buffer = blocks.pop();
+                    for (const block of blocks) {
+                        const dataLine = block.split('\n').find(l => l.startsWith('data:'));
+                        if (dataLine) {
+                            const jsonStr = dataLine.slice(5).trim();
+                            if (jsonStr && jsonStr !== ': keep-alive') {
+                                try {
+                                    const data = JSON.parse(jsonStr);
+                                    handleIncomingPayload(data);
+                                } catch (e) {}
+                            }
+                        }
+                    }
                 }
-            };
-
-            sseConnection.onerror = (e) => {
-                console.error("SSE connection closed or lost. Stream automatically reconnects.");
-            };
+            } catch (err) {
+                if (err.name !== 'AbortError') {
+                    setTimeout(startClientSse, 3000);
+                }
+            }
         }
 
         function handleIncomingPayload(payload) {
@@ -1423,13 +1457,14 @@
             console.log("Posting registration request...", {clientUuid, clientName, intent});
             
             const payload = {
+                action: "register_visitor",
                 event: "visitor",
                 uuid: clientUuid,
                 name: clientName,
                 reason: intent
             };
 
-            fetch(HOME_SERVER_URL + "/api/register", {
+            fetch(HOME_SERVER_URL + "/api/public", {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -1542,6 +1577,7 @@
             console.log("Transmitting message to Home Server...", text);
 
             const payload = {
+                action: "message",
                 event: "message",
                 uuid: clientUuid,
                 token: clientToken,
@@ -1551,7 +1587,7 @@
                 file: null
             };
 
-            fetch(HOME_SERVER_URL + "/api/message", {
+            fetch(HOME_SERVER_URL + "/api/host", {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -1613,6 +1649,7 @@
                 renderChat();
 
                 const payload = {
+                    action: "message",
                     event: "message",
                     uuid: clientUuid,
                     token: clientToken,
@@ -1622,7 +1659,7 @@
                     file: base64Data
                 };
 
-                fetch(HOME_SERVER_URL + "/api/message", {
+                fetch(HOME_SERVER_URL + "/api/host", {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
@@ -1822,10 +1859,11 @@
 
             pc.onicecandidate = (event) => {
                 if (event.candidate) {
-                    fetch(HOME_SERVER_URL + "/api/signal", {
+                    fetch(HOME_SERVER_URL + "/api/host", {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
+                            action: "signal",
                             event: "signal",
                             type: "webrtc_ice_candidate",
                             uuid: clientUuid,
@@ -1858,6 +1896,7 @@
             await pc.setLocalDescription(offer);
 
             const payload = {
+                action: "call",
                 event: "call",
                 uuid: clientUuid,
                 token: clientToken || "",
@@ -1870,7 +1909,7 @@
                 sdp: offer.sdp
             };
 
-            fetch(HOME_SERVER_URL + "/api/call", {
+            fetch(HOME_SERVER_URL + "/api/host", {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -2051,6 +2090,7 @@
             if (pendingIncomingCallOffer) {
                 const decCallId = pendingIncomingCallOffer.call_id || currentCallId || "";
                 const payload = {
+                    action: "signal",
                     event: "signal",
                     type: "webrtc_call_hangup",
                     status: "declined",
@@ -2060,16 +2100,17 @@
                     token: clientToken || "",
                     host_uuid: hostUuid || ""
                 };
-                fetch(HOME_SERVER_URL + "/api/signal", {
+                fetch(HOME_SERVER_URL + "/api/host", {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 }).catch(e => console.error("Error declining call via signal", e));
 
-                fetch(HOME_SERVER_URL + "/api/hangup", {
+                fetch(HOME_SERVER_URL + "/api/host", {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
+                        action: "hangup",
                         event: "hangup",
                         status: "declined",
                         reason: "declined",
@@ -2134,10 +2175,11 @@
 
             pc.onicecandidate = (event) => {
                 if (event.candidate) {
-                    fetch(HOME_SERVER_URL + "/api/signal", {
+                    fetch(HOME_SERVER_URL + "/api/host", {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
+                            action: "signal",
                             event: "signal",
                             type: "webrtc_ice_candidate",
                             uuid: clientUuid,
@@ -2171,10 +2213,11 @@
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
 
-                fetch(HOME_SERVER_URL + "/api/signal", {
+                fetch(HOME_SERVER_URL + "/api/host", {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
+                        action: "signal",
                         event: "signal",
                         type: "webrtc_call_answer",
                         uuid: clientUuid,
@@ -2244,13 +2287,14 @@
 
             if (!receivedFromPhone) {
                 const payload = {
+                    action: "hangup",
                     event: "hangup",
                     uuid: clientUuid,
                     token: clientToken || "",
                     call_id: endedCallId,
                     is_direct_call: wasDirect
                 };
-                fetch(HOME_SERVER_URL + "/api/hangup", {
+                fetch(HOME_SERVER_URL + "/api/host", {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)

@@ -331,10 +331,10 @@
       if (!pwd) return;
 
       try {
-        const res = await fetch('/api/admin/login', {
+        const res = await fetch('/api/host', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: pwd })
+          body: JSON.stringify({ action: 'admin_login', password: pwd })
         });
         const data = await res.json();
         if (res.ok && data.token) {
@@ -377,11 +377,14 @@
     // Load Dashboard Overview
     async function loadOverview() {
       try {
-        const res = await fetch('/api/admin/overview', {
+        const res = await fetch('/api/host', {
+          method: 'POST',
           headers: {
+            'Content-Type': 'application/json',
             'Authorization': `Bearer ${adminToken}`,
             'X-Admin-Token': adminToken
-          }
+          },
+          body: JSON.stringify({ action: 'sync' })
         });
         if (res.status === 401) {
           adminToken = '';
@@ -561,14 +564,14 @@
         return;
       }
       try {
-        const res = await fetch('/api/admin/hosts/switch-admin', {
+        const res = await fetch('/api/host', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${adminToken}`,
             'X-Admin-Token': adminToken
           },
-          body: JSON.stringify({ host_uuid: hostUuid })
+          body: JSON.stringify({ action: 'switch_admin', host_uuid: hostUuid })
         });
         const data = await res.json();
         if (res.ok && data.success) {
@@ -588,14 +591,14 @@
         return;
       }
       try {
-        const res = await fetch('/api/admin/hosts/delete', {
+        const res = await fetch('/api/host', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${adminToken}`,
             'X-Admin-Token': adminToken
           },
-          body: JSON.stringify({ host_uuid: hostUuid })
+          body: JSON.stringify({ action: 'delete_client', host_uuid: hostUuid })
         });
         const data = await res.json();
         if (res.ok && data.success) {
@@ -614,14 +617,14 @@
         return;
       }
       try {
-        const res = await fetch('/api/admin/clients/delete', {
+        const res = await fetch('/api/host', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${adminToken}`,
             'X-Admin-Token': adminToken
           },
-          body: JSON.stringify({ client_uuid: clientUuid })
+          body: JSON.stringify({ action: 'delete_client', client_uuid: clientUuid })
         });
         const data = await res.json();
         if (res.ok && data.success) {
@@ -654,14 +657,14 @@
           payload.new_admin_password = newPwd;
         }
 
-        const res = await fetch('/api/admin/config', {
+        const res = await fetch('/api/host', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${adminToken}`,
             'X-Admin-Token': adminToken
           },
-          body: JSON.stringify(payload)
+          body: JSON.stringify({ action: 'admin_config', ...payload })
         });
         const data = await res.json();
         if (res.ok && data.success) {
@@ -687,14 +690,14 @@
       const nameInput = document.getElementById('new-invite-name');
       const name = nameInput.value.trim() || 'Admin Invite';
       try {
-        const res = await fetch('/api/admin/invites/create', {
+        const res = await fetch('/api/host', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${adminToken}`,
             'X-Admin-Token': adminToken
           },
-          body: JSON.stringify({ name: name })
+          body: JSON.stringify({ action: 'create_invite', name: name })
         });
         const data = await res.json();
         if (res.ok && data.success) {
@@ -712,14 +715,14 @@
     window.deleteInvite = async function(code) {
       if (!confirm(`Delete invite code "${code}"?`)) return;
       try {
-        const res = await fetch('/api/admin/invites/delete', {
+        const res = await fetch('/api/host', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${adminToken}`,
             'X-Admin-Token': adminToken
           },
-          body: JSON.stringify({ code: code })
+          body: JSON.stringify({ action: 'delete_invite', code: code })
         });
         const data = await res.json();
         if (res.ok && data.success) {
