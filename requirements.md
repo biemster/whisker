@@ -351,20 +351,19 @@ To ensure robust call state transitions and prevent desynchronized call states (
 
 ---
 
-## 12. End-to-End Encryption (E2EE) & Project Roadmap
+## 12. End-to-End Encryption (E2EE) Specification & Roadmap
 
-### 12.1 Cryptographic Message Envelope Design
-To enable zero-knowledge end-to-end encryption between hosts and clients, the message data model and JSON serialization protocol support optional cryptographic envelope attributes:
-- `cipher_text`: Base64-encoded encrypted payload ciphertext.
-- `encryption_type`: Algorithm identifier (e.g., `"x25519-chacha20-poly1305"` or `"aes-256-gcm"`).
-- `key_id`: Identifier for the recipient's public key or active ratchet session.
-- `public_key`: Ephemeral sender public key used for Diffie-Hellman key derivation.
+### 12.1 Operational E2EE Cryptographic Specification
+Whisker implements default-on End-to-End Encryption (E2EE) across all ecosystem endpoints (Home Server, Android Mobile Gateway, CLI Client, MCP Server, Web Visitor Client, and Embed Widget):
+- **Key Exchange**: Elliptic Curve Diffie-Hellman (ECDH) over Curve25519 / X25519 (RFC 7748). 32-byte private and public keys. Public keys are 44-character Base64 strings used directly as node identifiers (`uuid` / server ID).
+- **Key Derivation**: HKDF-SHA256 (RFC 5869) using `salt = "whisker-e2ee-v1"` and `info = "whisker-msg-aes256-gcm"` to derive a 32-byte AES key.
+- **Payload Cipher**: AES-256-GCM authenticated encryption with a 12-byte CSPRNG IV and a 16-byte authentication tag.
+- **Wire Envelope**: Base64 string of `IV[12] || Ciphertext || Tag[16]`. Messages carry the `is_encrypted: true` flag.
+- **Key Storage**: Private key files are stored directly in the working directory as `.<username>_<server>.secret` with POSIX `0600` permissions. Android stores keypairs in app-private SharedPreferences; browser clients store keypairs in `localStorage`.
+- **Zero-Knowledge Relay**: The Home Server acts strictly as a zero-knowledge relay, storing encrypted messages as received in SQLite `messages.text` with `is_encrypted = 1` and delivering them intact to authorized peers.
 
-When an encrypted message is exchanged, the Home Server acts solely as a zero-knowledge relay, forwarding the opaque ciphertext and envelope metadata through the unified `/api/host` event queue and `/api/message` endpoints without accessing the plaintext contents.
-
-### 12.2 Implementation Roadmap Priority
-The Whisker feature roadmap sequence is formally scheduled as follows:
+### 12.2 Feature Roadmap Sequence
 1. **Core Two-Endpoint REST Architecture & ETag Caching** *(Completed)*
-2. **End-to-End Encryption (E2EE) for Messages** *(Next milestone, prior to iOS)*
+2. **End-to-End Encryption (E2EE) for All Clients** *(Completed)*
 3. **Native iOS Mobile Application** *(Subsequent milestone)*
 4. **Decentralized Multi-Server Federation & DHT Mesh**

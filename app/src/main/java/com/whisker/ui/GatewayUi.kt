@@ -3740,6 +3740,37 @@ fun ChatTab(
                                             modifier = Modifier.padding(bottom = 2.dp, start = 4.dp, end = 4.dp)
                                         )
 
+                                        val displayText = remember(msg.messageText, msg.isEncrypted, msg.clientUuid, client.uuid) {
+                                            if (viewModel != null) {
+                                                val (privKey, _) = try {
+                                                    viewModel.networkManager.getOrCreateLocalKeyPair()
+                                                } catch (_: Exception) {
+                                                    Pair(ByteArray(0), "")
+                                                }
+                                                if (privKey.isNotEmpty()) {
+                                                    val peerUuids = listOfNotNull(
+                                                        msg.clientUuid.takeIf { it.isNotBlank() },
+                                                        client.uuid.takeIf { it.isNotBlank() }
+                                                    ).distinct()
+                                                    var decrypted: String? = null
+                                                    for (peerKey in peerUuids) {
+                                                        try {
+                                                            val plain = com.whisker.crypto.WhiskerCrypto.decryptPayload(privKey, peerKey, msg.messageText)
+                                                            if (plain.isNotEmpty()) {
+                                                                decrypted = plain
+                                                                break
+                                                            }
+                                                        } catch (_: Exception) {}
+                                                    }
+                                                    decrypted ?: msg.messageText
+                                                } else {
+                                                    msg.messageText
+                                                }
+                                            } else {
+                                                msg.messageText
+                                            }
+                                        }
+
                                         if (msg.filePath != null && msg.filePath != "null" && msg.filePath.isNotBlank()) {
                                             val pathStr = msg.filePath
                                             val isImg = remember(pathStr, msg.messageText) {
@@ -3778,9 +3809,9 @@ fun ChatTab(
                                                                 .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)),
                                                             contentScale = androidx.compose.ui.layout.ContentScale.Crop
                                                         )
-                                                        if (msg.messageText.isNotBlank() && msg.messageText != msg.filePath && !msg.messageText.startsWith("data:") && !msg.messageText.startsWith("http")) {
+                                                        if (displayText.isNotBlank() && displayText != msg.filePath && !displayText.startsWith("data:") && !displayText.startsWith("http")) {
                                                             Text(
-                                                                text = msg.messageText,
+                                                                text = displayText,
                                                                 fontSize = 12.sp,
                                                                 color = Color.White,
                                                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
@@ -3789,9 +3820,9 @@ fun ChatTab(
                                                     }
                                                 }
                                             } else {
-                                                val fileName = remember(msg.filePath, msg.messageText) {
-                                                    if (msg.messageText.isNotBlank() && !msg.messageText.startsWith("data:") && !msg.messageText.startsWith("http") && !msg.messageText.startsWith("/")) {
-                                                        msg.messageText
+                                                val fileName = remember(msg.filePath, displayText) {
+                                                    if (displayText.isNotBlank() && !displayText.startsWith("data:") && !displayText.startsWith("http") && !displayText.startsWith("/")) {
+                                                        displayText
                                                     } else {
                                                         pathStr.substringAfterLast('/').substringBefore('?')
                                                     }
@@ -3881,7 +3912,6 @@ fun ChatTab(
                                                 }
                                             }
                                         } else {
-                                            // Render as text msg
                                             Box(
                                                 modifier = Modifier
                                                     .background(
@@ -3906,7 +3936,7 @@ fun ChatTab(
                                                     .padding(12.dp)
                                             ) {
                                                 Text(
-                                                    text = msg.messageText,
+                                                    text = displayText,
                                                     fontSize = 13.sp,
                                                     color = if (msg.isIncoming) Color.White else Color.Black,
                                                     lineHeight = 18.sp

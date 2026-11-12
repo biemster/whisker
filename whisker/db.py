@@ -40,7 +40,8 @@ class DatabaseManager:
                     text TEXT,
                     file_path TEXT,
                     created_at INTEGER,
-                    previous_message_id TEXT DEFAULT NULL
+                    previous_message_id TEXT DEFAULT NULL,
+                    is_encrypted INTEGER DEFAULT 0
                 )
                 """)
                 try:
@@ -49,6 +50,10 @@ class DatabaseManager:
                     pass
                 try:
                     cursor.execute("ALTER TABLE messages ADD COLUMN previous_message_id TEXT DEFAULT NULL")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE messages ADD COLUMN is_encrypted INTEGER DEFAULT 0")
                 except sqlite3.OperationalError:
                     pass
                 cursor.execute("""
@@ -241,9 +246,10 @@ class DatabaseManager:
     def get_requests(self):
         return self.get_clients()
 
-    def add_message(self, client_uuid, host_uuid, sender, text, file_path=None, msg_id=None):
+    def add_message(self, client_uuid, host_uuid, sender, text, file_path=None, msg_id=None, is_encrypted=0):
         now = int(time.time() * 1000)
         msg_id = str(msg_id) if msg_id else str(uuid_lib.uuid4())
+        enc_flag = 1 if is_encrypted else 0
         with self.lock:
             conn = self.get_connection()
             try:
@@ -256,8 +262,8 @@ class DatabaseManager:
                 prev_id = str(prev_row['id']) if (prev_row and prev_row['id'] is not None) else None
 
                 cursor.execute(
-                    "INSERT INTO messages (id, client_uuid, host_uuid, sender, text, file_path, created_at, previous_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (msg_id, client_uuid, host_uuid, sender, text, file_path, now, prev_id)
+                    "INSERT INTO messages (id, client_uuid, host_uuid, sender, text, file_path, created_at, previous_message_id, is_encrypted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (msg_id, client_uuid, host_uuid, sender, text, file_path, now, prev_id, enc_flag)
                 )
                 conn.commit()
                 return msg_id, prev_id
@@ -270,7 +276,7 @@ class DatabaseManager:
             try:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT id, client_uuid, sender, text, file_path, created_at, previous_message_id FROM messages WHERE client_uuid = ? ORDER BY created_at ASC",
+                    "SELECT id, client_uuid, sender, text, file_path, created_at, previous_message_id, is_encrypted FROM messages WHERE client_uuid = ? ORDER BY created_at ASC",
                     (client_uuid,)
                 )
                 rows = cursor.fetchall()
@@ -286,7 +292,7 @@ class DatabaseManager:
             try:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT id, client_uuid, sender, text, file_path, created_at, previous_message_id FROM messages WHERE id = ? OR CAST(id AS TEXT) = ?",
+                    "SELECT id, client_uuid, sender, text, file_path, created_at, previous_message_id, is_encrypted FROM messages WHERE id = ? OR CAST(id AS TEXT) = ?",
                     (str(msg_id), str(msg_id))
                 )
                 row = cursor.fetchone()

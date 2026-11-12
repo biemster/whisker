@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Get In Touch</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/whisker_crypto.js"></script>
     <style>
         body {
             background-color: #0b0f19;
@@ -422,6 +423,22 @@
 
     <script>
         const HOME_SERVER_URL = window.HOME_SERVER_URL || '';
+
+        function getOrCreateClientKeyPair() {
+            try {
+                const stored = localStorage.getItem('whisker_client_keypair');
+                if (stored) return JSON.parse(stored);
+            } catch (e) {}
+            if (typeof WhiskerWebCrypto !== 'undefined') {
+                const kp = WhiskerWebCrypto.generateKeyPair();
+                try {
+                    localStorage.setItem('whisker_client_keypair', JSON.stringify(kp));
+                } catch (e) {}
+                return kp;
+            }
+            return { privateKeyB64: '', publicKeyB64: '' };
+        }
+
         let clientUuid = '';
         let clientName = '';
         let clientToken = '';
@@ -1270,6 +1287,7 @@
                         text: item.text,
                         timestamp: item.created_at,
                         isIncoming: item.sender === 'phone',
+                        isEncrypted: !!item.is_encrypted,
                         filePath: item.file_path || null
                     }));
                     saveActiveConnectionData();
@@ -1361,6 +1379,7 @@
                             text: payload.text,
                             timestamp: payload.timestamp || Date.now(),
                             isIncoming: isPhone,
+                            isEncrypted: !!payload.is_encrypted,
                             filePath: fileVal
                         };
                         chatLogs.push(newMsg);
@@ -1450,7 +1469,8 @@
             const intent = document.getElementById('clientIntentInput').value.trim();
             if (!name || !intent) return;
 
-            clientUuid = 'cli_' + Math.random().toString(36).substr(2, 9);
+            const kp = getOrCreateClientKeyPair();
+            clientUuid = kp.publicKeyB64 || ('cli_' + Math.random().toString(36).substr(2, 9));
             clientName = name;
             saveActiveConnectionData();
 
@@ -1460,6 +1480,7 @@
                 action: "register_visitor",
                 event: "visitor",
                 uuid: clientUuid,
+                public_key: kp.publicKeyB64,
                 name: clientName,
                 reason: intent
             };
@@ -1502,6 +1523,21 @@
             toggleCall(isVideo, true, reason, targetHostUuid);
         }
 
+        async function decryptMessageText(msg) {
+            if (!msg.isEncrypted && !msg.is_encrypted) return msg.text;
+            if (msg.decryptedText) return msg.decryptedText;
+            if (!hostUuid || typeof WhiskerWebCrypto === 'undefined') return "[Encrypted message]";
+            try {
+                const kp = getOrCreateClientKeyPair();
+                if (!kp.privateKeyB64) return "[Encrypted message]";
+                const plain = await WhiskerWebCrypto.decryptPayload(kp.privateKeyB64, hostUuid, msg.text);
+                msg.decryptedText = plain;
+                return plain;
+            } catch (e) {
+                return "[Encrypted message]";
+            }
+        }
+
         function renderChat() {
             const chatBox = document.getElementById('chatBox');
             if (!chatBox) return;
@@ -1516,25 +1552,27 @@
                 const timeStr = new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
                 
                 let textBody = '';
+                const rawText = msg.decryptedText || msg.text || '';
+
                 if (msg.filePath) {
                     const resolvedPath = (msg.filePath.startsWith('/') ? (HOME_SERVER_URL + msg.filePath) : msg.filePath);
-                    const isImg = msg.filePath.startsWith("data:image/") || msg.filePath.match(/\.(png|jpg|jpeg|webp|gif)/i) || (msg.text && msg.text.match(/\.(png|jpg|jpeg|webp|gif)/i));
+                    const isImg = msg.filePath.startsWith("data:image/") || msg.filePath.match(/\.(png|jpg|jpeg|webp|gif)/i) || (rawText && rawText.match(/\.(png|jpg|jpeg|webp|gif)/i));
                     if (isImg) {
                         textBody = '<div class="rounded-xl overflow-hidden border border-cyan-800 bg-cyan-950 p-1.5">' +
-                                       '<img src="' + resolvedPath + '" alt="' + (msg.text || 'Image') + '" class="max-h-48 rounded-lg cursor-pointer hover:opacity-90 transition object-cover" onclick="window.open(\'' + resolvedPath + '\', \'_blank\')" />' +
-                                       (msg.text && msg.text !== msg.filePath && !msg.text.startsWith('data:') ? '<p class="text-xs text-cyan-200 mt-1 px-1">' + msg.text + '</p>' : '') +
+                                       '<img src="' + resolvedPath + '" alt="' + (rawText || 'Image') + '" class="max-h-48 rounded-lg cursor-pointer hover:opacity-90 transition object-cover" onclick="window.open(\'' + resolvedPath + '\', \'_blank\')" />' +
+                                       (rawText && rawText !== msg.filePath && !rawText.startsWith('data:') ? '<p class="text-xs text-cyan-200 mt-1 px-1">' + rawText + '</p>' : '') +
                                    '</div>';
                     } else {
                         textBody = '<div class="bg-cyan-950 border border-cyan-800 p-2.5 rounded-xl flex items-center space-x-2 text-cyan-300">' +
                                        '<span class="text-lg">📎</span>' +
                                        '<div>' +
-                                           '<p class="font-bold underline cursor-pointer hover:text-white" onclick="downloadAttachment(' + JSON.stringify(msg.text) + ', ' + JSON.stringify(resolvedPath) + ')">' + msg.text + '</p>' +
+                                           '<p class="font-bold underline cursor-pointer hover:text-white" onclick="downloadAttachment(' + JSON.stringify(rawText) + ', ' + JSON.stringify(resolvedPath) + ')">' + rawText + '</p>' +
                                        '</div>' +
                                    '</div>';
                     }
                 } else {
                     textBody = '<div class="p-2.5 rounded-xl ' + (msg.isIncoming ? 'bg-gray-900 text-gray-200 border border-gray-800' : 'bg-cyan-500 text-black font-medium') + '">' +
-                                   msg.text +
+                                   rawText +
                                '</div>';
                 }
 
@@ -1542,6 +1580,12 @@
                     '<span class="text-[9px] text-gray-500 mb-0.5 px-1 ' + (msg.isIncoming ? 'text-left' : 'text-right') + '">' + (msg.isIncoming ? (hostName || 'Phone') : 'You') + ' • ' + timeStr + '</span>' +
                     textBody;
                 chatBox.appendChild(messageDiv);
+
+                if ((msg.isEncrypted || msg.is_encrypted) && !msg.decryptedText) {
+                    decryptMessageText(msg).then(plain => {
+                        if (plain !== rawText) renderChat();
+                    });
+                }
             });
             chatBox.scrollTop = chatBox.scrollHeight;
         }
@@ -1557,7 +1601,7 @@
             document.body.removeChild(link);
         }
 
-        function submitMessage() {
+        async function submitMessage() {
             const chatInput = document.getElementById('chatInput');
             const text = chatInput.value.trim();
             if (!text) return;
@@ -1576,13 +1620,28 @@
 
             console.log("Transmitting message to Home Server...", text);
 
+            let textToSend = text;
+            let isEncrypted = false;
+            if (hostUuid && typeof WhiskerWebCrypto !== 'undefined') {
+                try {
+                    const kp = getOrCreateClientKeyPair();
+                    if (kp.privateKeyB64) {
+                        textToSend = await WhiskerWebCrypto.encryptPayload(kp.privateKeyB64, hostUuid, text);
+                        isEncrypted = true;
+                    }
+                } catch (e) {
+                    console.warn("E2EE encryption warning:", e);
+                }
+            }
+
             const payload = {
                 action: "message",
                 event: "message",
                 uuid: clientUuid,
                 token: clientToken,
                 name: clientName,
-                text: text,
+                text: textToSend,
+                is_encrypted: isEncrypted,
                 host_uuid: hostUuid || null,
                 file: null
             };

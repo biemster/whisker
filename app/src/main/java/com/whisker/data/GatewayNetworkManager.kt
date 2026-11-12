@@ -213,6 +213,29 @@ class GatewayNetworkManager(private val context: Context, private val repository
         val savedAllowDirectCalls = prefs.getBoolean("allow_direct_calls", false)
         allowDirectCalls.value = savedAllowDirectCalls
 
+    }
+
+    fun getOrCreateLocalKeyPair(): Pair<ByteArray, String> {
+        val prefs = context.getSharedPreferences("whisker_e2ee_keys", Context.MODE_PRIVATE)
+        val privB64 = prefs.getString("private_key_b64", null)
+        val pubB64 = prefs.getString("public_key_b64", null)
+        if (!privB64.isNullOrEmpty() && !pubB64.isNullOrEmpty()) {
+            try {
+                val privBytes = android.util.Base64.decode(privB64, android.util.Base64.DEFAULT)
+                if (privBytes.size == 32) {
+                    return Pair(privBytes, pubB64)
+                }
+            } catch (_: Exception) {}
+        }
+        val (newPriv, newPub) = com.whisker.crypto.WhiskerCrypto.generateKeyPair()
+        prefs.edit()
+            .putString("private_key_b64", android.util.Base64.encodeToString(newPriv, android.util.Base64.NO_WRAP))
+            .putString("public_key_b64", newPub)
+            .apply()
+        return Pair(newPriv, newPub)
+    }
+
+    init {
         createNotificationChannel()
         registerFcmToken()
         
@@ -789,11 +812,14 @@ class GatewayNetworkManager(private val context: Context, private val repository
             fetchFcmConfigFromServer(cleanUrl, pinVal)
             val cleanUser = server.clientIdentity.trim().ifEmpty { hostUsername.value.ifEmpty { Build.MODEL ?: "Mobile Device" } }
             val token = if (server.fcmToken.isNotEmpty()) server.fcmToken else pushToken.value
+            val (localPrivKey, localPubKey) = getOrCreateLocalKeyPair()
             val body = JSONObject().apply {
                 put("action", "register_mobile")
                 put("username", cleanUser)
                 put("pin_token", pinVal)
                 put("push_token", token)
+                put("public_key", localPubKey)
+                put("host_uuid", localPubKey)
             }
             val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
             val requestBody = RequestBody.create(mediaType, body.toString())
@@ -1207,6 +1233,19 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         val text = if (rawText == "null") "" else rawText
                         val file = if (json.isNull("file")) (if (json.isNull("filePath")) null else json.optString("filePath").takeIf { it.isNotEmpty() && it != "null" }) else json.optString("file").takeIf { it.isNotEmpty() && it != "null" }
                         val effectiveText = if (text.isEmpty() && file != null) "Attachment" else text
+                        val rawIsEncrypted = json.optBoolean("is_encrypted", false) || json.optBoolean("isEncrypted", false) || json.optInt("is_encrypted", 0) == 1
+                        var isEncrypted = rawIsEncrypted
+                        var displayText = effectiveText
+                        if (effectiveText.isNotEmpty()) {
+                            try {
+                                val (privKey, _) = getOrCreateLocalKeyPair()
+                                val decrypted = com.whisker.crypto.WhiskerCrypto.decryptPayload(privKey, uuid, effectiveText)
+                                if (decrypted.isNotEmpty()) {
+                                    displayText = decrypted
+                                    isEncrypted = true
+                                }
+                            } catch (_: Exception) {}
+                        }
                         val msgTimestamp = json.optLong("timestamp", System.currentTimeMillis())
 
                         val existingMsgs = repository.getMessagesForClientSync(uuid)
@@ -1224,11 +1263,12 @@ class GatewayNetworkManager(private val context: Context, private val repository
                                     messageText = effectiveText,
                                     filePath = file,
                                     isIncoming = true,
+                                    isEncrypted = isEncrypted,
                                     timestamp = msgTimestamp,
                                     previousMessageId = prevMsgIdStr
                                 )
                             )
-                            val cleanMsg = if (file != null) "🔗 File: [$effectiveText]" else (if (effectiveText.isNotEmpty()) effectiveText else "New message")
+                            val cleanMsg = if (file != null) "🔗 File: [$displayText]" else (if (displayText.isNotEmpty()) displayText else "New message")
                             showNotification(
                                 "Message from ${request.name}",
                                 cleanMsg,
@@ -1486,19 +1526,30 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
             if (msgObj == null) break
 
-            val msgUuid = msgObj!!.optString("clientUuid", uuid)
+            val conversationUuid = uuid
             val sender = msgObj!!.optString("sender", "guest")
             val rawText = if (msgObj!!.isNull("text")) "" else msgObj!!.optString("text", "")
             val text = if (rawText == "null") "" else rawText
+            val rawIsEncrypted = msgObj!!.optBoolean("is_encrypted", false) || msgObj!!.optBoolean("isEncrypted", false) || msgObj!!.optInt("is_encrypted", 0) == 1
+            var isEncrypted = rawIsEncrypted
             val filePath = if (msgObj!!.has("filePath") && !msgObj!!.isNull("filePath")) msgObj!!.optString("filePath").takeIf { it.isNotEmpty() && it != "null" } else null
             val effectiveText = if (text.isEmpty() && filePath != null) "Attachment" else text
+            if (!isEncrypted && effectiveText.isNotEmpty()) {
+                try {
+                    val (privKey, _) = getOrCreateLocalKeyPair()
+                    val decrypted = com.whisker.crypto.WhiskerCrypto.decryptPayload(privKey, conversationUuid, effectiveText)
+                    if (decrypted.isNotEmpty()) {
+                        isEncrypted = true
+                    }
+                } catch (_: Exception) {}
+            }
             val createdAt = msgObj!!.optLong("createdAt", System.currentTimeMillis())
             val prevId = if (msgObj!!.has("previousMessageId") && !msgObj!!.isNull("previousMessageId")) msgObj!!.optString("previousMessageId").takeIf { it.isNotEmpty() && it != "null" } else null
 
-            var req = repository.getRequestByUuid(msgUuid)
+            var req = repository.getRequestByUuid(conversationUuid)
             if (req == null) {
                 val newReq = ClientRequest(
-                    uuid = msgUuid,
+                    uuid = conversationUuid,
                     name = "Guest",
                     message = "Visitor / Chat Partner",
                     status = "APPROVED",
@@ -1513,32 +1564,34 @@ class GatewayNetworkManager(private val context: Context, private val repository
             val clientName = req.name
             val isIncoming = (sender != "phone")
 
-            val existingLocal = repository.getMessagesForClientSync(msgUuid).find { 
+            val existingLocal = repository.getMessagesForClientSync(conversationUuid).find { 
                 it.serverId == currentId || 
-                (it.serverId.isEmpty() && it.messageText == effectiveText && it.isIncoming == isIncoming && kotlin.math.abs(it.timestamp - createdAt) < 15000) 
+                (it.serverId.isEmpty() && it.messageText == effectiveText && it.isIncoming == isIncoming) 
             }
 
             if (existingLocal != null) {
                 if (existingLocal.serverId.isEmpty()) {
-                    repository.updateMessage(existingLocal.copy(serverId = currentId, previousMessageId = prevId))
+                    val finalEncrypted = existingLocal.isEncrypted || isEncrypted
+                    repository.updateMessage(existingLocal.copy(serverId = currentId, previousMessageId = prevId, isEncrypted = finalEncrypted))
                 }
             } else {
                 repository.insertMessage(
                     Message(
                         serverId = currentId,
-                        clientUuid = msgUuid,
+                        clientUuid = conversationUuid,
                         clientName = clientName,
                         messageText = effectiveText,
                         timestamp = createdAt,
                         filePath = filePath,
                         isIncoming = isIncoming,
+                        isEncrypted = isEncrypted,
                         previousMessageId = prevId
                     )
                 )
 
                 if (isIncoming) {
                     val cleanMsg = if (filePath != null) "🔗 File: [$effectiveText]" else (if (effectiveText.isNotEmpty()) effectiveText else "New message")
-                    showNotification("Message from $clientName", cleanMsg, 1003, msgUuid)
+                    showNotification("Message from $clientName", cleanMsg, 1003, conversationUuid)
                 }
             }
 
@@ -1578,6 +1631,7 @@ class GatewayNetworkManager(private val context: Context, private val repository
                         if (payload.has("sdp")) put("sdp", payload.getString("sdp"))
                         if (payload.has("candidate")) put("candidate", payload.opt("candidate"))
                         if (payload.has("text")) put("text", payload.optString("text"))
+                        if (payload.has("is_encrypted")) put("is_encrypted", payload.optBoolean("is_encrypted", false))
                         if (payload.has("file")) put("file", payload.optString("file"))
                         if (payload.has("filePath")) put("filePath", payload.optString("filePath"))
                         if (payload.has("call_id")) put("call_id", payload.getString("call_id"))
@@ -1621,6 +1675,24 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 okHttpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         Log.w("GatewayNetworkManager", "Server reject reply routing: ${response.code}")
+                    } else {
+                        val respBody = response.body?.string()
+                        if (!respBody.isNullOrEmpty()) {
+                            try {
+                                val respJson = JSONObject(respBody)
+                                val srvMsgId = respJson.optString("messageId", respJson.optString("id", ""))
+                                val srvPrevId = if (respJson.has("previousMessageId") && !respJson.isNull("previousMessageId")) respJson.optString("previousMessageId") else null
+                                val sentText = payload.optString("text", "")
+                                if (srvMsgId.isNotEmpty() && sentText.isNotEmpty()) {
+                                    val localUnsynced = repository.getMessagesForClientSync(clientUuid).find {
+                                        it.serverId.isEmpty() && it.messageText == sentText && !it.isIncoming
+                                    }
+                                    if (localUnsynced != null) {
+                                        repository.updateMessage(localUnsynced.copy(serverId = srvMsgId, previousMessageId = srvPrevId))
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -1660,11 +1732,13 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 val allServers = repository.getAllHomeServersSync()
                 val existingMemberServer = allServers.find { it.url.removeSuffix("/") == targetBase.removeSuffix("/") && it.isMember }
 
+                val (privKey, pubKey) = getOrCreateLocalKeyPair()
                 val json = JSONObject().apply {
                     put("action", "claim_invite")
                     put("code", code)
                     put("name", hostUsername.value)
                     put("client_type", "MOBILE")
+                    put("public_key", pubKey)
                     if (existingMemberServer != null && existingMemberServer.registeredUuid.isNotEmpty()) {
                         put("existing_uuid", existingMemberServer.registeredUuid)
                         put("existing_token", existingMemberServer.apiKey)
@@ -2602,13 +2676,24 @@ class GatewayNetworkManager(private val context: Context, private val repository
 
     fun sendLocalMessage(clientUuid: String, clientName: String, text: String, filePath: String? = null) {
         scope.launch {
+            var isEncrypted = false
+            var textToSend = text
+            try {
+                val (localPrivKey, _) = getOrCreateLocalKeyPair()
+                textToSend = com.whisker.crypto.WhiskerCrypto.encryptPayload(localPrivKey, clientUuid, text)
+                isEncrypted = true
+            } catch (e: Exception) {
+                Log.w("GatewayNetworkManager", "Could not encrypt local message to $clientUuid: ${e.message}")
+            }
+
             repository.insertMessage(
                 Message(
                     clientUuid = clientUuid,
                     clientName = clientName,
-                    messageText = text,
+                    messageText = textToSend,
                     filePath = filePath,
                     isIncoming = false,
+                    isEncrypted = isEncrypted,
                     isRead = true
                 )
             )
@@ -2618,7 +2703,8 @@ class GatewayNetworkManager(private val context: Context, private val repository
                 put("event", "message")
                 put("sender", "phone")
                 put("clientUuid", clientUuid)
-                put("text", text)
+                put("text", textToSend)
+                put("is_encrypted", isEncrypted)
                 put("filePath", filePath)
                 put("timestamp", System.currentTimeMillis())
             }

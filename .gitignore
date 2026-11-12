@@ -26,6 +26,7 @@ local.properties
 whisker-push-sa.json
 *.jks
 *.keystore
+.*.secret
 
 # Python & Whisker Runtime Files
 whisker/__pycache__/

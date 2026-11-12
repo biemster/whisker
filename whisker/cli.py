@@ -14,6 +14,7 @@ if __package__ is None or __package__ == '':
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from whisker.server import run_server
+from whisker.crypto import load_or_create_client_key, derive_shared_secret, encrypt_payload, decrypt_payload, get_secret_filename
 try:
     from whisker.webrtc_manager import WhiskerWebRTCSession
 except Exception:
@@ -332,7 +333,11 @@ def do_init(invite_url, username=None, server_name=None, custom_db=None):
                 print("Invalid invite URL format. Expected: http://server:3000/invite/CODE or http://server:3000?code=CODE")
                 sys.exit(1)
 
-        req_payload = {"action": "claim_invite", "code": code, "client_type": "CLI"}
+        temp_user = (username or '').strip() or 'cli'
+        temp_server = (server_name or '').strip() or 'server'
+        c_priv, c_pub = load_or_create_client_key(temp_user, temp_server)
+
+        req_payload = {"action": "claim_invite", "code": code, "client_type": "CLI", "public_key": c_pub}
         if username and str(username).strip():
             req_payload["name"] = str(username).strip()
 
@@ -344,7 +349,7 @@ def do_init(invite_url, username=None, server_name=None, custom_db=None):
                 print(f"Error: {res_data['error']}")
                 sys.exit(1)
 
-            uuid = res_data.get('uuid')
+            uuid = res_data.get('uuid') or c_pub
             token = res_data.get('token')
             final_user = (username or '').strip() or res_data.get('name') or 'CLI Client'
             host_uuid = res_data.get('host_uuid', '')
@@ -364,6 +369,10 @@ def do_init(invite_url, username=None, server_name=None, custom_db=None):
                 print("Invalid response from server (missing uuid or token).")
                 sys.exit(1)
 
+            from whisker.crypto import save_secret_key
+            sec_fn = get_secret_filename(final_user, final_server)
+            save_secret_key(sec_fn, c_priv)
+
             chosen_db = custom_db or format_client_db_name(final_user, final_server)
             save_client_credentials(chosen_db, {
                 'username': final_user,
@@ -381,7 +390,8 @@ def do_init(invite_url, username=None, server_name=None, custom_db=None):
             print(f"  Client Username: {final_user}")
             print(f"  Home Server:     {final_server} ({server_url})")
             print(f"  Database File:   {chosen_db}")
-            print(f"  Client UUID:     {uuid}")
+            print(f"  Client PubKey:   {uuid}")
+            print(f"  Secret Key File: {sec_fn}")
             print(f"  Paired Host:     {host_name} ({host_uuid or 'global'})\n")
             print("Commands:")
             print("  whisker send <message>                     Send a message to paired host")
@@ -436,12 +446,25 @@ def do_send(msg, contact=None, username=None, server_name=None, custom_db=None):
     host_name = target.get('host_name') or 'Host'
     host_uuid = contact or target.get('host_uuid') or ''
 
+    # E2EE: Encrypt message if peer host_uuid is present
+    out_text = msg
+    is_enc = False
+    if host_uuid:
+        try:
+            c_priv, _ = load_or_create_client_key(client_display_name, target['server_name'])
+            shared = derive_shared_secret(c_priv, host_uuid)
+            out_text = encrypt_payload(shared, msg)
+            is_enc = True
+        except Exception:
+            is_enc = False
+
     try:
         payload = {
             "action": "message",
             "uuid": uuid,
             "token": token,
-            "text": msg,
+            "text": out_text,
+            "is_encrypted": is_enc,
             "name": client_display_name
         }
         if host_uuid:
@@ -794,7 +817,19 @@ def _listen_stream_worker(target, label, video_source=None, audio_source=None, s
                                     except Exception as dl_err:
                                         print(f"\n⚠️ [{label}] Error saving received file '{safe_name}': {dl_err}")
                                 elif sender_val == 'phone' or sender_val != target.get('uuid'):
-                                    print(f"\n[{label}] {inner_payload.get('text') or raw_data.get('text')}")
+                                    raw_text = inner_payload.get('text') or raw_data.get('text')
+                                    is_enc_msg = inner_payload.get('is_encrypted') or inner_payload.get('isEncrypted') or raw_data.get('is_encrypted') or raw_data.get('isEncrypted')
+                                    if is_enc_msg and raw_text:
+                                        try:
+                                            peer_key = inner_payload.get('uuid') or raw_data.get('uuid') or target.get('host_uuid')
+                                            c_priv, _ = load_or_create_client_key(target['username'], target['server_name'])
+                                            shared = derive_shared_secret(c_priv, peer_key)
+                                            dec_text = decrypt_payload(shared, raw_text)
+                                            print(f"\n[{label}] {dec_text}")
+                                        except Exception as dec_err:
+                                            print(f"\n[{label}] [Encrypted message could not be decrypted: {dec_err}]")
+                                    else:
+                                        print(f"\n[{label}] {raw_text}")
                             elif event_type == 'call_accepted':
                                 print(f"\n[{label} Call] Host accepted the call.")
                             elif event_type == 'call_rejected':

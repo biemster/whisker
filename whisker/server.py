@@ -11,6 +11,7 @@ import hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
+import uuid
 from whisker.db import DatabaseManager
 from whisker.fcm import FCMManager, get_service_account_file
 
@@ -672,6 +673,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             "allow_direct_calls": len(direct_hosts) > 0,
             "direct_call_hosts": direct_hosts,
             "available_hosts": available_hosts,
+            "server_uuid": getattr(WhiskerServerHandler, 'server_uuid', None) or (self.db.get_setting('server_pub_key') if self.db else None),
+            "public_key": getattr(WhiskerServerHandler, 'server_pub_key', None) or (self.db.get_setting('server_pub_key') if self.db else None),
             "server_time": int(time.time() * 1000),
             "version": "0.1.0"
         }
@@ -981,7 +984,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             if push_token:
                 self.db.update_request_push_token(client_uuid, push_token)
         else:
-            client_uuid = f"cli_{''.join(random.choices(string.ascii_lowercase + string.digits, k=9))}"
+            pub_key = (body.get('public_key') or body.get('pub_key') or '').strip()
+            client_uuid = pub_key if pub_key else f"cli_{''.join(random.choices(string.ascii_lowercase + string.digits, k=9))}"
             client_token = f"tok_{''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}"
             client_name = (body.get('name') or '').strip() or invite.get('name', 'Invited Guest')
             client_type = body.get('client_type')
@@ -1046,6 +1050,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
             "name": client_name,
             "host_uuid": invite_host_uuid,
             "host_name": host_name,
+            "server_uuid": getattr(WhiskerServerHandler, 'server_uuid', None) or (self.db.get_setting('server_pub_key') if self.db else None),
+            "server_public_key": getattr(WhiskerServerHandler, 'server_pub_key', None) or (self.db.get_setting('server_pub_key') if self.db else None),
             "status": "APPROVED",
             "client_type": client_type,
             "server_name": s_name,
@@ -1261,16 +1267,20 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                         print(f"[Whisker Server] 📲 Host FCM Push Token registered during pairing: {clean_push_token[:16]}... for host '{username}'")
                     self.db.update_host(existing['uuid'], **updates)
                     s_name = self.db.get_setting('server_name') or getattr(WhiskerServerHandler, 'server_name', 'Whisker Home Server')
+                    srv_pub = getattr(WhiskerServerHandler, 'server_pub_key', None) or (self.db.get_setting('server_pub_key') if self.db else None)
                     return self._send_json({
                         "status": existing['status'],
                         "host_uuid": existing['uuid'],
                         "username": username,
                         "is_admin": existing.get('is_admin', 0),
+                        "server_uuid": srv_pub,
+                        "server_public_key": srv_pub,
                         "server_name": s_name,
                         "servername": s_name
                     })
 
-                host_uuid = str(uuid_lib.uuid4())
+                pub_key = (body.get('public_key') or body.get('pub_key') or body.get('host_uuid') or body.get('uuid') or '').strip()
+                host_uuid = pub_key if pub_key else str(uuid_lib.uuid4())
                 admin_host = self.db.get_admin_host()
                 # ONLY the mobile app that did the first initial pairing is granted admin rights
                 is_initial_pairing = (len(hosts) == 0 or admin_host is None)
@@ -1299,11 +1309,14 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                             self._send_fcm_tickle(admin_push, event_id=event_id, event_type="mobile_pairing", username=admin.get('username'))
 
                 s_name = self.db.get_setting('server_name') or getattr(WhiskerServerHandler, 'server_name', 'Whisker Home Server')
+                srv_pub = getattr(WhiskerServerHandler, 'server_pub_key', None) or (self.db.get_setting('server_pub_key') if self.db else None)
                 return self._send_json({
                     "status": status,
                     "host_uuid": host_uuid,
                     "username": username,
                     "is_admin": is_admin,
+                    "server_uuid": srv_pub,
+                    "server_public_key": srv_pub,
                     "server_name": s_name,
                     "servername": s_name
                 })
@@ -1410,7 +1423,9 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                     "text": msg['text'],
                     "filePath": msg['file_path'],
                     "createdAt": msg['created_at'],
-                    "previousMessageId": msg['previous_message_id']
+                    "previousMessageId": msg['previous_message_id'],
+                    "is_encrypted": bool(msg.get('is_encrypted', 0)),
+                    "isEncrypted": bool(msg.get('is_encrypted', 0))
                 })
 
             elif action in ['register_push', 'update_push']:
@@ -1724,7 +1739,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                         sender_snd = caller_client.get('name') or 'Visitor'
                         _, rel_p, safe_fn, _ = save_uploaded_file(self.db, target_rec, sender_snd, filename, f_bytes)
                         if target_host:
-                            msg_id, prev_id = self.db.add_message(caller_client['uuid'], target_host['uuid'], 'guest', text, rel_p)
+                            is_enc = 1 if (body.get('is_encrypted') or body.get('isEncrypted') or body.get('encrypted')) else 0
+                            msg_id, prev_id = self.db.add_message(caller_client['uuid'], target_host['uuid'], 'guest', text, rel_p, is_encrypted=is_enc)
                             event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
                             payload = {
                                 "event": "message",
@@ -1735,6 +1751,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                                 "clientUuid": caller_client['uuid'],
                                 "name": sender_snd,
                                 "text": text,
+                                "is_encrypted": bool(is_enc),
+                                "isEncrypted": bool(is_enc),
                                 "filePath": rel_p,
                                 "file": rel_p,
                                 "timestamp": int(time.time() * 1000),
@@ -1774,9 +1792,14 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         if not host:
             if client_uuid:
                 req = self.db.get_request(client_uuid)
-                if req and (req.get('status') == 'APPROVED' or req.get('req_status') == 'APPROVED'):
-                    if not token or req.get('token') == token or not req.get('token'):
-                        caller_client = req
+                if req:
+                    if req.get('status') == 'APPROVED' or req.get('req_status') == 'APPROVED':
+                        if not token or req.get('token') == token or not req.get('token'):
+                            caller_client = req
+                    elif req.get('status') == 'PENDING':
+                        action_type = body.get('action') or body.get('type') or body.get('event') or ''
+                        if action_type in ['chat_message', 'message', 'response'] or 'text' in body or 'filePath' in body or 'file' in body:
+                            caller_client = req
             if not caller_client and token:
                 caller_client = next((r for r in self.db.get_requests() if r.get('token') == token and (r.get('status') == 'APPROVED' or r.get('req_status') == 'APPROVED')), None)
 
@@ -1807,7 +1830,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 text = body.get('text', '')
                 file_path = body.get('filePath') or body.get('file')
                 if text or file_path:
-                    msg_id, prev_id = self.db.add_message(member_uuid, target_host['uuid'], 'guest', text, file_path)
+                    is_enc = 1 if (body.get('is_encrypted') or body.get('isEncrypted') or body.get('encrypted')) else 0
+                    msg_id, prev_id = self.db.add_message(member_uuid, target_host['uuid'], 'guest', text, file_path, is_encrypted=is_enc)
                     event_id = f"evt_{int(time.time()*1000)}_{random.randint(100,999)}"
                     payload = {
                         "event": "message",
@@ -1818,6 +1842,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                         "clientUuid": member_uuid,
                         "name": caller_client.get('name') or 'Member Mobile App',
                         "text": text,
+                        "is_encrypted": bool(is_enc),
+                        "isEncrypted": bool(is_enc),
                         "filePath": file_path,
                         "file": file_path,
                         "timestamp": int(time.time() * 1000),
@@ -1987,11 +2013,14 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     print(f"Base64 auto-save error in /api/host response action: {e}")
             if client_uuid and (text or file_path):
-                msg_id, prev_id = self.db.add_message(client_uuid, host_uuid, 'phone', text, file_path)
+                is_enc = 1 if (body.get('is_encrypted') or body.get('isEncrypted') or body.get('encrypted')) else 0
+                msg_id, prev_id = self.db.add_message(client_uuid, host_uuid, 'phone', text, file_path, is_encrypted=is_enc)
                 body['messageId'] = msg_id
                 body['id'] = msg_id
                 body['previousMessageId'] = prev_id
                 body['event'] = 'message'
+                body['is_encrypted'] = bool(is_enc)
+                body['isEncrypted'] = bool(is_enc)
                 body['filePath'] = file_path
                 body['file'] = file_path
                 body['uuid'] = host_uuid
@@ -2011,6 +2040,8 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                         "uuid": host_uuid,
                         "name": host.get('username') or 'Mobile App',
                         "text": text,
+                        "is_encrypted": bool(is_enc),
+                        "isEncrypted": bool(is_enc),
                         "filePath": file_path,
                         "file": file_path,
                         "timestamp": int(time.time() * 1000),
@@ -2264,6 +2295,19 @@ def run_server(port=3000, db_path=None, server_name=None, admin_password=None):
     WhiskerServerHandler.db = db
     WhiskerServerHandler.fcm = fcm
 
+    # Server Persistent Unique Identifier Initialization (stored in DB settings)
+    existing_srv_id = db.get_setting('server_uuid') or db.get_setting('server_pub_key')
+    if not existing_srv_id:
+        existing_srv_id = f"srv_{uuid.uuid4().hex}"
+        db.set_setting('server_uuid', existing_srv_id)
+        db.set_setting('server_pub_key', existing_srv_id)
+    else:
+        db.set_setting('server_uuid', existing_srv_id)
+        db.set_setting('server_pub_key', existing_srv_id)
+
+    WhiskerServerHandler.server_pub_key = existing_srv_id
+    WhiskerServerHandler.server_uuid = existing_srv_id
+
     # Admin Password Initialization
     effective_admin_pwd = (admin_password or '').strip() or os.environ.get('ADMIN_PASSWORD', '').strip()
     if effective_admin_pwd:
@@ -2289,6 +2333,7 @@ def run_server(port=3000, db_path=None, server_name=None, admin_password=None):
     print(" 🐱 WHISKER HOME SERVER ACTIVE (Python Edition)")
     print("==================================================================")
     print(f"   - Server Name:          {effective_server_name}")
+    print(f"   - Server ID:            {existing_srv_id}")
     print(f"   - Listening Port:       {port}")
     print(f"   - Local SQLite DB:      {db_path}")
     print(f"   - FCM Service Account:  {sa_status}")

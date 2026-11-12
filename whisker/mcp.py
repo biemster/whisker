@@ -27,6 +27,14 @@ from whisker.cli import (
     resolve_client_db,
     save_client_credentials
 )
+from whisker.crypto import (
+    load_or_create_client_key,
+    derive_shared_secret,
+    encrypt_payload,
+    decrypt_payload,
+    save_secret_key,
+    get_secret_filename
+)
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "whisker-mcp"
@@ -375,7 +383,11 @@ def handle_init(args: dict) -> dict:
     else:
         raise ValueError("Invalid invite URL format. Expected: http://server:3000/invite/CODE")
 
-    req_payload = {"action": "claim_invite", "code": code, "client_type": "MCP"}
+    temp_user = (username or '').strip() or 'mcp_agent'
+    temp_server = (server_name or '').strip() or 'server'
+    c_priv, c_pub = load_or_create_client_key(temp_user, temp_server)
+
+    req_payload = {"action": "claim_invite", "code": code, "client_type": "MCP", "public_key": c_pub}
     if username and str(username).strip():
         req_payload["name"] = str(username).strip()
 
@@ -390,7 +402,7 @@ def handle_init(args: dict) -> dict:
         if 'error' in res_data:
             raise RuntimeError(res_data['error'])
 
-        uuid = res_data.get('uuid')
+        uuid = res_data.get('uuid') or c_pub
         token = res_data.get('token')
         final_user = (username or '').strip() or res_data.get('name') or 'MCP Agent'
         host_uuid = res_data.get('host_uuid', '')
@@ -408,6 +420,9 @@ def handle_init(args: dict) -> dict:
 
         if not uuid or not token:
             raise RuntimeError("Invalid response from server: missing uuid or token.")
+
+        sec_fn = get_secret_filename(final_user, final_server)
+        save_secret_key(sec_fn, c_priv)
 
         chosen_db = custom_db or format_client_db_name(final_user, final_server)
         save_client_credentials(chosen_db, {
@@ -430,7 +445,8 @@ def handle_init(args: dict) -> dict:
             "database_file": chosen_db,
             "client_uuid": uuid,
             "host_name": host_name,
-            "host_uuid": host_uuid
+            "host_uuid": host_uuid,
+            "secret_file": sec_fn
         }
 
 
@@ -482,11 +498,24 @@ def handle_send_message(args: dict) -> dict:
     host_name = target.get('host_name') or 'Host'
     host_uuid = args.get('contact') or target.get('host_uuid') or ''
 
+    # E2EE: Encrypt outbound message if host_uuid is present
+    out_text = msg
+    is_enc = False
+    if host_uuid:
+        try:
+            c_priv, _ = load_or_create_client_key(client_display_name, target['server_name'])
+            shared = derive_shared_secret(c_priv, host_uuid)
+            out_text = encrypt_payload(shared, msg)
+            is_enc = True
+        except Exception:
+            is_enc = False
+
     payload = {
         "action": "message",
         "uuid": uuid,
         "token": token,
-        "text": msg,
+        "text": out_text,
+        "is_encrypted": is_enc,
         "name": client_display_name
     }
     if host_uuid:
@@ -514,6 +543,7 @@ def handle_send_message(args: dict) -> dict:
         return {
             "status": "SENT",
             "message": msg,
+            "is_encrypted": is_enc,
             "sender": client_display_name,
             "server": target['server_name'],
             "recipient_host": host_name,
@@ -553,9 +583,31 @@ def handle_get_messages(args: dict) -> dict:
             messages = res_data.get('messages', [])
         else:
             messages = []
+
+        # Decrypt on demand
+        try:
+            c_priv, _ = load_or_create_client_key(target['username'], target['server_name'])
+        except Exception:
+            c_priv = None
+
+        decrypted_messages = []
+        for m in messages:
+            m_copy = dict(m)
+            raw_t = m_copy.get('text', '')
+            is_enc_msg = m_copy.get('is_encrypted') or m_copy.get('isEncrypted')
+            if is_enc_msg and raw_t and c_priv:
+                try:
+                    peer_k = m_copy.get('uuid') or m_copy.get('host_uuid') or target.get('host_uuid')
+                    if peer_k:
+                        shared = derive_shared_secret(c_priv, peer_k)
+                        m_copy['text'] = decrypt_payload(shared, raw_t)
+                except Exception as err:
+                    m_copy['text'] = f"[Encrypted message could not be decrypted: {err}]"
+            decrypted_messages.append(m_copy)
+
         return {
-            "count": len(messages),
-            "messages": messages,
+            "count": len(decrypted_messages),
+            "messages": decrypted_messages,
             "client_uuid": uuid,
             "server_name": target['server_name']
         }
@@ -595,11 +647,26 @@ def handle_wait_new_messages(args: dict) -> dict:
     # 3. message ID not in seen/known set
     def filter_new_host_messages(msgs, seen_set):
         new_msgs = []
+        try:
+            c_priv, _ = load_or_create_client_key(target['username'], target['server_name'])
+        except Exception:
+            c_priv = None
+
         for m in msgs:
             sender = (m.get('sender') or '').strip().lower()
             m_id = m.get('id')
             if sender == 'phone' and m_id not in seen_set:
-                new_msgs.append(m)
+                m_copy = dict(m)
+                is_enc = m_copy.get('is_encrypted') or m_copy.get('isEncrypted')
+                if is_enc and c_priv and m_copy.get('text'):
+                    try:
+                        peer_k = m_copy.get('uuid') or m_copy.get('host_uuid') or target.get('host_uuid')
+                        if peer_k:
+                            shared = derive_shared_secret(c_priv, peer_k)
+                            m_copy['text'] = decrypt_payload(shared, m_copy['text'])
+                    except Exception as err:
+                        m_copy['text'] = f"[Encrypted message could not be decrypted: {err}]"
+                new_msgs.append(m_copy)
         return new_msgs
 
     # Seed initial seen IDs from existing history if none provided

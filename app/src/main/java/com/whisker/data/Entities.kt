@@ -29,7 +29,8 @@ data class Message(
     val filePath: String? = null,
     val isIncoming: Boolean = true,
     val isRead: Boolean = false,
-    val previousMessageId: String? = null
+    val previousMessageId: String? = null,
+    val isEncrypted: Boolean = false
 )
 
 @Entity(tableName = "call_logs")
