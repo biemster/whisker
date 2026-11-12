@@ -2953,8 +2953,19 @@ class GatewayNetworkManager(private val context: Context, private val repository
     }
 
     private var incomingCallWakeLock: android.os.PowerManager.WakeLock? = null
+    private var activeRingtone: android.media.Ringtone? = null
 
     fun cancelCallNotification() {
+        try {
+            activeRingtone?.let {
+                if (it.isPlaying) {
+                    it.stop()
+                }
+            }
+            activeRingtone = null
+        } catch (e: Exception) {
+            Log.e("GatewayNetworkManager", "Error stopping active ringtone", e)
+        }
         try {
             val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.cancel(1002)
@@ -3270,7 +3281,9 @@ class GatewayNetworkManager(private val context: Context, private val repository
         // Play sound programmatically to ensure immediate reaction in foreground as well!
         if (CompanionRegistry.isAppInForeground) {
             try {
+                activeRingtone?.stop()
                 val r = RingtoneManager.getRingtone(context, soundUri)
+                activeRingtone = r
                 r.play()
             } catch (e: Exception) {
                 Log.e("GatewayNetworkManager", "Error playing ringtone programmatically", e)

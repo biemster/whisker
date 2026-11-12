@@ -567,6 +567,9 @@
                     if (audioVis) audioVis.classList.add('hidden');
                     if (webCamBtn) webCamBtn.classList.remove('hidden');
                     if (webExpandBtn) webExpandBtn.classList.remove('hidden');
+                    if (localVid) localVid.classList.remove('hidden');
+                    if (remoteVid) remoteVid.classList.remove('hidden');
+                    if (placeholder) placeholder.classList.add('hidden');
                 } else {
                     // Audio-only mode: hide video elements, show audio visualizer
                     if (remoteVid) remoteVid.classList.add('hidden');
@@ -1416,7 +1419,13 @@
                 }
                 document.getElementById('callDuration').innerText = "CALL ACTIVE";
                 isCallActive = true;
-                setCallLayoutActive(true);
+                const isVideoCall = payload.video !== false;
+                setCallLayoutActive(true, isVideoCall);
+                const localVid = document.getElementById('localVideo');
+                if (localVid && isVideoCall) localVid.play().catch(e => console.warn("localVid play error", e));
+                const remoteVid = document.getElementById('remoteVideo');
+                if (remoteVid && isVideoCall) remoteVid.play().catch(e => console.warn("remoteVid play error", e));
+
                 if (window.pc && payload.sdp) {
                     window.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }))
                         .then(() => flushPendingCandidates())
@@ -1889,6 +1898,7 @@
             }
             document.getElementById('callDuration').innerText = isDirectCall ? "DIRECT CALLING (10s)..." : "CONNECTING...";
             
+            pendingCandidates = [];
             let localStream;
             try {
                 localStream = await acquireLocalMediaStream(isVideo, clientName || "Web Client");
@@ -1902,7 +1912,10 @@
             }
             window.currentLocalStream = localStream;
             const localVid = document.getElementById('localVideo');
-            if (localVid) localVid.srcObject = localStream;
+            if (localVid && isVideo) {
+                localVid.srcObject = localStream;
+                localVid.play().catch(e => console.warn("localVid play error", e));
+            }
 
             const rtcConfig = {
                 iceServers: [
@@ -1941,11 +1954,17 @@
 
             pc.ontrack = (event) => {
                 const remoteVid = document.getElementById('remoteVideo');
-                if (remoteVid) {
+                if (remoteVid && isVideo) {
                     if (event.streams && event.streams[0]) {
                         remoteVid.srcObject = event.streams[0];
+                    } else if (event.track) {
+                        if (!remoteVid.srcObject) {
+                            remoteVid.srcObject = new MediaStream();
+                        }
+                        remoteVid.srcObject.addTrack(event.track);
                     }
                     remoteVid.classList.remove('hidden');
+                    remoteVid.play().catch(e => console.warn("remoteVid play error", e));
                 }
                 const placeholder = document.getElementById('videoPlaceholder');
                 if (placeholder) placeholder.classList.add('hidden');
@@ -2220,7 +2239,10 @@
             let localStream = await acquireLocalMediaStream(isVideo, clientName || "Web Client");
             window.currentLocalStream = localStream;
             const localVid = document.getElementById('localVideo');
-            if (localVid) localVid.srcObject = localStream;
+            if (localVid && isVideo) {
+                localVid.srcObject = localStream;
+                localVid.play().catch(e => console.warn("localVid play error", e));
+            }
 
             const rtcConfig = {
                 iceServers: [
@@ -2256,11 +2278,17 @@
 
             pc.ontrack = (event) => {
                 const remoteVid = document.getElementById('remoteVideo');
-                if (remoteVid) {
+                if (remoteVid && isVideo) {
                     if (event.streams && event.streams[0]) {
                         remoteVid.srcObject = event.streams[0];
+                    } else if (event.track) {
+                        if (!remoteVid.srcObject) {
+                            remoteVid.srcObject = new MediaStream();
+                        }
+                        remoteVid.srcObject.addTrack(event.track);
                     }
                     remoteVid.classList.remove('hidden');
+                    remoteVid.play().catch(e => console.warn("remoteVid play error", e));
                 }
                 const placeholder = document.getElementById('videoPlaceholder');
                 if (placeholder) placeholder.classList.add('hidden');
