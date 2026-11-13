@@ -33,7 +33,10 @@ from whisker.crypto import (
     encrypt_payload,
     decrypt_payload,
     save_secret_key,
-    get_secret_filename
+    get_secret_filename,
+    generate_keypair,
+    load_secret_key,
+    get_public_key_b64,
 )
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -383,13 +386,22 @@ def handle_init(args: dict) -> dict:
     else:
         raise ValueError("Invalid invite URL format. Expected: http://server:3000/invite/CODE")
 
-    temp_user = (username or '').strip() or 'mcp_agent'
-    temp_server = (server_name or '').strip() or 'server'
-    c_priv, c_pub = load_or_create_client_key(temp_user, temp_server)
+    explicit_user = (username or '').strip()
+    explicit_server = (server_name or '').strip()
+    c_priv = None
+    c_pub = None
+    if explicit_user and explicit_server:
+        existing_sec_path = get_secret_filename(explicit_user, explicit_server)
+        loaded_priv = load_secret_key(existing_sec_path)
+        if loaded_priv:
+            c_priv = loaded_priv
+            c_pub = get_public_key_b64(c_priv)
+    if c_priv is None or c_pub is None:
+        c_priv, c_pub = generate_keypair()
 
     req_payload = {"action": "claim_invite", "code": code, "client_type": "MCP", "public_key": c_pub}
-    if username and str(username).strip():
-        req_payload["name"] = str(username).strip()
+    if explicit_user:
+        req_payload["name"] = explicit_user
 
     req_data = json.dumps(req_payload).encode('utf-8')
     req = urllib.request.Request(

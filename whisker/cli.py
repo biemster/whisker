@@ -14,7 +14,17 @@ if __package__ is None or __package__ == '':
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from whisker.server import run_server
-from whisker.crypto import load_or_create_client_key, derive_shared_secret, encrypt_payload, decrypt_payload, get_secret_filename
+from whisker.crypto import (
+    load_or_create_client_key,
+    derive_shared_secret,
+    encrypt_payload,
+    decrypt_payload,
+    get_secret_filename,
+    generate_keypair,
+    load_secret_key,
+    save_secret_key,
+    get_public_key_b64,
+)
 try:
     from whisker.webrtc_manager import WhiskerWebRTCSession
 except Exception:
@@ -333,13 +343,23 @@ def do_init(invite_url, username=None, server_name=None, custom_db=None):
                 print("Invalid invite URL format. Expected: http://server:3000/invite/CODE or http://server:3000?code=CODE")
                 sys.exit(1)
 
-        temp_user = (username or '').strip() or 'cli'
-        temp_server = (server_name or '').strip() or 'server'
-        c_priv, c_pub = load_or_create_client_key(temp_user, temp_server)
+        # Resolve keypair in memory first (or reuse existing profile key ONLY if both username and server_name were explicitly specified)
+        explicit_user = (username or '').strip()
+        explicit_server = (server_name or '').strip()
+        c_priv = None
+        c_pub = None
+        if explicit_user and explicit_server:
+            existing_sec_path = get_secret_filename(explicit_user, explicit_server)
+            loaded_priv = load_secret_key(existing_sec_path)
+            if loaded_priv:
+                c_priv = loaded_priv
+                c_pub = get_public_key_b64(c_priv)
+        if c_priv is None or c_pub is None:
+            c_priv, c_pub = generate_keypair()
 
         req_payload = {"action": "claim_invite", "code": code, "client_type": "CLI", "public_key": c_pub}
-        if username and str(username).strip():
-            req_payload["name"] = str(username).strip()
+        if explicit_user:
+            req_payload["name"] = explicit_user
 
         req_data = json.dumps(req_payload).encode('utf-8')
         req = urllib.request.Request(f"{server_url}/api/public", data=req_data, headers={'Content-Type': 'application/json'})
@@ -351,10 +371,10 @@ def do_init(invite_url, username=None, server_name=None, custom_db=None):
 
             uuid = res_data.get('uuid') or c_pub
             token = res_data.get('token')
-            final_user = (username or '').strip() or res_data.get('name') or 'CLI Client'
+            final_user = explicit_user or res_data.get('name') or 'CLI Client'
             host_uuid = res_data.get('host_uuid', '')
             host_name = res_data.get('host_name', 'Primary Device')
-            final_server = (server_name or '').strip() or res_data.get('server_name') or res_data.get('servername')
+            final_server = explicit_server or res_data.get('server_name') or res_data.get('servername')
 
             if not final_server:
                 try:
@@ -369,7 +389,6 @@ def do_init(invite_url, username=None, server_name=None, custom_db=None):
                 print("Invalid response from server (missing uuid or token).")
                 sys.exit(1)
 
-            from whisker.crypto import save_secret_key
             sec_fn = get_secret_filename(final_user, final_server)
             save_secret_key(sec_fn, c_priv)
 
