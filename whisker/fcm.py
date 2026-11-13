@@ -30,11 +30,13 @@ def sign_rs256(private_key_pem: str, data: bytes) -> bytes:
 def b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode('utf-8').rstrip('=')
 
-def get_service_account_file():
+def get_service_account_file(db=None):
     env_json = os.environ.get('SERVICE_ACCOUNT_JSON')
     if env_json:
         try:
-            return json.loads(env_json)
+            parsed = json.loads(env_json)
+            if isinstance(parsed, dict):
+                return parsed
         except Exception:
             pass
 
@@ -42,6 +44,12 @@ def get_service_account_file():
     possible_files = [
         os.environ.get('SERVICE_ACCOUNT_PATH'),
         os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'),
+    ]
+    if db is not None and getattr(db, 'db_path', None):
+        possible_files.append(
+            os.path.join(os.path.dirname(os.path.abspath(db.db_path)), 'whisker-push-sa.json')
+        )
+    possible_files.extend([
         os.path.join(base_dir, 'whisker-push-sa.json'),
         os.path.join(os.getcwd(), 'whisker-push-sa.json'),
         'whisker-push-sa.json',
@@ -49,18 +57,70 @@ def get_service_account_file():
         'service-account.json',
         'firebase-service-account.json',
         'serviceAccountKey.json'
-    ]
+    ])
     for p in possible_files:
         if p and os.path.isfile(p):
             try:
                 with open(p, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    parsed = json.load(f)
+                    if isinstance(parsed, dict):
+                        return parsed
+            except Exception:
+                pass
+
+    if db is not None:
+        db_json = db.get_setting('service_account_json')
+        if db_json:
+            try:
+                parsed = json.loads(db_json)
+                if isinstance(parsed, dict):
+                    return parsed
             except Exception:
                 pass
     return None
 
+
+def save_service_account_file(sa_data: dict, db=None) -> str:
+    if not isinstance(sa_data, dict):
+        raise ValueError("Service account payload must be a JSON object.")
+    for required_field in ('project_id', 'client_email', 'private_key'):
+        val = sa_data.get(required_field)
+        if not val or not isinstance(val, str) or not val.strip():
+            raise ValueError(f"Service account JSON must contain a valid '{required_field}'.")
+
+    json_str = json.dumps(sa_data, indent=2)
+    saved_to_db = False
+    if db is not None:
+        db.set_setting('service_account_json', json_str)
+        saved_to_db = True
+
+    target_path = os.environ.get('SERVICE_ACCOUNT_PATH')
+    if not target_path:
+        if db is not None and getattr(db, 'db_path', None):
+            target_path = os.path.join(os.path.dirname(os.path.abspath(db.db_path)), 'whisker-push-sa.json')
+        else:
+            target_path = os.path.join(os.getcwd(), 'whisker-push-sa.json')
+
+    try:
+        parent_dir = os.path.dirname(os.path.abspath(target_path))
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        with open(target_path, 'w', encoding='utf-8') as f:
+            f.write(json_str)
+    except OSError:
+        if not saved_to_db:
+            raise
+
+    return target_path
+
+
 class FCMManager:
-    def __init__(self):
+    def __init__(self, db=None):
+        self.db = db
+        self._cached_token = None
+        self._token_expiry = 0
+
+    def clear_cache(self):
         self._cached_token = None
         self._token_expiry = 0
 
@@ -108,7 +168,7 @@ class FCMManager:
             print(f"[Push Notification] Skipping FCM tickle for event '{event_type}'{user_label}: No valid pushToken registered.")
             return False
 
-        sa = get_service_account_file()
+        sa = get_service_account_file(self.db)
         if not sa:
             print(f"[Push Notification] Skipping FCM tickle for event '{event_type}'{user_label}: Service account file not found.")
             return False

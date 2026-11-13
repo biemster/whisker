@@ -13,7 +13,7 @@ from socketserver import ThreadingMixIn
 
 import uuid
 from whisker.db import DatabaseManager
-from whisker.fcm import FCMManager, get_service_account_file
+from whisker.fcm import FCMManager, get_service_account_file, save_service_account_file
 
 def sanitize_name(name: str) -> str:
     if not name:
@@ -60,8 +60,31 @@ def save_uploaded_file(db, receiver_username, sender_username, original_filename
     rel_path = f"{rec_user}/{snd_user}/{now_folder}/{safe_filename}"
     return full_path, rel_path, safe_filename, len(file_bytes)
 
-def get_waiting_html():
-    return """<!DOCTYPE html>
+def get_waiting_html(initialized=False, sa_configured=False, project_id=None):
+    pairing_hidden_cls = " hidden" if initialized else ""
+    sa_upload_hidden_cls = " hidden" if sa_configured else ""
+    sa_done_hidden_cls = "" if sa_configured else " hidden"
+
+    if initialized and not sa_configured:
+        subtitle_text = "Push Service Account Required"
+        footer_text = "Mobile app paired. Waiting for Push Service Account JSON..."
+    elif not initialized and sa_configured:
+        subtitle_text = "Device Link Pending Setup"
+        footer_text = "Push Service Account configured. Waiting for mobile app pairing..."
+    else:
+        subtitle_text = "Initial Setup Pending"
+        footer_text = "Waiting for mobile pairing and Push Service Account..."
+
+    if sa_configured:
+        badge_cls = "text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800"
+        badge_text = f"Active ({project_id})" if project_id else "Active"
+        configured_proj_text = f"Push notifications configured for project <code class='text-emerald-300 font-mono'>{project_id}</code>." if project_id else "Push Service Account JSON is configured and stored."
+    else:
+        badge_cls = "text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-950/60 text-amber-400 border border-amber-800/50"
+        badge_text = "Not Configured"
+        configured_proj_text = "Push Service Account JSON is configured and stored."
+
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -69,21 +92,21 @@ def get_waiting_html():
     <title>🐯 Whisker Setup</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body {
+        body {{
             background-color: #0b0f19;
             color: #f3f4f6;
             font-family: system-ui, -apple-system, sans-serif;
-        }
-        .glow-cyan {
+        }}
+        .glow-cyan {{
             box-shadow: 0 0 25px rgba(6, 182, 212, 0.4);
-        }
-        .pulse-ring {
+        }}
+        .pulse-ring {{
             animation: pulse-glow 2s infinite;
-        }
-        @keyframes pulse-glow {
-            0%, 100% { transform: scale(1); opacity: 0.6; }
-            50% { transform: scale(1.1); opacity: 1; }
-        }
+        }}
+        @keyframes pulse-glow {{
+            0%, 100% {{ transform: scale(1); opacity: 0.6; }}
+            50% {{ transform: scale(1.1); opacity: 1; }}
+        }}
     </style>
 </head>
 <body class="flex flex-col min-h-screen items-center justify-center p-4">
@@ -97,12 +120,19 @@ def get_waiting_html():
         
         <div class="space-y-2">
             <h1 class="text-2xl font-black text-white tracking-tight">Whisker Home Server</h1>
-            <p class="text-sm text-cyan-400 font-medium">Device Link Pending Setup</p>
+            <p id="setupSubtitle" class="text-sm text-cyan-400 font-medium">{subtitle_text}</p>
         </div>
 
-        <div class="p-4 rounded-2xl bg-gray-950 border border-gray-850 text-left space-y-3">
+        <div id="pairingCard" class="p-4 rounded-2xl bg-gray-950 border border-gray-850 text-left space-y-3{pairing_hidden_cls}">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-2">
+                    <span class="text-base">📱</span>
+                    <span class="text-xs font-bold text-gray-200 uppercase tracking-wider">Mobile App Pairing</span>
+                </div>
+                <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-950/60 text-amber-400 border border-amber-800/50">Pending</span>
+            </div>
             <p class="text-xs text-gray-400 leading-relaxed">
-                As long as the local database is not initialized, the web client is waiting for the mobile app to make its first connection.
+                Pair your primary Whisker mobile app to initialize this home server. You may complete this before or after uploading the Push Service Account JSON below.
             </p>
             <div class="border-t border-gray-800 pt-3 space-y-2">
                 <span class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Quick Instructions:</span>
@@ -119,117 +149,162 @@ def get_waiting_html():
         </div>
 
         <!-- Service Account Upload Card -->
-        <div class="p-4 rounded-2xl bg-gray-950 border border-gray-800 text-left space-y-3">
+        <div id="saCard" class="p-4 rounded-2xl bg-gray-950 border border-gray-800 text-left space-y-3">
             <div class="flex items-center justify-between">
                 <div class="flex items-center space-x-2">
                     <span class="text-base">🔑</span>
                     <span class="text-xs font-bold text-gray-200 uppercase tracking-wider">Push Service Account</span>
                 </div>
-                <span id="saBadge" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-gray-800 text-gray-400">Checking...</span>
+                <span id="saBadge" class="{badge_cls}">{badge_text}</span>
             </div>
-            <p class="text-xs text-gray-400 leading-relaxed">
-                Upload your Firebase Service Account JSON (<code class="text-cyan-400 font-mono">whisker-push-sa.json</code>) so this home server can wake sleeping mobile apps via FCM.
-            </p>
-            <div id="uploadDropzone" onclick="document.getElementById('saFileInput').click()" class="border border-dashed border-gray-700 hover:border-cyan-500 bg-gray-900/50 rounded-xl p-4 text-center cursor-pointer transition-colors space-y-1">
-                <input type="file" id="saFileInput" accept=".json,application/json" class="hidden" />
-                <div class="text-xl">📁</div>
-                <div class="text-xs text-gray-300 font-medium" id="uploadLabel">Click or drop <span class="text-cyan-400 font-mono">whisker-push-sa.json</span> here</div>
-                <div class="text-[10px] text-gray-500">JSON credentials will be stored alongside the home server</div>
+            <div id="saUploadSection" class="space-y-3{sa_upload_hidden_cls}">
+                <p class="text-xs text-gray-400 leading-relaxed">
+                    Upload your Firebase Service Account JSON (<code class="text-cyan-400 font-mono">whisker-push-sa.json</code>) so this home server can wake sleeping mobile apps via FCM.
+                </p>
+                <div id="uploadDropzone" onclick="document.getElementById('saFileInput').click()" class="border border-dashed border-gray-700 hover:border-cyan-500 bg-gray-900/50 rounded-xl p-4 text-center cursor-pointer transition-colors space-y-1">
+                    <input type="file" id="saFileInput" accept=".json,application/json" class="hidden" />
+                    <div class="text-xl">📁</div>
+                    <div class="text-xs text-gray-300 font-medium" id="uploadLabel">Click or drop <span class="text-cyan-400 font-mono">whisker-push-sa.json</span> here</div>
+                    <div class="text-[10px] text-gray-500">JSON credentials will be stored securely on the home server</div>
+                </div>
+            </div>
+            <div id="saConfiguredSection" class="text-xs py-2.5 px-3 rounded-xl bg-emerald-950/60 text-emerald-300 border border-emerald-800/70{sa_done_hidden_cls}">
+                ✅ <span id="saConfiguredText">{configured_proj_text}</span>
             </div>
             <div id="uploadStatus" class="hidden text-xs py-2 px-3 rounded-lg font-mono"></div>
         </div>
 
-        <div class="flex items-center justify-center space-x-2 text-xs text-gray-400 font-mono bg-gray-950/50 py-2 rounded-xl">
-            <span class="w-2 h-2 rounded-full bg-yellow-500 animate-pulse"></span>
-            <span>Waiting for first contact...</span>
+        <div class="flex items-center justify-center space-x-2 text-xs text-gray-400 font-mono bg-gray-950/50 py-2 px-3 rounded-xl">
+            <span class="w-2 h-2 rounded-full bg-yellow-500 animate-pulse shrink-0"></span>
+            <span id="waitingFooterText">{footer_text}</span>
         </div>
     </div>
 
     <script>
         document.getElementById('serverAddress').innerText = window.location.origin;
 
-        async function checkStatus() {
-            try {
+        async function checkStatus() {{
+            try {{
                 const res = await fetch('/api/public');
                 const data = await res.json();
-                if (data && data.initialized) {
+                if (!data) return;
+
+                const isInit = !!data.initialized;
+                const isSaConfigured = !!data.sa_configured;
+
+                if (isInit && isSaConfigured) {{
                     window.location.reload();
                     return;
-                }
+                }}
+
+                const pairingCard = document.getElementById('pairingCard');
+                const saUploadSection = document.getElementById('saUploadSection');
+                const saConfiguredSection = document.getElementById('saConfiguredSection');
+                const saConfiguredText = document.getElementById('saConfiguredText');
                 const badge = document.getElementById('saBadge');
-                if (data && data.push_configured) {
+                const subtitle = document.getElementById('setupSubtitle');
+                const footer = document.getElementById('waitingFooterText');
+
+                if (isInit) {{
+                    pairingCard.classList.add('hidden');
+                }} else {{
+                    pairingCard.classList.remove('hidden');
+                }}
+
+                if (isSaConfigured) {{
                     badge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800';
-                    badge.innerText = data.project_id ? `Active (${data.project_id})` : 'Active';
-                } else {
+                    badge.innerText = data.project_id ? `Active (${{data.project_id}})` : 'Active';
+                    saUploadSection.classList.add('hidden');
+                    saConfiguredSection.classList.remove('hidden');
+                    saConfiguredText.innerText = data.project_id
+                        ? `Push notifications configured for project ${{data.project_id}}.`
+                        : 'Push Service Account JSON is configured and stored.';
+                }} else {{
                     badge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-950/60 text-amber-400 border border-amber-800/50';
                     badge.innerText = 'Not Configured';
-                }
-            } catch (e) {}
-        }
+                    saUploadSection.classList.remove('hidden');
+                    saConfiguredSection.classList.add('hidden');
+                }}
+
+                if (isInit && !isSaConfigured) {{
+                    subtitle.innerText = 'Push Service Account Required';
+                    footer.innerText = 'Mobile app paired. Waiting for Push Service Account JSON...';
+                }} else if (!isInit && isSaConfigured) {{
+                    subtitle.innerText = 'Device Link Pending Setup';
+                    footer.innerText = 'Push Service Account configured. Waiting for mobile app pairing...';
+                }} else {{
+                    subtitle.innerText = 'Initial Setup Pending';
+                    footer.innerText = 'Waiting for mobile pairing and Push Service Account...';
+                }}
+            }} catch (e) {{}}
+        }}
 
         const dropzone = document.getElementById('uploadDropzone');
         const fileInput = document.getElementById('saFileInput');
         const statusDiv = document.getElementById('uploadStatus');
 
-        ['dragenter', 'dragover'].forEach(name => {
-            dropzone.addEventListener(name, (e) => {
+        ['dragenter', 'dragover'].forEach(name => {{
+            dropzone.addEventListener(name, (e) => {{
                 e.preventDefault();
                 dropzone.classList.add('border-cyan-400', 'bg-cyan-950/20');
-            }, false);
-        });
+            }}, false);
+        }});
 
-        ['dragleave', 'drop'].forEach(name => {
-            dropzone.addEventListener(name, (e) => {
+        ['dragleave', 'drop'].forEach(name => {{
+            dropzone.addEventListener(name, (e) => {{
                 e.preventDefault();
                 dropzone.classList.remove('border-cyan-400', 'bg-cyan-950/20');
-            }, false);
-        });
+            }}, false);
+        }});
 
-        dropzone.addEventListener('drop', (e) => {
+        dropzone.addEventListener('drop', (e) => {{
             const dt = e.dataTransfer;
-            if (dt && dt.files && dt.files.length > 0) {
+            if (dt && dt.files && dt.files.length > 0) {{
                 handleFile(dt.files[0]);
-            }
-        });
+            }}
+        }});
 
-        fileInput.addEventListener('change', (e) => {
-            if (fileInput.files && fileInput.files.length > 0) {
+        fileInput.addEventListener('change', (e) => {{
+            if (fileInput.files && fileInput.files.length > 0) {{
                 handleFile(fileInput.files[0]);
-            }
-        });
+            }}
+        }});
 
-        async function handleFile(file) {
+        async function handleFile(file) {{
             statusDiv.className = 'text-xs py-2 px-3 rounded-lg font-mono bg-gray-800 text-gray-300 block';
-            statusDiv.innerText = `Uploading ${file.name}...`;
-            try {
+            statusDiv.innerText = `Uploading ${{file.name}}...`;
+            try {{
                 const text = await file.text();
                 let parsed;
-                try {
+                try {{
                     parsed = JSON.parse(text);
-                } catch (pe) {
+                }} catch (pe) {{
                     throw new Error("Selected file is not valid JSON.");
-                }
-                if (!parsed.project_id) {
-                    throw new Error("Service account JSON must contain 'project_id'.");
-                }
-                const res = await fetch('/api/host', {
+                }}
+                if (!parsed || typeof parsed !== 'object') {{
+                    throw new Error("Service account file must be a JSON object.");
+                }}
+                if (!parsed.project_id || !parsed.client_email || !parsed.private_key) {{
+                    throw new Error("Service account JSON must contain 'project_id', 'client_email', and 'private_key'.");
+                }}
+                const res = await fetch('/api/host', {{
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ action: 'upload_sa', ...parsed })
-                });
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ action: 'upload_sa', service_account: parsed }})
+                }});
                 const result = await res.json();
-                if (res.ok && result.success) {
+                if (res.ok && result.success) {{
                     statusDiv.className = 'text-xs py-2 px-3 rounded-lg font-mono bg-emerald-950/80 text-emerald-300 border border-emerald-800 block';
-                    statusDiv.innerText = `✅ Service account configured (${result.project_id || 'saved'})`;
-                    checkStatus();
-                } else {
+                    statusDiv.innerText = `✅ Service account configured (${{result.project_id || 'saved'}})`;
+                    await checkStatus();
+                }} else {{
                     throw new Error(result.error || 'Failed to upload service account');
-                }
-            } catch (err) {
+                }}
+            }} catch (err) {{
                 statusDiv.className = 'text-xs py-2 px-3 rounded-lg font-mono bg-rose-950/80 text-rose-300 border border-rose-800 block';
-                statusDiv.innerText = `❌ ${err.message}`;
-            }
-        }
+                statusDiv.innerText = `❌ ${{err.message}}`;
+            }}
+        }}
 
         checkStatus();
         setInterval(checkStatus, 3000);
@@ -471,7 +546,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                 print(f"[Whisker Server] FCM tickle notification error: {e}")
 
     def _get_fcm_config_and_hash(self):
-        sa = get_service_account_file()
+        sa = get_service_account_file(self.db)
         fcm_key = self.db.get_setting('fcm_api_key') or "" if self.db else ""
         s_name = (self.db.get_setting('server_name') if self.db else None) or getattr(WhiskerServerHandler, 'server_name', 'Whisker Home Server')
         if sa:
@@ -632,7 +707,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         s_name = self.db.get_setting('server_name') or getattr(WhiskerServerHandler, 'server_name', 'Whisker Home Server')
         all_hosts = self.db.get_hosts()
         admin_host = self.db.get_admin_host()
-        sa = get_service_account_file()
+        sa = get_service_account_file(self.db)
         push_configured = any(
             h.get('push_token') and not h['push_token'].startswith('device-push-token-') and not h['push_token'].startswith('mock-')
             for h in all_hosts
@@ -662,6 +737,7 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
         return {
             "status": "ok",
             "initialized": self._is_initialized(),
+            "sa_configured": bool(sa),
             "server_name": s_name,
             "servername": s_name,
             "admin_host": admin_host.get("username") if admin_host else None,
@@ -943,8 +1019,16 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
 
         # Static Portal Router: / or /index.html or /invite/<code>
         if path in ['/', '/index.html'] or path.startswith('/invite/'):
-            if not self._is_initialized():
-                return self._send_html(get_waiting_html())
+            sa = get_service_account_file(self.db)
+            is_init = self._is_initialized()
+            if not is_init or not sa:
+                return self._send_html(
+                    get_waiting_html(
+                        initialized=is_init,
+                        sa_configured=bool(sa),
+                        project_id=sa.get("project_id") if sa else None
+                    )
+                )
 
             html_str = self._get_index_html()
             if path.startswith('/invite/'):
@@ -1243,8 +1327,56 @@ class WhiskerServerHandler(BaseHTTPRequestHandler):
                     action = 'response'
                 elif 'fcm_hash' in body:
                     action = 'sync'
+                elif 'project_id' in body and 'client_email' in body and 'private_key' in body:
+                    action = 'upload_sa'
                 else:
                     return self._send_json({"error": "Missing action in request body"}, 400)
+
+            # FCM Service Account JSON upload (allowed both before and after initial pairing)
+            if action in ['upload_sa', 'upload_service_account']:
+                existing_sa = get_service_account_file(self.db)
+                if existing_sa:
+                    is_authorized = self._is_admin_authenticated()
+                    if not is_authorized:
+                        token = self._get_auth_token(body)
+                        if token:
+                            for h in self.db.get_hosts():
+                                if h.get('pin_token') == token and h.get('status') == 'APPROVED' and h.get('is_admin', 0) == 1:
+                                    is_authorized = True
+                                    break
+                    if not is_authorized:
+                        return self._send_json(
+                            {"error": "Service account is already configured. Admin authentication required to update it."},
+                            403
+                        )
+
+                raw_sa = body.get('service_account')
+                if isinstance(raw_sa, str):
+                    try:
+                        raw_sa = json.loads(raw_sa)
+                    except Exception:
+                        return self._send_json({"error": "Invalid JSON in service_account"}, 400)
+                if isinstance(raw_sa, dict):
+                    sa_data = raw_sa
+                else:
+                    sa_data = {k: v for k, v in body.items() if k not in ('action', 'type', 'token', 'pin_token')}
+
+                try:
+                    saved_path = save_service_account_file(sa_data, db=self.db)
+                except ValueError as ve:
+                    return self._send_json({"error": str(ve)}, 400)
+                except Exception as e:
+                    return self._send_json({"error": f"Failed to save service account: {e}"}, 500)
+
+                if self.fcm:
+                    self.fcm.clear_cache()
+
+                print(f"🔑 [Whisker Server] FCM Service Account configured for project '{sa_data.get('project_id')}' ({saved_path})")
+                return self._send_json({
+                    "status": "ok",
+                    "success": True,
+                    "project_id": sa_data.get("project_id")
+                })
 
             # Mobile app host registration / pairing (incorporating legacy /api/register_mobile into /api/host)
             if action in ['register_mobile', 'register']:
@@ -2288,7 +2420,7 @@ def run_server(port=3000, db_path=None, server_name=None, admin_password=None):
         db_path = f"whisker_server_{sanitize_name(effective_server_name)}.db"
 
     db = DatabaseManager(db_path)
-    fcm = FCMManager()
+    fcm = FCMManager(db=db)
 
     db.set_setting('server_name', effective_server_name)
     WhiskerServerHandler.server_name = effective_server_name
@@ -2327,7 +2459,7 @@ def run_server(port=3000, db_path=None, server_name=None, admin_password=None):
     server_address = ('', port)
     httpd = ThreadedHTTPServer(server_address, WhiskerServerHandler)
 
-    sa_status = "FOUND (FCM HTTP v1 Active)" if get_service_account_file() else "NOT FOUND (Run 'whisker setup-fcm' to create)"
+    sa_status = "FOUND (FCM HTTP v1 Active)" if get_service_account_file(db) else "NOT FOUND (Upload via web UI or run 'whisker setup-fcm')"
 
     print("==================================================================")
     print(" 🐱 WHISKER HOME SERVER ACTIVE (Python Edition)")
