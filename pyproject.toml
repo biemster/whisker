@@ -24,4 +24,4 @@ whisker-watch = "whisker.watcher:main"
 where = ["."]
 
 [tool.setuptools.package-data]
-whisker = ["*.html", "index.html"]
+whisker = ["*.html", "*.js"]
