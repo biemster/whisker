@@ -49,6 +49,37 @@ except ImportError:
     AIORTC_AVAILABLE = False
 
 
+def _install_aioice_safe_shutdown_patch():
+    """Prevents aioice StunProtocol.send_stun from calling sendto() on an already-closed asyncio DatagramTransport."""
+    if not AIORTC_AVAILABLE:
+        return
+    try:
+        import aioice.ice as _aioice_ice
+        orig_send_stun = getattr(_aioice_ice.StunProtocol, "send_stun", None)
+        if orig_send_stun and not getattr(orig_send_stun, "_whisker_safe_patched", False):
+            def _safe_send_stun(self, message, addr):
+                transport = getattr(self, "transport", None)
+                if (
+                    transport is None
+                    or transport.is_closing()
+                    or getattr(transport, "_sock", True) is None
+                    or getattr(transport, "_loop", True) is None
+                ):
+                    return
+                try:
+                    return orig_send_stun(self, message, addr)
+                except (AttributeError, OSError, RuntimeError):
+                    return
+
+            _safe_send_stun._whisker_safe_patched = True
+            _aioice_ice.StunProtocol.send_stun = _safe_send_stun
+    except Exception:
+        pass
+
+
+_install_aioice_safe_shutdown_patch()
+
+
 def sanitize_filename_part(name: str) -> str:
     cleaned = re.sub(r'[^\w\-]', '_', (name or '').strip())
     cleaned = re.sub(r'_+', '_', cleaned).strip('_')
@@ -109,15 +140,18 @@ class WhiskerStreamRecorder:
                 print(f"[Recorder Start Error] {e}")
 
     async def stop(self):
-        if self.recorder and self.is_recording:
+        if self.recorder and (self.is_recording or self.started):
             try:
+                was_recording = self.is_recording
                 self.is_recording = False
+                self.started = False
                 await self.recorder.stop()
-                if os.path.exists(self.filename):
-                    size_kb = os.path.getsize(self.filename) / 1024.0
-                    print(f"💾 [WebRTC Recorder] Stream successfully saved to '{self.filename}' ({size_kb:.1f} KB).")
-                else:
-                    print(f"💾 [WebRTC Recorder] Stream recording completed for '{self.filename}'.")
+                if was_recording:
+                    if os.path.exists(self.filename):
+                        size_kb = os.path.getsize(self.filename) / 1024.0
+                        print(f"💾 [WebRTC Recorder] Stream successfully saved to '{self.filename}' ({size_kb:.1f} KB).")
+                    else:
+                        print(f"💾 [WebRTC Recorder] Stream recording completed for '{self.filename}'.")
             except Exception as e:
                 print(f"[Recorder Stop Error] {e}")
 
@@ -537,11 +571,73 @@ class WhiskerWebRTCSession:
         self.loop = None
         self.tasks = []
         self.pending_candidates = []
+        self._raw_pending_candidates = []
+        self._local_tracks = []
         self.audio_proc = None
         self.audio_resampler = None
         self._remote_tracks_count = 0
         self._ended_remote_tracks_count = 0
         self._disconnected_check_task = None
+        self._hangup_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._async_stop_event = None
+        self._negotiation_lock = None
+        self._cleanup_started = False
+        self._cleanup_done = False
+        self._using_lifecycle_runner = False
+
+    def _asyncio_exception_handler(self, loop, context):
+        exc = context.get("exception")
+        msg = str(context.get("message", ""))
+        if not self.is_active or self._cleanup_started or self._stop_event.is_set():
+            if exc is not None:
+                exc_name = type(exc).__name__
+                exc_str = str(exc)
+                if (
+                    exc_name in ("InvalidStateError", "CancelledError", "ConnectionError", "BrokenPipeError", "OSError")
+                    or "RTCIceTransport is closed" in exc_str
+                    or "NoneType" in exc_str
+                ):
+                    return
+            if "Transaction.__retry" in msg or "Task exception was never retrieved" in msg:
+                return
+        loop.default_exception_handler(context)
+
+    def _ensure_loop_primitives(self, loop=None):
+        target_loop = loop or asyncio.get_running_loop()
+        self.loop = target_loop
+        try:
+            target_loop.set_exception_handler(self._asyncio_exception_handler)
+        except Exception:
+            pass
+        if self._async_stop_event is None:
+            self._async_stop_event = asyncio.Event()
+        if self._negotiation_lock is None:
+            self._negotiation_lock = asyncio.Lock()
+        if self._stop_event.is_set():
+            self._async_stop_event.set()
+
+    async def wait_until_stopped(self):
+        self._ensure_loop_primitives()
+        while self.is_active and not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._async_stop_event.wait(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+
+    def submit_ice_candidate(self, candidate_data):
+        if not candidate_data or not self.is_active or self._stop_event.is_set():
+            return
+        if self.loop and self.loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self.handle_remote_ice_candidate(candidate_data),
+                    self.loop
+                )
+                return
+            except Exception:
+                pass
+        self._raw_pending_candidates.append(candidate_data)
 
     def _start_audio_player(self):
         if self.audio_proc:
@@ -681,6 +777,7 @@ class WhiskerWebRTCSession:
             v_track = PlaceholderVideoTrack(label=label)
 
         if v_track:
+            self._local_tracks.append(v_track)
             self.pc.addTrack(v_track)
             desc = f"device/file ({video_source})" if video_source else "placeholder image stream"
             print(f"[WebRTC Video Track] Added {desc}.")
@@ -692,26 +789,30 @@ class WhiskerWebRTCSession:
             a_track = SilenceAudioTrack()
 
         if a_track:
+            self._local_tracks.append(a_track)
             self.pc.addTrack(a_track)
             desc = f"device/file ({audio_source})" if audio_source else "silence audio stream"
             print(f"[WebRTC Audio Track] Added {desc}.")
 
         @self.pc.on("icecandidate")
         def on_icecandidate(candidate):
-            if candidate:
+            if candidate and self.is_active:
                 self.send_ice_candidate(candidate)
 
         @self.pc.on("track")
         def on_track(track):
+            if not self.is_active:
+                return
             if self.should_record and self.recorder:
                 self.recorder.add_track(track)
-                asyncio.create_task(self.recorder.start())
+                rec_task = asyncio.create_task(self.recorder.start())
+                self.tasks.append(rec_task)
             task = asyncio.create_task(self._handle_remote_track(track))
             self.tasks.append(task)
 
         @self.pc.on("iceconnectionstatechange")
         def on_iceconnectionstatechange():
-            if self.pc:
+            if self.pc and self.is_active:
                 state = getattr(self.pc, "iceConnectionState", "unknown")
                 print(f"⚡ [WebRTC ICE] ICE Connection state: {state.upper()}")
                 if state in ["failed", "closed"]:
@@ -722,7 +823,7 @@ class WhiskerWebRTCSession:
 
         @self.pc.on("connectionstatechange")
         def on_connectionstatechange():
-            if self.pc:
+            if self.pc and self.is_active:
                 state = getattr(self.pc, "connectionState", "unknown")
                 print(f"⚡ [WebRTC State] Connection state: {state.upper()}")
                 if state in ["failed", "closed"]:
@@ -741,6 +842,11 @@ class WhiskerWebRTCSession:
             return False
 
         self.is_active = True
+        self._ensure_loop_primitives()
+        if self._stop_event.is_set():
+            self.is_active = False
+            return False
+
         # Filename convention: <caller>.<callee>.<unixepoch>.mp4
         self.recording_filename = generate_call_recording_filename(self.client_name, self.host_name)
         if self.should_record:
@@ -754,9 +860,17 @@ class WhiskerWebRTCSession:
         self.gui = CallGui(peer_name=self.host_name, is_video=True, on_close=lambda: self.hangup(notify_server=True))
         self.gui.start()
 
-        # Create SDP offer
-        offer = await self.pc.createOffer()
-        await self.pc.setLocalDescription(offer)
+        # Create SDP offer under negotiation lock so teardown doesn't race with signaling
+        async with self._negotiation_lock:
+            if not self.is_active or not self.pc or self._stop_event.is_set():
+                return False
+            offer = await self.pc.createOffer()
+            if not self.is_active or not self.pc or self._stop_event.is_set():
+                return False
+            await self.pc.setLocalDescription(offer)
+            if not self.is_active or not self.pc or self._stop_event.is_set():
+                return False
+            local_sdp = self.pc.localDescription.sdp
 
         # Send call offer to server - video is always True for full A/V negotiation
         payload = {
@@ -768,7 +882,7 @@ class WhiskerWebRTCSession:
             "call_id": self.call_id,
             "video": True,
             "host_uuid": self.host_uuid,
-            "sdp": self.pc.localDescription.sdp
+            "sdp": local_sdp
         }
         print(f"📞 [WebRTC Calling] Initiating Audio+Video call to '{self.host_name}' (Call ID: {self.call_id})...")
         res = self._post_json("/api/host", payload)
@@ -791,6 +905,11 @@ class WhiskerWebRTCSession:
             return False
 
         self.is_active = True
+        self._ensure_loop_primitives()
+        if self._stop_event.is_set():
+            self.is_active = False
+            return False
+
         self.host_name = peer_name
         if call_id:
             self.call_id = call_id
@@ -808,21 +927,38 @@ class WhiskerWebRTCSession:
         self.gui = CallGui(peer_name=self.host_name, is_video=True, on_close=lambda: self.hangup(notify_server=True))
         self.gui.start()
 
-        # Set remote offer SDP
-        remote_desc = RTCSessionDescription(sdp=offer_sdp, type="offer")
-        await self.pc.setRemoteDescription(remote_desc)
+        async with self._negotiation_lock:
+            if not self.is_active or not self.pc or self._stop_event.is_set():
+                return False
 
-        # Flush any queued candidates
-        while self.pending_candidates:
-            c = self.pending_candidates.pop(0)
-            try:
-                await self.pc.addIceCandidate(c)
-            except Exception:
-                pass
+            # Set remote offer SDP
+            remote_desc = RTCSessionDescription(sdp=offer_sdp, type="offer")
+            await self.pc.setRemoteDescription(remote_desc)
+            if not self.is_active or not self.pc or self._stop_event.is_set():
+                return False
 
-        # Create answer SDP
-        answer = await self.pc.createAnswer()
-        await self.pc.setLocalDescription(answer)
+            # Flush any queued candidates
+            while self._raw_pending_candidates:
+                raw_c = self._raw_pending_candidates.pop(0)
+                await self.handle_remote_ice_candidate(raw_c)
+            while self.pending_candidates:
+                c = self.pending_candidates.pop(0)
+                try:
+                    await self.pc.addIceCandidate(c)
+                except Exception:
+                    pass
+
+            if not self.is_active or not self.pc or self._stop_event.is_set():
+                return False
+
+            # Create answer SDP
+            answer = await self.pc.createAnswer()
+            if not self.is_active or not self.pc or self._stop_event.is_set():
+                return False
+            await self.pc.setLocalDescription(answer)
+            if not self.is_active or not self.pc or self._stop_event.is_set():
+                return False
+            local_sdp = self.pc.localDescription.sdp
 
         # Send answer to server via /api/host
         payload = {
@@ -833,29 +969,58 @@ class WhiskerWebRTCSession:
             "token": self.client_token,
             "host_uuid": self.host_uuid,
             "call_id": self.call_id,
-            "sdp": self.pc.localDescription.sdp
+            "sdp": local_sdp
         }
         print(f"📞 [WebRTC Answer] Answering Audio+Video call from '{self.host_name}' (Call ID: {self.call_id})...")
         self._post_json("/api/host", payload)
         return True
 
+    async def run_incoming_call(self, offer_sdp, peer_name="Mobile Host", is_video=True, video_source=None, audio_source=None, call_id=None):
+        """Lifecycle runner for an incoming WebRTC call on a dedicated event loop."""
+        self._using_lifecycle_runner = True
+        self.is_active = True
+        self._ensure_loop_primitives()
+        try:
+            accepted = await self.accept_incoming_call(
+                offer_sdp=offer_sdp,
+                peer_name=peer_name,
+                is_video=is_video,
+                video_source=video_source,
+                audio_source=audio_source,
+                call_id=call_id
+            )
+            if accepted and self.is_active and not self._stop_event.is_set():
+                await self.wait_until_stopped()
+        except Exception as e:
+            if self.is_active and not self._stop_event.is_set():
+                print(f"[WebRTC Call Error] {e}")
+        finally:
+            await self.async_cleanup()
+
     async def handle_remote_answer(self, answer_sdp):
         if not self.pc or not self.is_active:
             return
-        remote_desc = RTCSessionDescription(sdp=answer_sdp, type="answer")
-        await self.pc.setRemoteDescription(remote_desc)
-        print(f"✅ [WebRTC Connected] Call established with '{self.host_name}'.")
+        self._ensure_loop_primitives()
+        async with self._negotiation_lock:
+            if not self.pc or not self.is_active:
+                return
+            remote_desc = RTCSessionDescription(sdp=answer_sdp, type="answer")
+            await self.pc.setRemoteDescription(remote_desc)
+            print(f"✅ [WebRTC Connected] Call established with '{self.host_name}'.")
 
-        # Flush any queued candidates
-        while self.pending_candidates:
-            c = self.pending_candidates.pop(0)
-            try:
-                await self.pc.addIceCandidate(c)
-            except Exception:
-                pass
+            # Flush any queued candidates
+            while self._raw_pending_candidates:
+                raw_c = self._raw_pending_candidates.pop(0)
+                await self.handle_remote_ice_candidate(raw_c)
+            while self.pending_candidates:
+                c = self.pending_candidates.pop(0)
+                try:
+                    await self.pc.addIceCandidate(c)
+                except Exception:
+                    pass
 
     async def handle_remote_ice_candidate(self, candidate_data):
-        if not candidate_data:
+        if not candidate_data or not self.is_active:
             return
         try:
             cand = candidate_data
@@ -878,10 +1043,90 @@ class WhiskerWebRTCSession:
         except Exception:
             pass
 
-    def hangup(self, notify_server=False):
-        if not self.is_active:
+    async def async_cleanup(self):
+        if self._cleanup_done:
             return
+        self._cleanup_started = True
         self.is_active = False
+        self._stop_event.set()
+        current_loop = asyncio.get_running_loop()
+
+        if self._disconnected_check_task and not self._disconnected_check_task.done():
+            self._disconnected_check_task.cancel()
+            try:
+                await self._disconnected_check_task
+            except Exception:
+                pass
+            self._disconnected_check_task = None
+
+        for task in list(self.tasks):
+            if not task.done():
+                task.cancel()
+        if self.tasks:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+            self.tasks.clear()
+
+        if self.recorder and (self.recorder.is_recording or self.recorder.started):
+            rec_to_stop = self.recorder
+            self.recorder = None
+            try:
+                await rec_to_stop.stop()
+            except Exception:
+                pass
+
+        for tr in list(self._local_tracks):
+            try:
+                tr.stop()
+            except Exception:
+                pass
+        self._local_tracks.clear()
+
+        pc_to_close = self.pc
+        self.pc = None
+        if pc_to_close is not None:
+            lock = self._negotiation_lock
+            if lock is not None:
+                async with lock:
+                    try:
+                        await pc_to_close.close()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    await pc_to_close.close()
+                except Exception:
+                    pass
+
+        # Allow any in-flight aiortc/aioice callbacks (e.g., __connect / transport connection_lost)
+        # to finish cleanly while this event loop and its exception handler are still alive.
+        try:
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
+
+        cur_task = asyncio.current_task()
+        other_tasks = [t for t in asyncio.all_tasks(current_loop) if t is not cur_task]
+        for t in other_tasks:
+            if not t.done():
+                t.cancel()
+        if other_tasks:
+            await asyncio.gather(*other_tasks, return_exceptions=True)
+            for t in other_tasks:
+                if t.done() and not t.cancelled():
+                    try:
+                        t.exception()
+                    except Exception:
+                        pass
+
+        self._cleanup_done = True
+
+    def hangup(self, notify_server=False):
+        with self._hangup_lock:
+            if not self.is_active and self._stop_event.is_set():
+                return
+            self.is_active = False
+            self._stop_event.set()
+
         print(f"📴 [WebRTC Call Ended] Session with '{self.host_name}' closed.")
 
         if self.on_hangup:
@@ -912,43 +1157,33 @@ class WhiskerWebRTCSession:
             self.gui = None
 
         if self.audio_proc:
+            proc = self.audio_proc
+            self.audio_proc = None
             try:
-                if self.audio_proc.stdin:
-                    self.audio_proc.stdin.close()
-                self.audio_proc.terminate()
+                if proc.stdin:
+                    proc.stdin.close()
             except Exception:
                 pass
-            self.audio_proc = None
-
-        for task in self.tasks:
-            if not task.done():
-                task.cancel()
-        self.tasks.clear()
-
-        if self.recorder and self.recorder.is_recording:
-            rec_to_stop = self.recorder
-            self.recorder = None
-            if self.loop and self.loop.is_running():
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.0)
+            except Exception:
                 try:
-                    asyncio.run_coroutine_threadsafe(rec_to_stop.stop(), self.loop)
-                except Exception:
-                    pass
-            elif self.loop and not self.loop.is_closed():
-                try:
-                    self.loop.run_until_complete(rec_to_stop.stop())
+                    proc.kill()
                 except Exception:
                     pass
 
-        if self.pc:
-            pc_to_close = self.pc
-            self.pc = None
-            if self.loop and self.loop.is_running():
+        if self.loop:
+            if self.loop.is_running():
                 try:
-                    asyncio.run_coroutine_threadsafe(pc_to_close.close(), self.loop)
+                    if self._async_stop_event is not None:
+                        self.loop.call_soon_threadsafe(self._async_stop_event.set)
+                    if not self._using_lifecycle_runner:
+                        asyncio.run_coroutine_threadsafe(self.async_cleanup(), self.loop)
                 except Exception:
                     pass
-            elif self.loop and not self.loop.is_closed():
+            elif not self.loop.is_closed() and not self._cleanup_done:
                 try:
-                    self.loop.run_until_complete(pc_to_close.close())
+                    self.loop.run_until_complete(self.async_cleanup())
                 except Exception:
                     pass

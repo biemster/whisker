@@ -623,10 +623,10 @@ def do_call(contact=None, username=None, server_name=None, video_source=None, au
                                     sdp = inner_payload.get('sdp') or raw_data.get('sdp')
                                     if sdp and session.is_active and loop.is_running():
                                         asyncio.run_coroutine_threadsafe(session.handle_remote_answer(sdp), loop)
-                                elif is_candidate and session.is_active and loop.is_running():
+                                elif is_candidate and session.is_active:
                                     cand = inner_payload.get('candidate') or raw_data.get('candidate')
                                     if cand:
-                                        asyncio.run_coroutine_threadsafe(session.handle_remote_ice_candidate(cand), loop)
+                                        session.submit_ice_candidate(cand)
                                 elif is_hangup:
                                     if session.is_active:
                                         print(f"\n📴 [{host_name} Call] Remote party ended or declined the call.")
@@ -671,14 +671,20 @@ def do_call(contact=None, username=None, server_name=None, video_source=None, au
     poller_thread = threading.Thread(target=status_poller_worker, daemon=True)
     poller_thread.start()
 
+    session._using_lifecycle_runner = True
+    loop.set_exception_handler(session._asyncio_exception_handler)
+
     async def run_call():
-        success = await session.start_outgoing_call(video_source=video_source, audio_source=audio_source)
-        if not success:
-            stop_event.set()
-            return
-        print(f"[{host_name} Call] Calling in progress... (Press Ctrl+C to end call)")
-        while session.is_active and not stop_event.is_set():
-            await asyncio.sleep(0.1)
+        try:
+            session._ensure_loop_primitives(loop)
+            success = await session.start_outgoing_call(video_source=video_source, audio_source=audio_source)
+            if not success:
+                stop_event.set()
+                return
+            print(f"[{host_name} Call] Calling in progress... (Press Ctrl+C to end call)")
+            await session.wait_until_stopped()
+        finally:
+            await session.async_cleanup()
 
     try:
         loop.run_until_complete(run_call())
@@ -688,12 +694,10 @@ def do_call(contact=None, username=None, server_name=None, video_source=None, au
         stop_event.set()
         session.hangup(notify_server=True)
         try:
-            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-            for t in pending:
-                t.cancel()
-            if pending:
-                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            loop.close()
+            if not session._cleanup_done and not loop.is_closed():
+                loop.run_until_complete(session.async_cleanup())
+            if not loop.is_closed():
+                loop.close()
         except Exception:
             pass
 
@@ -710,218 +714,224 @@ def _listen_stream_worker(target, label, video_source=None, audio_source=None, s
 
     active_call_session = None
     call_loop = None
+    call_thread = None
     processed_event_keys = set()
 
-    while True:
-        try:
-            req = urllib.request.Request(
-                url,
-                data=listen_payload,
-                headers={'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
-            )
-            with urllib.request.urlopen(req, timeout=30) as response:
-                while True:
-                    line = response.readline()
-                    if not line:
-                        break
+    try:
+        while True:
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=listen_payload,
+                    headers={'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
+                )
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    while True:
+                        line = response.readline()
+                        if not line:
+                            break
 
-                    line_str = line.decode('utf-8').strip()
-                    if line_str.startswith('data:'):
-                        data_str = line_str[5:].strip()
-                        try:
-                            raw_data = json.loads(data_str)
-                            inner_payload = raw_data.get('payload') if isinstance(raw_data.get('payload'), dict) else raw_data
-                            event_type = inner_payload.get('event') or inner_payload.get('type') or raw_data.get('event') or raw_data.get('type') or ''
+                        line_str = line.decode('utf-8').strip()
+                        if line_str.startswith('data:'):
+                            data_str = line_str[5:].strip()
+                            try:
+                                raw_data = json.loads(data_str)
+                                inner_payload = raw_data.get('payload') if isinstance(raw_data.get('payload'), dict) else raw_data
+                                event_type = inner_payload.get('event') or inner_payload.get('type') or raw_data.get('event') or raw_data.get('type') or ''
 
-                            # Deduplicate stream events
-                            evt_key = inner_payload.get('eventId') or inner_payload.get('messageId') or raw_data.get('eventId') or raw_data.get('messageId')
-                            if not evt_key:
-                                file_target_tmp = inner_payload.get('filePath') or inner_payload.get('file') or raw_data.get('filePath') or raw_data.get('file')
-                                if file_target_tmp:
-                                    evt_key = file_target_tmp
-                            if evt_key:
-                                if evt_key in processed_event_keys:
-                                    continue
-                                processed_event_keys.add(evt_key)
-                                if len(processed_event_keys) > 2000:
-                                    processed_event_keys.clear()
+                                # Deduplicate stream events
+                                evt_key = inner_payload.get('eventId') or inner_payload.get('messageId') or raw_data.get('eventId') or raw_data.get('messageId')
+                                if not evt_key:
+                                    file_target_tmp = inner_payload.get('filePath') or inner_payload.get('file') or raw_data.get('filePath') or raw_data.get('file')
+                                    if file_target_tmp:
+                                        evt_key = file_target_tmp
+                                if evt_key:
+                                    if evt_key in processed_event_keys:
+                                        continue
+                                    processed_event_keys.add(evt_key)
+                                    if len(processed_event_keys) > 2000:
+                                        processed_event_keys.clear()
 
-                            is_incoming_call = (
-                                event_type in ['webrtc_call_initiate', 'call', 'call_initiate'] or
-                                raw_data.get('type') in ['webrtc_call_initiate', 'call', 'call_initiate'] or
-                                raw_data.get('event') in ['call', 'webrtc_call_initiate'] or
-                                (bool(inner_payload.get('sdp')) and ('offer' in str(inner_payload.get('sdp')).lower() or event_type == 'call'))
-                            )
-                            is_ice_candidate = (
-                                event_type in ['webrtc_ice_candidate', 'ice_candidate'] or
-                                bool(inner_payload.get('candidate')) or
-                                bool(raw_data.get('candidate'))
-                            ) and bool(inner_payload.get('candidate') or raw_data.get('candidate'))
+                                is_incoming_call = (
+                                    event_type in ['webrtc_call_initiate', 'call', 'call_initiate'] or
+                                    raw_data.get('type') in ['webrtc_call_initiate', 'call', 'call_initiate'] or
+                                    raw_data.get('event') in ['call', 'webrtc_call_initiate'] or
+                                    (bool(inner_payload.get('sdp')) and ('offer' in str(inner_payload.get('sdp')).lower() or event_type == 'call'))
+                                )
+                                is_ice_candidate = (
+                                    event_type in ['webrtc_ice_candidate', 'ice_candidate'] or
+                                    bool(inner_payload.get('candidate')) or
+                                    bool(raw_data.get('candidate'))
+                                ) and bool(inner_payload.get('candidate') or raw_data.get('candidate'))
 
-                            is_hangup = (
-                                event_type in ['hangup', 'call_ended', 'webrtc_call_hangup', 'call_declined', 'call_rejected', 'call_cancelled', 'call_timeout'] or
-                                str(inner_payload.get('status')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'hungup'] or
-                                str(raw_data.get('status')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'hungup'] or
-                                str(inner_payload.get('reason')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'timeout', 'stale']
-                            )
+                                is_hangup = (
+                                    event_type in ['hangup', 'call_ended', 'webrtc_call_hangup', 'call_declined', 'call_rejected', 'call_cancelled', 'call_timeout'] or
+                                    str(inner_payload.get('status')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'hungup'] or
+                                    str(raw_data.get('status')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'hungup'] or
+                                    str(inner_payload.get('reason')).lower() in ['ended', 'declined', 'rejected', 'cancelled', 'timeout', 'stale']
+                                )
 
-                            if event_type in ['chat_message', 'message']:
-                                sender_val = inner_payload.get('name') or inner_payload.get('sender') or raw_data.get('name') or raw_data.get('sender') or 'sender'
-                                file_target = inner_payload.get('filePath') or inner_payload.get('file') or raw_data.get('filePath') or raw_data.get('file')
-                                file_name = inner_payload.get('fileName') or raw_data.get('fileName') or inner_payload.get('text') or 'attachment.bin'
-                                if file_target:
-                                    rec_user = sanitize_name(target.get('username') or 'client')
-                                    snd_user = sanitize_name(sender_val)
-                                    now_folder = time.strftime('%Y%m%d.%H%M%S')
-                                    base_dir = storage_dir or './downloads'
-                                    effective_dir = os.path.join(base_dir, rec_user, snd_user, now_folder)
-                                    os.makedirs(effective_dir, exist_ok=True)
-                                    safe_name = sanitize_filename(file_name)
-                                    out_path = os.path.join(effective_dir, safe_name)
-                                    try:
-                                        if file_target.startswith('data:'):
-                                            import base64
-                                            b64_part = file_target.split(',', 1)[1] if ',' in file_target else file_target
-                                            data_bytes = base64.b64decode(b64_part)
-                                            with open(out_path, 'wb') as f_out:
-                                                f_out.write(data_bytes)
-                                            print(f"\n📥 [{label} File Received] Saved '{safe_name}' ({len(data_bytes)} bytes) to '{out_path}'")
-                                        else:
-                                            if file_target.startswith('http://') or file_target.startswith('https://'):
-                                                parsed_u = urllib.parse.urlparse(file_target)
-                                                clean_path = urllib.parse.quote(urllib.parse.unquote(parsed_u.path), safe='/')
-                                                clean_query = urllib.parse.quote(urllib.parse.unquote(parsed_u.query), safe='=&/?%')
-                                                dl_url = f"{parsed_u.scheme}://{parsed_u.netloc}{clean_path}" + (f"?{clean_query}" if clean_query else "")
+                                if event_type in ['chat_message', 'message']:
+                                    sender_val = inner_payload.get('name') or inner_payload.get('sender') or raw_data.get('name') or raw_data.get('sender') or 'sender'
+                                    file_target = inner_payload.get('filePath') or inner_payload.get('file') or raw_data.get('filePath') or raw_data.get('file')
+                                    file_name = inner_payload.get('fileName') or raw_data.get('fileName') or inner_payload.get('text') or 'attachment.bin'
+                                    if file_target:
+                                        rec_user = sanitize_name(target.get('username') or 'client')
+                                        snd_user = sanitize_name(sender_val)
+                                        now_folder = time.strftime('%Y%m%d.%H%M%S')
+                                        base_dir = storage_dir or './downloads'
+                                        effective_dir = os.path.join(base_dir, rec_user, snd_user, now_folder)
+                                        os.makedirs(effective_dir, exist_ok=True)
+                                        safe_name = sanitize_filename(file_name)
+                                        out_path = os.path.join(effective_dir, safe_name)
+                                        try:
+                                            if file_target.startswith('data:'):
+                                                import base64
+                                                b64_part = file_target.split(',', 1)[1] if ',' in file_target else file_target
+                                                data_bytes = base64.b64decode(b64_part)
+                                                with open(out_path, 'wb') as f_out:
+                                                    f_out.write(data_bytes)
+                                                print(f"\n📥 [{label} File Received] Saved '{safe_name}' ({len(data_bytes)} bytes) to '{out_path}'")
                                             else:
-                                                clean_target = file_target if file_target.startswith('/') else f"/{file_target}"
-                                                if '?' in clean_target:
-                                                    p_part, q_part = clean_target.split('?', 1)
-                                                    clean_p = urllib.parse.quote(urllib.parse.unquote(p_part), safe='/')
-                                                    clean_q = urllib.parse.quote(urllib.parse.unquote(q_part), safe='=&/?%')
-                                                    dl_url = f"{server_url}{clean_p}?{clean_q}"
+                                                if file_target.startswith('http://') or file_target.startswith('https://'):
+                                                    parsed_u = urllib.parse.urlparse(file_target)
+                                                    clean_path = urllib.parse.quote(urllib.parse.unquote(parsed_u.path), safe='/')
+                                                    clean_query = urllib.parse.quote(urllib.parse.unquote(parsed_u.query), safe='=&/?%')
+                                                    dl_url = f"{parsed_u.scheme}://{parsed_u.netloc}{clean_path}" + (f"?{clean_query}" if clean_query else "")
                                                 else:
-                                                    clean_p = urllib.parse.quote(urllib.parse.unquote(clean_target), safe='/')
-                                                    dl_url = f"{server_url}{clean_p}"
+                                                    clean_target = file_target if file_target.startswith('/') else f"/{file_target}"
+                                                    if '?' in clean_target:
+                                                        p_part, q_part = clean_target.split('?', 1)
+                                                        clean_p = urllib.parse.quote(urllib.parse.unquote(p_part), safe='/')
+                                                        clean_q = urllib.parse.quote(urllib.parse.unquote(q_part), safe='=&/?%')
+                                                        dl_url = f"{server_url}{clean_p}?{clean_q}"
+                                                    else:
+                                                        clean_p = urllib.parse.quote(urllib.parse.unquote(clean_target), safe='/')
+                                                        dl_url = f"{server_url}{clean_p}"
 
-                                            dl_payload = json.dumps({'action': 'file_download', 'path': file_target, 'name': safe_name}).encode('utf-8')
-                                            dl_req = urllib.request.Request(
-                                                f"{server_url}/api/host",
-                                                data=dl_payload,
-                                                headers={'Content-Type': 'application/json'}
-                                            )
-                                            with urllib.request.urlopen(dl_req) as dl_resp:
-                                                data_bytes = dl_resp.read()
-                                            with open(out_path, 'wb') as f_out:
-                                                f_out.write(data_bytes)
-                                            print(f"\n📥 [{label} File Received] Downloaded '{safe_name}' ({len(data_bytes)} bytes) to '{out_path}'")
-                                    except Exception as dl_err:
-                                        print(f"\n⚠️ [{label}] Error saving received file '{safe_name}': {dl_err}")
-                                elif sender_val == 'phone' or sender_val != target.get('uuid'):
-                                    raw_text = inner_payload.get('text') or raw_data.get('text')
-                                    is_enc_msg = inner_payload.get('is_encrypted') or inner_payload.get('isEncrypted') or raw_data.get('is_encrypted') or raw_data.get('isEncrypted')
-                                    if is_enc_msg and raw_text:
-                                        try:
-                                            peer_key = inner_payload.get('uuid') or raw_data.get('uuid') or target.get('host_uuid')
-                                            c_priv, _ = load_or_create_client_key(target['username'], target['server_name'])
-                                            shared = derive_shared_secret(c_priv, peer_key)
-                                            dec_text = decrypt_payload(shared, raw_text)
-                                            print(f"\n[{label}] {dec_text}")
-                                        except Exception as dec_err:
-                                            print(f"\n[{label}] [Encrypted message could not be decrypted: {dec_err}]")
-                                    else:
-                                        print(f"\n[{label}] {raw_text}")
-                            elif event_type == 'call_accepted':
-                                print(f"\n[{label} Call] Host accepted the call.")
-                            elif event_type == 'call_rejected':
-                                print(f"\n[{label} Call] Host rejected the call.")
-                            elif is_incoming_call:
-                                caller_name = inner_payload.get('name') or raw_data.get('name') or host_name
-                                caller_uuid = inner_payload.get('host_uuid') or raw_data.get('host_uuid') or target.get('host_uuid') or ''
-                                is_video = inner_payload.get('video') is not False and raw_data.get('video') is not False
-                                incoming_call_id = inner_payload.get('call_id') or inner_payload.get('callId') or raw_data.get('call_id') or raw_data.get('callId')
+                                                dl_payload = json.dumps({'action': 'file_download', 'path': file_target, 'name': safe_name}).encode('utf-8')
+                                                dl_req = urllib.request.Request(
+                                                    f"{server_url}/api/host",
+                                                    data=dl_payload,
+                                                    headers={'Content-Type': 'application/json'}
+                                                )
+                                                with urllib.request.urlopen(dl_req) as dl_resp:
+                                                    data_bytes = dl_resp.read()
+                                                with open(out_path, 'wb') as f_out:
+                                                    f_out.write(data_bytes)
+                                                print(f"\n📥 [{label} File Received] Downloaded '{safe_name}' ({len(data_bytes)} bytes) to '{out_path}'")
+                                        except Exception as dl_err:
+                                            print(f"\n⚠️ [{label}] Error saving received file '{safe_name}': {dl_err}")
+                                    elif sender_val == 'phone' or sender_val != target.get('uuid'):
+                                        raw_text = inner_payload.get('text') or raw_data.get('text')
+                                        is_enc_msg = inner_payload.get('is_encrypted') or inner_payload.get('isEncrypted') or raw_data.get('is_encrypted') or raw_data.get('isEncrypted')
+                                        if is_enc_msg and raw_text:
+                                            try:
+                                                peer_key = inner_payload.get('uuid') or raw_data.get('uuid') or target.get('host_uuid')
+                                                c_priv, _ = load_or_create_client_key(target['username'], target['server_name'])
+                                                shared = derive_shared_secret(c_priv, peer_key)
+                                                dec_text = decrypt_payload(shared, raw_text)
+                                                print(f"\n[{label}] {dec_text}")
+                                            except Exception as dec_err:
+                                                print(f"\n[{label}] [Encrypted message could not be decrypted: {dec_err}]")
+                                        else:
+                                            print(f"\n[{label}] {raw_text}")
+                                elif event_type == 'call_accepted':
+                                    print(f"\n[{label} Call] Host accepted the call.")
+                                elif event_type == 'call_rejected':
+                                    print(f"\n[{label} Call] Host rejected the call.")
+                                elif is_incoming_call:
+                                    caller_name = inner_payload.get('name') or raw_data.get('name') or host_name
+                                    caller_uuid = inner_payload.get('host_uuid') or raw_data.get('host_uuid') or target.get('host_uuid') or ''
+                                    is_video = inner_payload.get('video') is not False and raw_data.get('video') is not False
+                                    incoming_call_id = inner_payload.get('call_id') or inner_payload.get('callId') or raw_data.get('call_id') or raw_data.get('callId')
 
-                                if WhiskerWebRTCSession is None:
-                                    print(f"\n📞 [{caller_name} Call] Incoming Call received. (Install aiortc, pillow, and av to enable real-time WebRTC media).")
-                                    continue
+                                    if WhiskerWebRTCSession is None:
+                                        print(f"\n📞 [{caller_name} Call] Incoming Call received. (Install aiortc, pillow, and av to enable real-time WebRTC media).")
+                                        continue
 
-                                print(f"\n📞 [{caller_name} Call] Incoming Audio+Video Call (ID: {incoming_call_id or 'new'})! Auto-accepting & opening live media...")
+                                    print(f"\n📞 [{caller_name} Call] Incoming Audio+Video Call (ID: {incoming_call_id or 'new'})! Auto-accepting & opening live media...")
 
-                                if active_call_session and active_call_session.is_active:
-                                    active_call_session.hangup()
-
-                                active_call_session = WhiskerWebRTCSession(
-                                    server_url=server_url,
-                                    client_uuid=uuid,
-                                    client_token=token,
-                                    client_name=name,
-                                    host_uuid=caller_uuid,
-                                    host_name=caller_name,
-                                    call_id=incoming_call_id,
-                                    save_streams=save_streams
-                                )
-
-                                call_loop = asyncio.new_event_loop()
-                                active_call_session.loop = call_loop
-
-                                offer_sdp = inner_payload.get('sdp') or raw_data.get('sdp') or ''
-
-                                def start_incoming_call(sess, loop_inst, sdp, cname, is_vid, v_src, a_src, cid):
-                                    asyncio.set_event_loop(loop_inst)
-                                    try:
-                                        loop_inst.run_until_complete(
-                                            sess.accept_incoming_call(
-                                                offer_sdp=sdp,
-                                                peer_name=cname,
-                                                is_video=is_vid,
-                                                video_source=v_src,
-                                                audio_source=a_src,
-                                                call_id=cid
-                                            )
-                                        )
-                                        loop_inst.run_forever()
-                                    except Exception:
-                                        pass
-                                    finally:
-                                        try:
-                                            loop_inst.close()
-                                        except Exception:
-                                            pass
-
-                                t = threading.Thread(
-                                    target=start_incoming_call,
-                                    args=(active_call_session, call_loop, offer_sdp, caller_name, is_video, video_source, audio_source, incoming_call_id),
-                                    daemon=True
-                                )
-                                t.start()
-
-                            elif is_ice_candidate:
-                                event_cid = inner_payload.get('call_id') or inner_payload.get('callId') or raw_data.get('call_id') or raw_data.get('callId')
-                                if event_cid and active_call_session and active_call_session.call_id and str(event_cid).strip() != str(active_call_session.call_id).strip():
-                                    pass
-                                elif active_call_session and call_loop and active_call_session.is_active and call_loop.is_running():
-                                    cand = inner_payload.get('candidate') or raw_data.get('candidate')
-                                    asyncio.run_coroutine_threadsafe(
-                                        active_call_session.handle_remote_ice_candidate(cand),
-                                        call_loop
-                                    )
-                            elif is_hangup:
-                                event_cid = inner_payload.get('call_id') or inner_payload.get('callId') or raw_data.get('call_id') or raw_data.get('callId')
-                                if event_cid and active_call_session and active_call_session.call_id and str(event_cid).strip() != str(active_call_session.call_id).strip():
-                                    pass
-                                else:
-                                    print(f"\n📴 [{caller_name if 'caller_name' in locals() else host_name} Call] Call ended by remote host.")
                                     if active_call_session and active_call_session.is_active:
                                         active_call_session.hangup()
+                                        if call_thread and call_thread.is_alive():
+                                            call_thread.join(timeout=2.0)
+
+                                    active_call_session = WhiskerWebRTCSession(
+                                        server_url=server_url,
+                                        client_uuid=uuid,
+                                        client_token=token,
+                                        client_name=name,
+                                        host_uuid=caller_uuid,
+                                        host_name=caller_name,
+                                        call_id=incoming_call_id,
+                                        save_streams=save_streams
+                                    )
+
+                                    call_loop = asyncio.new_event_loop()
+                                    active_call_session.loop = call_loop
+                                    active_call_session._using_lifecycle_runner = True
+                                    call_loop.set_exception_handler(active_call_session._asyncio_exception_handler)
+
+                                    offer_sdp = inner_payload.get('sdp') or raw_data.get('sdp') or ''
+
+                                    def start_incoming_call(sess, loop_inst, sdp, cname, is_vid, v_src, a_src, cid):
+                                        asyncio.set_event_loop(loop_inst)
+                                        try:
+                                            loop_inst.run_until_complete(
+                                                sess.run_incoming_call(
+                                                    offer_sdp=sdp,
+                                                    peer_name=cname,
+                                                    is_video=is_vid,
+                                                    video_source=v_src,
+                                                    audio_source=a_src,
+                                                    call_id=cid
+                                                )
+                                            )
+                                        except Exception:
+                                            pass
+                                        finally:
+                                            try:
+                                                if not loop_inst.is_closed():
+                                                    loop_inst.close()
+                                            except Exception:
+                                                pass
+
+                                    call_thread = threading.Thread(
+                                        target=start_incoming_call,
+                                        args=(active_call_session, call_loop, offer_sdp, caller_name, is_video, video_source, audio_source, incoming_call_id),
+                                        daemon=True
+                                    )
+                                    call_thread.start()
+
+                                elif is_ice_candidate:
+                                    event_cid = inner_payload.get('call_id') or inner_payload.get('callId') or raw_data.get('call_id') or raw_data.get('callId')
+                                    if event_cid and active_call_session and active_call_session.call_id and str(event_cid).strip() != str(active_call_session.call_id).strip():
+                                        pass
+                                    elif active_call_session and active_call_session.is_active:
+                                        cand = inner_payload.get('candidate') or raw_data.get('candidate')
+                                        if cand:
+                                            active_call_session.submit_ice_candidate(cand)
+                                elif is_hangup:
+                                    event_cid = inner_payload.get('call_id') or inner_payload.get('callId') or raw_data.get('call_id') or raw_data.get('callId')
+                                    if event_cid and active_call_session and active_call_session.call_id and str(event_cid).strip() != str(active_call_session.call_id).strip():
+                                        pass
+                                    else:
+                                        print(f"\n📴 [{caller_name if 'caller_name' in locals() else host_name} Call] Call ended by remote host.")
+                                        if active_call_session and active_call_session.is_active:
+                                            active_call_session.hangup(notify_server=False)
                                         active_call_session = None
-                            else:
-                                print(f"\n[{label} Event] {raw_data}")
-                        except json.JSONDecodeError:
-                            print(f"\n[{label} Raw Event] {data_str}")
-        except Exception:
-            time.sleep(1.0)
-        finally:
-            if active_call_session and active_call_session.is_active:
-                active_call_session.hangup()
+                                else:
+                                    print(f"\n[{label} Event] {raw_data}")
+                            except json.JSONDecodeError:
+                                print(f"\n[{label} Raw Event] {data_str}")
+            except Exception:
+                time.sleep(1.0)
+    finally:
+        if active_call_session and active_call_session.is_active:
+            active_call_session.hangup(notify_server=False)
+        if call_thread and call_thread.is_alive():
+            call_thread.join(timeout=2.0)
 
 
 def do_listen(contact=None, username=None, server_name=None, listen_all=False, video_source=None, audio_source=None, save_streams=False, custom_db=None, storage_dir=None):
